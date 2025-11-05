@@ -11,6 +11,7 @@ import storeRoutes from './routes/stores.js';
 import taskRoutes from './routes/tasks.js';
 import rangeRoutes from './routes/ranges.js';
 import categoryRoutes from './routes/categories.js';
+import assignmentsRouter from './routes/assignments.js';
 
 dotenv.config();
 
@@ -36,6 +37,7 @@ app.use('/api/stores', storeRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/ranges', rangeRoutes);
 app.use('/api/categories', categoryRoutes);
+app.use('/api/assignments', assignmentsRouter);
 
 const port = process.env.PORT || 5000;
 
