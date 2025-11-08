@@ -417,6 +417,42 @@ router.get('/analytics/listings-summary', requireAuth, requireRole('superadmin',
   res.json(rows);
 });
 
+// Delete a task and cascade to assignments and compatibility assignments
+router.delete('/:id', requireAuth, requireRole('superadmin', 'productadmin', 'listingadmin'), async (req, res) => {
+  try {
+    const taskId = req.params.id;
+    const task = await Task.findById(taskId);
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    // Import models for cascade delete
+    const Assignment = (await import('../models/Assignment.js')).default;
+    const CompatibilityAssignment = (await import('../models/CompatibilityAssignment.js')).default;
+
+    // Find all assignments related to this task
+    const assignments = await Assignment.find({ task: taskId });
+    const assignmentIds = assignments.map(a => a._id);
+
+    // Delete all compatibility assignments that reference these assignments
+    await CompatibilityAssignment.deleteMany({ sourceAssignment: { $in: assignmentIds } });
+
+    // Delete all compatibility assignments that reference this task directly
+    await CompatibilityAssignment.deleteMany({ task: taskId });
+
+    // Delete all assignments related to this task
+    await Assignment.deleteMany({ task: taskId });
+
+    // Delete the task itself
+    await Task.findByIdAndDelete(taskId);
+
+    res.json({ message: 'Task and all related assignments deleted successfully' });
+  } catch (e) {
+    console.error('Error deleting task:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 export default router;
 
 

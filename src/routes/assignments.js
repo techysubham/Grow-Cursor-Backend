@@ -91,6 +91,28 @@ router.get('/', requireAuth, requireRole('superadmin', 'listingadmin', 'producta
   }
 });
 
+/* -------------------- DELETE (CASCADE) -------------------- */
+// Delete an assignment and cascade delete any related compatibility assignments
+router.delete('/:id', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const doc = await Assignment.findById(id);
+    if (!doc) return res.status(404).json({ message: 'Assignment not found.' });
+
+    // Delete compatibility assignments derived from this assignment
+    const CompatibilityAssignment = (await import('../models/CompatibilityAssignment.js')).default;
+    await CompatibilityAssignment.deleteMany({ sourceAssignment: id });
+
+    // Finally delete the assignment itself
+    await Assignment.findByIdAndDelete(id);
+
+    res.json({ message: 'Assignment and related compatibility assignments deleted successfully.' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: 'Failed to delete assignment.' });
+  }
+});
+
 
 /* -------------------- LISTER FLOWS (FIXED) -------------------- */
 
