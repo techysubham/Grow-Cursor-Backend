@@ -12,8 +12,13 @@ import taskRoutes from './routes/tasks.js';
 import rangeRoutes from './routes/ranges.js';
 import categoryRoutes from './routes/categories.js';
 import subcategoryRoutes from './routes/subcategories.js';
+
 import assignmentsRouter from './routes/assignments.js';
 import compatibilityRoutes from './routes/compatibility.js';
+
+import ebayRoutes from './routes/ebay.js';
+import sellersRoutes from './routes/sellers.js';
+
 
 dotenv.config();
 
@@ -32,6 +37,8 @@ app.get('/health', (req, res) => {
   res.json({ ok: true });
 });
 
+
+
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/platforms', platformRoutes);
@@ -42,6 +49,10 @@ app.use('/api/categories', categoryRoutes);
 app.use('/api/subcategories', subcategoryRoutes);
 app.use('/api/assignments', assignmentsRouter);
 app.use('/api/compatibility', compatibilityRoutes);
+
+app.use('/api/ebay', ebayRoutes);
+app.use('/api/sellers', sellersRoutes);
+
 
 const port = process.env.PORT || 5000;
 

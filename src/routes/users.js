@@ -2,6 +2,7 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import User from '../models/User.js';
+import Seller from '../models/Seller.js';
 
 const router = Router();
 
@@ -12,7 +13,7 @@ router.post('/', requireAuth, async (req, res) => {
   if (!email || !username || !password || !newUserRole) {
     return res.status(400).json({ error: 'email, username, password, newUserRole required' });
   }
-  const allowedRoles = ['productadmin', 'listingadmin', 'lister', 'compatibilityadmin', 'compatibilityeditor'];
+  const allowedRoles = ['productadmin', 'listingadmin', 'lister', 'compatibilityadmin', 'compatibilityeditor', 'seller', 'fulfillmentadmin'];
   if (!allowedRoles.includes(newUserRole)) return res.status(400).json({ error: 'Invalid newUserRole' });
 
   // Forbidden base roles
@@ -20,9 +21,9 @@ router.post('/', requireAuth, async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  // Only superadmin can create high-level admins (productadmin, listingadmin, compatibilityadmin)
-  if (['productadmin', 'listingadmin', 'compatibilityadmin'].includes(newUserRole) && role !== 'superadmin') {
-    return res.status(403).json({ error: 'Only superadmin can create admin roles' });
+  // Only superadmin can create high-level admins (productadmin, listingadmin, compatibilityadmin, fulfillmentadmin)
+  if (['productadmin', 'listingadmin', 'compatibilityadmin', 'seller', 'fulfillmentadmin'].includes(newUserRole) && role !== 'superadmin') {
+    return res.status(403).json({ error: 'Only superadmin can create admin roles or sellers' });
   }
 
   // Listing admin can only create listers
@@ -42,7 +43,13 @@ router.post('/', requireAuth, async (req, res) => {
   const existingUsername = await User.findOne({ username });
   if (existingUsername) return res.status(409).json({ error: 'Username already in use' });
   const passwordHash = await bcrypt.hash(password, 10);
+
   const user = await User.create({ email, username, passwordHash, role: newUserRole });
+
+  // If creating a seller, also create a Seller document
+  if (newUserRole === 'seller') {
+    await Seller.create({ user: user._id, ebayMarketplaces: [] });
+  }
 
   if (role === 'superadmin') {
     // Return credentials for superadmin record-keeping

@@ -2,7 +2,13 @@ import jwt from 'jsonwebtoken';
 
 export function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  let token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  
+  // Fallback: check query param for token (e.g., for eBay OAuth redirects)
+  if (!token && req.query.token) {
+    token = req.query.token;
+  }
+  
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
