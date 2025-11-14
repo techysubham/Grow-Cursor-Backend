@@ -23,6 +23,7 @@ router.get('/eligible', requireAuth, requireRole('superadmin', 'compatibilityadm
         { path: 'createdBy', select: 'username' },
         { path: 'rangeQuantities.range', select: 'name' }
       ])
+      .select('+marketplace') // Include marketplace field
       .sort({ createdAt: -1 });
 
     // Filter for "Ebay Motors" category only
@@ -87,7 +88,7 @@ router.get('/progress', requireAuth, requireRole('superadmin', 'compatibilityadm
     const items = await CompatibilityAssignment.find(query)
       .populate([
         { path: 'task', populate: [{ path: 'sourcePlatform category subcategory', select: 'name' }] },
-        { path: 'sourceAssignment', select: 'listingPlatform store', populate: [{ path: 'listingPlatform store', select: 'name' }] },
+        { path: 'sourceAssignment', select: 'listingPlatform store marketplace', populate: [{ path: 'listingPlatform store', select: 'name' }] },
         { path: 'editor', select: 'username' },
         { path: 'admin', select: 'username' },
         { path: 'assignedRangeQuantities.range', select: 'name' },
@@ -109,7 +110,7 @@ router.get('/mine', requireAuth, requireRole('superadmin', 'compatibilityeditor'
     const items = await CompatibilityAssignment.find({ editor: me })
       .populate([
         { path: 'task', populate: [{ path: 'category subcategory', select: 'name' }] },
-        { path: 'sourceAssignment', select: 'listingPlatform store rangeQuantities quantity', populate: [{ path: 'listingPlatform store', select: 'name' }, { path: 'rangeQuantities.range', select: 'name' }] },
+        { path: 'sourceAssignment', select: 'listingPlatform store marketplace rangeQuantities quantity', populate: [{ path: 'listingPlatform store', select: 'name' }, { path: 'rangeQuantities.range', select: 'name' }] },
         { path: 'assignedRangeQuantities.range', select: 'name' },
         { path: 'completedRangeQuantities.range', select: 'name' },
       ])

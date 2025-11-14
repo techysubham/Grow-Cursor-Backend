@@ -11,6 +11,12 @@ router.post('/', requireAuth, requireRole('superadmin', 'productadmin'), async (
   try {
     // normalize legacy field names and defaults
     if (!body.supplierLink && body.link) body.supplierLink = body.link;
+    
+    // Validate marketplace
+    if (!body.marketplace) {
+      return res.status(400).json({ error: 'marketplace is required' });
+    }
+    
     // createdBy is derived from auth; date defaults if not provided
     const task = await Task.create({
       date: body.date ? new Date(body.date) : new Date(),
@@ -21,6 +27,7 @@ router.post('/', requireAuth, requireRole('superadmin', 'productadmin'), async (
       quantity: body.quantity || null,
       completedQuantity: 0,
       sourcePlatform: body.sourcePlatformId,
+      marketplace: body.marketplace,
       category: body.categoryId,
       subcategory: body.subcategoryId,
       range: body.rangeId || null,
@@ -429,6 +436,7 @@ router.delete('/:id', requireAuth, requireRole('superadmin', 'productadmin', 'li
     // Import models for cascade delete
     const Assignment = (await import('../models/Assignment.js')).default;
     const CompatibilityAssignment = (await import('../models/CompatibilityAssignment.js')).default;
+    const ListingCompletion = (await import('../models/ListingCompletion.js')).default;
 
     // Find all assignments related to this task
     const assignments = await Assignment.find({ task: taskId });
@@ -440,13 +448,19 @@ router.delete('/:id', requireAuth, requireRole('superadmin', 'productadmin', 'li
     // Delete all compatibility assignments that reference this task directly
     await CompatibilityAssignment.deleteMany({ task: taskId });
 
+    // Delete all listing completions related to this task
+    await ListingCompletion.deleteMany({ task: taskId });
+
+    // Delete all listing completions related to assignments
+    await ListingCompletion.deleteMany({ assignment: { $in: assignmentIds } });
+
     // Delete all assignments related to this task
     await Assignment.deleteMany({ task: taskId });
 
     // Delete the task itself
     await Task.findByIdAndDelete(taskId);
 
-    res.json({ message: 'Task and all related assignments deleted successfully' });
+    res.json({ message: 'Task and all related data deleted successfully' });
   } catch (e) {
     console.error('Error deleting task:', e);
     res.status(500).json({ error: e.message });

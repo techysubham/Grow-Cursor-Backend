@@ -4,7 +4,8 @@ import mongoose from 'mongoose';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import Assignment from '../models/Assignment.js';
 import Task from '../models/Task.js';
-import Range from '../models/Range.js'
+import Range from '../models/Range.js';
+import ListingCompletion from '../models/ListingCompletion.js';
 
 const IST_TZ = '+05:30';
 
@@ -21,6 +22,11 @@ router.post('/', requireAuth, requireRole('superadmin', 'listingadmin'), async (
 
     const task = await Task.findById(taskId);
     if (!task) return res.status(404).json({ message: 'Task not found.' });
+    
+    // Get marketplace from the task
+    if (!task.marketplace) {
+      return res.status(400).json({ message: 'Task does not have a marketplace assigned.' });
+    }
 
     const creatorId = (req.user && (req.user.userId || req.user.id)) || task.createdBy;
     if (!creatorId) return res.status(401).json({ message: 'Unauthorized: creator not resolved' });
@@ -31,6 +37,7 @@ router.post('/', requireAuth, requireRole('superadmin', 'listingadmin'), async (
       quantity,
       listingPlatform: listingPlatformId,
       store: storeId,
+      marketplace: task.marketplace,
       createdBy: creatorId,
       notes: notes || '',
     });
@@ -92,7 +99,7 @@ router.get('/', requireAuth, requireRole('superadmin', 'listingadmin', 'producta
 });
 
 /* -------------------- DELETE (CASCADE) -------------------- */
-// Delete an assignment and cascade delete any related compatibility assignments
+// Delete an assignment and cascade delete any related compatibility assignments and listing completions
 router.delete('/:id', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -103,10 +110,14 @@ router.delete('/:id', requireAuth, requireRole('superadmin', 'listingadmin'), as
     const CompatibilityAssignment = (await import('../models/CompatibilityAssignment.js')).default;
     await CompatibilityAssignment.deleteMany({ sourceAssignment: id });
 
+    // Delete listing completions related to this assignment
+    const ListingCompletion = (await import('../models/ListingCompletion.js')).default;
+    await ListingCompletion.deleteMany({ assignment: id });
+
     // Finally delete the assignment itself
     await Assignment.findByIdAndDelete(id);
 
-    res.json({ message: 'Assignment and related compatibility assignments deleted successfully.' });
+    res.json({ message: 'Assignment and related data deleted successfully.' });
   } catch (e) {
     console.error(e);
     res.status(500).json({ message: 'Failed to delete assignment.' });
@@ -572,12 +583,20 @@ router.post('/:id/complete-range',
         rq => String(rq.range) === String(rangeId)
       );
 
-      if (existingIndex >= 0) {
-        // Update existing
-        doc.rangeQuantities[existingIndex].quantity = quantity;
+      if (quantity === 0) {
+        // Remove the range if quantity is 0
+        if (existingIndex >= 0) {
+          doc.rangeQuantities.splice(existingIndex, 1);
+        }
       } else {
-        // Add new
-        doc.rangeQuantities.push({ range: rangeId, quantity });
+        // Update or add range
+        if (existingIndex >= 0) {
+          // Update existing
+          doc.rangeQuantities[existingIndex].quantity = quantity;
+        } else {
+          // Add new
+          doc.rangeQuantities.push({ range: rangeId, quantity });
+        }
       }
 
       // Calculate total distributed quantity
@@ -591,7 +610,48 @@ router.post('/:id/complete-range',
         doc.completedAt = new Date();
       }
 
+      // Reset completedAt if user removes ranges and falls below required quantity
+      if (totalDistributed < doc.quantity && doc.completedAt) {
+        doc.completedAt = null;
+      }
+
       await doc.save();
+
+      // Handle ListingCompletion record
+      const existingCompletion = await ListingCompletion.findOne({ assignment: doc._id });
+      
+      if (totalDistributed === 0) {
+        // Delete ListingCompletion if no ranges remain
+        if (existingCompletion) {
+          await ListingCompletion.deleteOne({ _id: existingCompletion._id });
+        }
+      } else {
+        // Update or create ListingCompletion record
+        const completionData = {
+          date: new Date(),
+          assignment: doc._id,
+          task: doc.task._id,
+          lister: doc.lister,
+          listingPlatform: doc.listingPlatform,
+          store: doc.store,
+          marketplace: doc.marketplace,
+          category: doc.task.category,
+          subcategory: doc.task.subcategory,
+          rangeCompletions: doc.rangeQuantities
+            .filter(rq => rq.quantity > 0)
+            .map(rq => ({ range: rq.range, quantity: rq.quantity })),
+          totalQuantity: totalDistributed,
+        };
+
+        if (existingCompletion) {
+          // Update existing completion record
+          Object.assign(existingCompletion, completionData);
+          await existingCompletion.save();
+        } else {
+          // Create new completion record
+          await ListingCompletion.create(completionData);
+        }
+      }
 
       const populated = await doc.populate([
         { path: 'task', populate: [{ path: 'sourcePlatform createdBy category subcategory range', select: 'name username' }] },
@@ -642,6 +702,32 @@ router.post('/:id/submit',
       doc.completedAt = new Date();
 
       await doc.save();
+
+      // Update or create ListingCompletion record
+      const existingCompletion = await ListingCompletion.findOne({ assignment: doc._id });
+      
+      const completionData = {
+        date: new Date(),
+        assignment: doc._id,
+        task: doc.task._id,
+        lister: doc.lister,
+        listingPlatform: doc.listingPlatform,
+        store: doc.store,
+        marketplace: doc.marketplace,
+        category: doc.task.category,
+        subcategory: doc.task.subcategory,
+        rangeCompletions: doc.rangeQuantities
+          .filter(rq => rq.quantity > 0)
+          .map(rq => ({ range: rq.range, quantity: rq.quantity })),
+        totalQuantity: totalDistributed,
+      };
+
+      if (existingCompletion) {
+        Object.assign(existingCompletion, completionData);
+        await existingCompletion.save();
+      } else {
+        await ListingCompletion.create(completionData);
+      }
 
       const populated = await doc.populate([
         { path: 'task', populate: [{ path: 'sourcePlatform createdBy category subcategory range', select: 'name username' }] },

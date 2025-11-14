@@ -16,6 +16,7 @@ import subcategoryRoutes from './routes/subcategories.js';
 
 import assignmentsRouter from './routes/assignments.js';
 import compatibilityRoutes from './routes/compatibility.js';
+import listingCompletionsRoutes from './routes/listingCompletions.js';
 
 import ebayRoutes from './routes/ebay.js';
 import sellersRoutes from './routes/sellers.js';
@@ -51,6 +52,7 @@ app.use('/api/categories', categoryRoutes);
 app.use('/api/subcategories', subcategoryRoutes);
 app.use('/api/assignments', assignmentsRouter);
 app.use('/api/compatibility', compatibilityRoutes);
+app.use('/api/listing-completions', listingCompletionsRoutes);
 
 app.use('/api/ebay', ebayRoutes);
 app.use('/api/sellers', sellersRoutes);

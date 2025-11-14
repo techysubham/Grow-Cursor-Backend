@@ -10,6 +10,7 @@ const TaskSchema = new mongoose.Schema(
     quantity: { type: Number },
     completedQuantity: { type: Number, default: 0 },
     sourcePlatform: { type: mongoose.Schema.Types.ObjectId, ref: 'Platform', required: true },
+    marketplace: { type: String, enum: ['EBAY_US', 'EBAY_AUS', 'EBAY_CANADA'], required: true },
     category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true },
     subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', required: true },
     range: { type: mongoose.Schema.Types.ObjectId, ref: 'Range' },

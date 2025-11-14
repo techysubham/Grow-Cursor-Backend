@@ -8,6 +8,7 @@ const AssignmentSchema = new mongoose.Schema(
     quantity: { type: Number, required: true, min: 1 },
     listingPlatform: { type: mongoose.Schema.Types.ObjectId, ref: 'Platform', required: true },
     store: { type: mongoose.Schema.Types.ObjectId, ref: 'Store', required: true },
+    marketplace: { type: String, enum: ['EBAY_US', 'EBAY_AUS', 'EBAY_CANADA'], required: true },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // listing admin who shared
     notes: { type: String, default: '' }, // notes from listing admin to lister
 
