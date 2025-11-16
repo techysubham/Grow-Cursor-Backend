@@ -97,7 +97,7 @@ router.get('/callback', async (req, res) => {
           'Content-Type': 'application/json',
         },
         params: {
-          limit: 5
+          limit: 15
         },
       });
       
@@ -229,7 +229,7 @@ router.get('/orders', async (req, res) => {
     
     // Build eBay API params
     const params = {
-      limit: orderCount === 0 ? 5 : 200 // If no orders exist, fetch only 5, else fetch all new/updated
+      limit: orderCount === 0 ? 15 : 200 // If no orders exist, fetch only 5, else fetch all new/updated
     };
     
     // If we have orders already, only fetch orders modified after the last one
@@ -490,7 +490,7 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
         const oldestCreationDate = oldestOrder ? oldestOrder.creationDate : null;
 
         const newOrdersParams = {
-          limit: orderCount === 0 ? 5 : 200
+          limit: orderCount === 0 ? 15 : 200
         };
 
         // Fetch orders created AFTER the newest order in database
