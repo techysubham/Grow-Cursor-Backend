@@ -84,7 +84,7 @@ router.get('/filter-options', requireAuth, requireRole('superadmin', 'listingadm
 
 router.post('/', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
   try {
-    const { taskId, listerId, quantity, listingPlatformId, storeId, notes } = req.body || {};
+    const { taskId, listerId, quantity, listingPlatformId, storeId, notes, scheduledDate } = req.body || {};
     if (!taskId || !listerId || !quantity || !listingPlatformId || !storeId) {
       return res.status(400).json({ message: 'All fields are required.' });
     }
@@ -100,6 +100,9 @@ router.post('/', requireAuth, requireRole('superadmin', 'listingadmin'), async (
     const creatorId = (req.user && (req.user.userId || req.user.id)) || task.createdBy;
     if (!creatorId) return res.status(401).json({ message: 'Unauthorized: creator not resolved' });
 
+    // Parse scheduledDate or default to now
+    const schedDate = scheduledDate ? new Date(scheduledDate) : new Date();
+
     const doc = await Assignment.create({
       task: taskId,
       lister: listerId,
@@ -109,6 +112,7 @@ router.post('/', requireAuth, requireRole('superadmin', 'listingadmin'), async (
       marketplace: task.marketplace,
       createdBy: creatorId,
       notes: notes || '',
+      scheduledDate: schedDate,
     });
 
     const populated = await doc.populate([
@@ -132,7 +136,8 @@ router.get('/', requireAuth, requireRole('superadmin', 'listingadmin', 'producta
       taskId, listerId, platformId, storeId,
       // New filter parameters
       marketplace, productTitle,
-      dateFrom, dateTo, dateMode, dateSingle
+      dateFrom, dateTo, dateMode, dateSingle,
+      scheduledDateFrom, scheduledDateTo, scheduledDateMode, scheduledDateSingle
     } = req.query;
     const { page, limit, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
 
@@ -143,7 +148,7 @@ router.get('/', requireAuth, requireRole('superadmin', 'listingadmin', 'producta
     if (storeId) q.store = storeId;
     if (marketplace) q.marketplace = marketplace;
 
-    // Date filtering (IST timezone)
+    // Date filtering (IST timezone) - Created Date
     if (dateMode === 'single' && dateSingle) {
       const startDate = new Date(dateSingle + 'T00:00:00+05:30');
       const endDate = new Date(dateSingle + 'T23:59:59+05:30');
@@ -153,6 +158,19 @@ router.get('/', requireAuth, requireRole('superadmin', 'listingadmin', 'producta
         q.createdAt = {};
         if (dateFrom) q.createdAt.$gte = new Date(dateFrom + 'T00:00:00+05:30');
         if (dateTo) q.createdAt.$lte = new Date(dateTo + 'T23:59:59+05:30');
+      }
+    }
+
+    // Scheduled Date filtering (IST timezone)
+    if (scheduledDateMode === 'single' && scheduledDateSingle) {
+      const startDate = new Date(scheduledDateSingle + 'T00:00:00+05:30');
+      const endDate = new Date(scheduledDateSingle + 'T23:59:59+05:30');
+      q.scheduledDate = { $gte: startDate, $lte: endDate };
+    } else if (scheduledDateMode === 'range') {
+      if (scheduledDateFrom || scheduledDateTo) {
+        q.scheduledDate = {};
+        if (scheduledDateFrom) q.scheduledDate.$gte = new Date(scheduledDateFrom + 'T00:00:00+05:30');
+        if (scheduledDateTo) q.scheduledDate.$lte = new Date(scheduledDateTo + 'T23:59:59+05:30');
       }
     }
 
@@ -290,18 +308,22 @@ router.get('/mine/with-status',
 
       const meObjId = mongoose.Types.ObjectId.isValid(me) ? new mongoose.Types.ObjectId(me) : me;
 
-      const allAssignments = await Assignment.find({ lister: meObjId })
+      const today = new Date();
+      const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      const endOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+
+      // Only fetch assignments where scheduledDate <= today
+      const allAssignments = await Assignment.find({ 
+        lister: meObjId,
+        scheduledDate: { $lte: endOfToday }
+      })
         .populate([
           { path: 'task', populate: [{ path: 'sourcePlatform createdBy category subcategory range', select: 'name username' }] },
           { path: 'listingPlatform', select: 'name' },
           { path: 'store', select: 'name' },
           { path: 'rangeQuantities.range', select: 'name' },
         ])
-        .sort({ createdAt: -1 });
-
-      const today = new Date();
-      const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-      const endOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+        .sort({ scheduledDate: -1, createdAt: -1 });
 
       const todaysTasks = [];
       const pendingTasks = [];
@@ -311,8 +333,10 @@ router.get('/mine/with-status',
         // Check completion based on rangeQuantities sum or completedQuantity
         const rangeQuantitiesSum = (a.rangeQuantities || []).reduce((sum, rq) => sum + (rq.quantity || 0), 0);
         const isCompleted = rangeQuantitiesSum >= a.quantity || (a.completedQuantity || 0) >= a.quantity;
-        const createdAt = new Date(a.createdAt);
-        const isToday = createdAt >= startOfToday && createdAt < endOfToday;
+        
+        // Use scheduledDate instead of createdAt to categorize
+        const scheduledAt = new Date(a.scheduledDate);
+        const isToday = scheduledAt >= startOfToday && scheduledAt < endOfToday;
 
         if (isCompleted) {
           completedTasks.push(a);
@@ -379,7 +403,7 @@ router.get('/analytics/admin-lister',
       const rows = await Assignment.aggregate([
         {
           $project: {
-            date: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: IST_TZ } },
+            date: { $dateToString: { format: "%Y-%m-%d", date: "$scheduledDate", timezone: IST_TZ } },
 
             adminId: "$createdBy",
             listerId: "$lister",
@@ -440,13 +464,13 @@ router.get('/analytics/listings-summary',
       if (dateMode === 'single' && dateSingle) {
         const startDate = new Date(dateSingle + 'T00:00:00+05:30');
         const endDate = new Date(dateSingle + 'T23:59:59+05:30');
-        matchConditions.push({ $match: { createdAt: { $gte: startDate, $lte: endDate } } });
+        matchConditions.push({ $match: { scheduledDate: { $gte: startDate, $lte: endDate } } });
       } else if (dateMode === 'range') {
         const dateMatch = {};
         if (dateFrom) dateMatch.$gte = new Date(dateFrom + 'T00:00:00+05:30');
         if (dateTo) dateMatch.$lte = new Date(dateTo + 'T23:59:59+05:30');
         if (Object.keys(dateMatch).length > 0) {
-          matchConditions.push({ $match: { createdAt: dateMatch } });
+          matchConditions.push({ $match: { scheduledDate: dateMatch } });
         }
       }
 
@@ -458,7 +482,7 @@ router.get('/analytics/listings-summary',
 
         {
           $project: {
-            date: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: IST_TZ } },
+            date: { $dateToString: { format: "%Y-%m-%d", date: "$scheduledDate", timezone: IST_TZ } },
 
             platformId: "$listingPlatform",
             storeId: "$store",

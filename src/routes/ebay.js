@@ -1838,8 +1838,8 @@ router.post('/sync-inbox', requireAuth, requireRole('fulfillmentadmin', 'superad
             startTime = new Date(new Date(seller.lastMessagePolledAt).getTime() - 15 * 60 * 1000);
             console.log(`[${seller.user}] Incremental sync from: ${startTime.toISOString()}`);
         } else {
-            // INITIAL SYNC: Fetch last 10 Days
-            startTime = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
+            // INITIAL SYNC: Fetch last 12 Days
+            startTime = new Date(now.getTime() - 12 * 24 * 60 * 60 * 1000);
             console.log(`[${seller.user}] First-time sync from: ${startTime.toISOString()} (Last 10 Days)`);
         }
         

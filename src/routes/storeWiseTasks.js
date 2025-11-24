@@ -8,6 +8,7 @@ const router = express.Router();
 // Get aggregated store-wise task summary
 router.get('/summary', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
   try {
+    // Admins see ALL tasks regardless of scheduled date
     const aggregation = await Assignment.aggregate([
       {
         $lookup: {
@@ -26,7 +27,7 @@ router.get('/summary', requireAuth, requireRole('superadmin', 'listingadmin'), a
             date: {
               $dateToString: {
                 format: '%Y-%m-%d',
-                date: '$createdAt',
+                date: '$scheduledDate',
                 timezone: '+05:30' // IST timezone
               }
             }
@@ -78,7 +79,7 @@ router.get('/details', requireAuth, requireRole('superadmin', 'listingadmin'), a
 
     const query = {
       store: storeId,
-      createdAt: { $gte: startDate, $lte: endDate }
+      scheduledDate: { $gte: startDate, $lte: endDate }
     };
 
     if (marketplace) {

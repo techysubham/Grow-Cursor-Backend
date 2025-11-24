@@ -12,6 +12,15 @@ const AssignmentSchema = new mongoose.Schema(
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // listing admin who shared
     notes: { type: String, default: '' }, // notes from listing admin to lister
 
+    // ✅ Scheduled date - when the task should appear to lister
+    scheduledDate: { 
+      type: Date, 
+      required: true,
+      default: function() {
+        return this.createdAt || new Date();
+      }
+    },
+
     // ✅ Completion tracking
     completedQuantity: { type: Number, default: 0, min: 0 },
     completedAt: { type: Date, default: null },
