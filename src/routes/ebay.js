@@ -9,6 +9,7 @@ import Order from '../models/Order.js';
 import Return from '../models/Return.js';
 import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
+import FitmentCache from '../models/FitmentCache.js';
 import { parseStringPromise } from 'xml2js';
 const router = express.Router();
 
@@ -2671,7 +2672,7 @@ router.post('/refresh-item', requireAuth, async (req, res) => {
     }
 });
 
-// 4. UPDATE COMPATIBILITY (Wipe & Rewrite) 
+// 4. UPDATE COMPATIBILITY (Wipe & Rewrite)
 router.post('/update-compatibility', requireAuth, async (req, res) => {
     const { sellerId, itemId, compatibilityList } = req.body;
     try {
@@ -2715,17 +2716,117 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
         const result = await parseStringPromise(response.data);
         const ack = result.ReviseFixedPriceItemResponse.Ack[0];
 
-        if (ack === 'Failure') throw new Error("Update Failed");
+        // 1. Handle Failures (Stop)
+        if (ack === 'Failure') {
+            const errors = result.ReviseFixedPriceItemResponse.Errors || [];
+            throw new Error(`eBay Failed: ${errors.map(e => e.LongMessage[0]).join('; ')}`);
+        }
         
+        // 2. Handle Warnings (Continue, but capture message)
+        let warningMessage = null;
+        if (ack === 'Warning') {
+            const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
+            
+            // Filter out known "Noise" warnings
+            const meaningfulWarnings = warnings.filter(err => {
+                const msg = err.LongMessage[0];
+                // Ignore "Best Offer" payment warning
+                if (msg.includes("If this item sells by a Best Offer")) return false;
+                return true; 
+            });
+
+            if (meaningfulWarnings.length > 0) {
+                warningMessage = meaningfulWarnings.map(e => e.LongMessage[0]).join('; ');
+                console.warn(`eBay Update Warning: ${warningMessage}`);
+            }
+        }
+        
+        // 3. Update DB
         await Listing.findOneAndUpdate(
             { itemId: itemId },
             { compatibility: compatibilityList }
         );
 
-        res.json({ success: true, warning: ack === 'Warning' ? 'Updated with warnings.' : null });
+        // 4. Send actual warning text to frontend
+        res.json({ success: true, warning: warningMessage });
 
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+
+
+// 5. GET COMPATIBILITY METADATA (REST API Version)
+router.post('/compatibility/values', requireAuth, async (req, res) => {
+    const { sellerId, propertyName, constraints } = req.body; 
+    
+    try {
+        // 1. GENERATE CACHE KEY
+        let cacheKey = propertyName;
+        if (constraints && constraints.length > 0) {
+            const sortedParams = constraints.map(c => c.value).sort().join('_');
+            cacheKey = `${propertyName}_${sortedParams}`;
+        }
+
+        // 2. CHECK DB CACHE
+        const cachedData = await FitmentCache.findOne({ cacheKey });
+        if (cachedData) {
+            return res.json({ values: cachedData.values });
+        }
+
+        // 3. FETCH FROM EBAY (REST Taxonomy API)
+        const seller = await Seller.findById(sellerId);
+        const token = await ensureValidToken(seller);
+
+        // Build Filter String for REST API
+        // Correct Syntax: "PropertyName:Value" (No quotes, No wrappers)
+        let filterParam = '';
+        if (constraints && constraints.length > 0) {
+            // We usually only have one constraint for this flow (e.g. Make -> Model)
+            const c = constraints[0]; 
+            if (c) {
+                // FIX: Removed quotes. Escaped commas just in case.
+                const cleanValue = c.value.replace(/,/g, '\\,');
+                filterParam = `${c.name}:${cleanValue}`; 
+            }
+        }
+
+        console.log(`[Fitment] Fetching ${propertyName} from eBay REST API (Cat: 33559)... Filter: ${filterParam}`);
+
+        const response = await axios.get(
+            `https://api.ebay.com/commerce/taxonomy/v1/category_tree/100/get_compatibility_property_values`, 
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' 
+                },
+                params: {
+                    category_id: '33559', // Brake Discs (Universal category for cars)
+                    compatibility_property: propertyName,
+                    filter: filterParam || undefined
+                }
+            }
+        );
+
+        // Extract Values
+        const rawValues = response.data.compatibilityPropertyValues || [];
+        const values = rawValues.map(item => item.value);
+
+        // 4. SAVE TO DB
+        if (values.length > 0) {
+            await FitmentCache.create({ cacheKey, values });
+        }
+
+        res.json({ values });
+
+    } catch (err) {
+        // Log detailed error
+        console.error("Metadata Fetch Error:", JSON.stringify(err.response?.data || err.message, null, 2));
+        
+        // Return empty list so frontend doesn't crash
+        res.json({ values: [] });
     }
 });
 
