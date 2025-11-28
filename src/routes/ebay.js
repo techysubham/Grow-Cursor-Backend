@@ -2672,6 +2672,20 @@ router.post('/refresh-item', requireAuth, async (req, res) => {
     }
 });
 
+// Helper to clean text for XML (turns "&" into "&amp;")
+const escapeXml = (unsafe) => {
+    if (!unsafe) return '';
+    return String(unsafe).replace(/[<>&'"]/g, (c) => {
+        switch (c) {
+            case '<': return '&lt;';
+            case '>': return '&gt;';
+            case '&': return '&amp;';
+            case '\'': return '&apos;';
+            case '"': return '&quot;';
+        }
+    });
+};
+
 // 4. UPDATE COMPATIBILITY (Wipe & Rewrite)
 router.post('/update-compatibility', requireAuth, async (req, res) => {
     const { sellerId, itemId, compatibilityList } = req.body;
@@ -2686,9 +2700,12 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
             let compatXml = '<ItemCompatibilityList>';
             compatibilityList.forEach(c => {
                 compatXml += '<Compatibility>';
-                if(c.notes) compatXml += `<CompatibilityNotes>${c.notes}</CompatibilityNotes>`;
+                // FIX: Escape the Notes
+                if(c.notes) compatXml += `<CompatibilityNotes>${escapeXml(c.notes)}</CompatibilityNotes>`;
+                
                 c.nameValueList.forEach(nv => {
-                    compatXml += `<NameValueList><Name>${nv.name}</Name><Value>${nv.value}</Value></NameValueList>`;
+                    // FIX: Escape Name and Value (e.g. "S & L")
+                    compatXml += `<NameValueList><Name>${escapeXml(nv.name)}</Name><Value>${escapeXml(nv.value)}</Value></NameValueList>`;
                 });
                 compatXml += '</Compatibility>';
             });
@@ -2716,21 +2733,20 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
         const result = await parseStringPromise(response.data);
         const ack = result.ReviseFixedPriceItemResponse.Ack[0];
 
-        // 1. Handle Failures (Stop)
+        // 1. Handle Failures
         if (ack === 'Failure') {
             const errors = result.ReviseFixedPriceItemResponse.Errors || [];
             throw new Error(`eBay Failed: ${errors.map(e => e.LongMessage[0]).join('; ')}`);
         }
         
-        // 2. Handle Warnings (Continue, but capture message)
+        // 2. Handle Warnings
         let warningMessage = null;
         if (ack === 'Warning') {
             const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
             
-            // Filter out known "Noise" warnings
+            // Filter "Noise" warnings (Best Offer payment rule)
             const meaningfulWarnings = warnings.filter(err => {
                 const msg = err.LongMessage[0];
-                // Ignore "Best Offer" payment warning
                 if (msg.includes("If this item sells by a Best Offer")) return false;
                 return true; 
             });
@@ -2747,7 +2763,6 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
             { compatibility: compatibilityList }
         );
 
-        // 4. Send actual warning text to frontend
         res.json({ success: true, warning: warningMessage });
 
     } catch (err) {
@@ -2763,9 +2778,13 @@ router.post('/compatibility/values', requireAuth, async (req, res) => {
     
     try {
         // 1. GENERATE CACHE KEY
+        // Unique key based on all constraints (e.g. "Year_Make_Nissan_Model_370Z")
         let cacheKey = propertyName;
         if (constraints && constraints.length > 0) {
-            const sortedParams = constraints.map(c => c.value).sort().join('_');
+            const sortedParams = constraints
+                .map(c => `${c.name}_${c.value}`)
+                .sort()
+                .join('_');
             cacheKey = `${propertyName}_${sortedParams}`;
         }
 
@@ -2780,19 +2799,19 @@ router.post('/compatibility/values', requireAuth, async (req, res) => {
         const token = await ensureValidToken(seller);
 
         // Build Filter String for REST API
-        // Correct Syntax: "PropertyName:Value" (No quotes, No wrappers)
+        // FIX: Process ALL constraints, not just the first one.
+        // Format: "Make:Nissan,Model:370Z"
         let filterParam = '';
         if (constraints && constraints.length > 0) {
-            // We usually only have one constraint for this flow (e.g. Make -> Model)
-            const c = constraints[0]; 
-            if (c) {
-                // FIX: Removed quotes. Escaped commas just in case.
-                const cleanValue = c.value.replace(/,/g, '\\,');
-                filterParam = `${c.name}:${cleanValue}`; 
-            }
+            const filters = constraints.map(c => {
+                // Remove quotes and escape commas within the value itself
+                const cleanValue = String(c.value).replace(/,/g, '\\,');
+                return `${c.name}:${cleanValue}`;
+            });
+            filterParam = filters.join(',');
         }
 
-        console.log(`[Fitment] Fetching ${propertyName} from eBay REST API (Cat: 33559)... Filter: ${filterParam}`);
+        console.log(`[Fitment] Fetching ${propertyName} from eBay (Cat: 33559)... Filter: ${filterParam}`);
 
         const response = await axios.get(
             `https://api.ebay.com/commerce/taxonomy/v1/category_tree/100/get_compatibility_property_values`, 
@@ -2803,7 +2822,7 @@ router.post('/compatibility/values', requireAuth, async (req, res) => {
                     'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' 
                 },
                 params: {
-                    category_id: '33559', // Brake Discs (Universal category for cars)
+                    category_id: '33559', 
                     compatibility_property: propertyName,
                     filter: filterParam || undefined
                 }
@@ -2822,10 +2841,7 @@ router.post('/compatibility/values', requireAuth, async (req, res) => {
         res.json({ values });
 
     } catch (err) {
-        // Log detailed error
         console.error("Metadata Fetch Error:", JSON.stringify(err.response?.data || err.message, null, 2));
-        
-        // Return empty list so frontend doesn't crash
         res.json({ values: [] });
     }
 });
