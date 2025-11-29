@@ -57,6 +57,101 @@ async function ensureValidToken(seller) {
   }
 }
 
+
+// --- NEW CONFIG: AUTOMATED WELCOME MESSAGE ---
+const ENABLE_AUTO_WELCOME = true; // Set to false to disable
+const WELCOME_TEMPLATE = `Hello {BUYER_NAME},
+
+Thank you so much for your recent purchase from our store! 
+
+Usually, items ship within 24-48 hours, but due to the ongoing festive season, handling time may take around 48-72 hours.
+
+Your order will be prepared for processing shortly. If there are any updates along the way, we’ll notify you right away. 
+Once it is ready for shipping, the tracking details will be added directly to your eBay order page so you can easily follow the delivery.
+
+If you ever need any assistance, please feel free to message us here as we’re always happy to help.
+
+We truly appreciate you choosing our store! We hope you have a wonderful day!`;
+
+// --- HELPER: Send Auto Welcome Message ---
+async function sendAutoWelcomeMessage(seller, order) {
+  if (!ENABLE_AUTO_WELCOME) return;
+
+  try {
+    const buyerUsername = order.buyer?.username;
+    const buyerName = order.buyer?.buyerRegistrationAddress?.fullName || buyerUsername;
+    
+    // 1. Get First Item Details
+    const lineItem = order.lineItems?.[0];
+    const itemId = lineItem?.legacyItemId; 
+    let itemTitle = lineItem?.title;
+
+    // 2. CHECK FOR MULTIPLE ITEMS
+    const itemCount = order.lineItems?.length || 0;
+    if (itemCount > 1) {
+      // Append count to title: "iPad Case (+ 1 other)"
+      itemTitle = `${itemTitle} (+ ${itemCount - 1} other${itemCount - 1 > 1 ? 's' : ''})`;
+    }
+    
+    if (!buyerUsername || !itemId) return;
+
+    // 1. Prepare the Message Body
+    const sellerName = seller.user?.username || "The Team";
+    const body = WELCOME_TEMPLATE
+      .replace('{BUYER_NAME}', buyerName.split(' ')[0]) // Use First Name only for a personal touch
+      .replace('{SELLER_NAME}', sellerName);
+
+    // 2. Get Token
+    const token = await ensureValidToken(seller);
+
+    // 3. XML Request (Same as your send-message route)
+    const xmlRequest = `
+      <?xml version="1.0" encoding="utf-8"?>
+      <AddMemberMessageAAQToPartnerRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+        <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+        <ItemID>${itemId}</ItemID>
+        <MemberMessage>
+          <Body>${body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Body>
+          <Subject>Thanks for your order! #${order.orderId}</Subject>
+          <QuestionType>General</QuestionType>
+          <RecipientID>${buyerUsername}</RecipientID>
+        </MemberMessage>
+      </AddMemberMessageAAQToPartnerRequest>
+    `;
+
+    // 4. Send to eBay
+    await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+      headers: {
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'X-EBAY-API-CALL-NAME': 'AddMemberMessageAAQToPartner',
+        'Content-Type': 'text/xml'
+      }
+    });
+
+    console.log(`[Auto-Welcome] Sent to ${buyerUsername} for Order ${order.orderId}`);
+
+    // 5. Save to DB so it shows in your chat window immediately
+    await Message.create({
+      seller: seller._id,
+      orderId: order.orderId,
+      itemId: itemId,
+      itemTitle: itemTitle,
+      buyerUsername: buyerUsername,
+      sender: 'SELLER',
+      subject: `Thanks for your order! #${order.orderId}`,
+      body: body,
+      read: true,
+      messageType: 'ORDER',
+      messageDate: new Date()
+    });
+
+  } catch (err) {
+    console.error(`[Auto-Welcome] Failed for ${order.orderId}:`, err.message);
+    // Don't throw error here, so we don't stop the polling process
+  }
+}
+
 // HELPER: Process a single eBay XML Message and save to DB
 async function processEbayMessage(msg, seller) {
   try {
@@ -807,6 +902,7 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
                 const newOrder = await Order.create(orderData);
                 newOrders.push(newOrder);
                 console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
+                await sendAutoWelcomeMessage(seller, newOrder);
               } else {
                 // Order exists, check if needs update
                 const ebayModTime = new Date(ebayOrder.lastModifiedDate).getTime();
@@ -1119,6 +1215,7 @@ router.post('/poll-new-orders', requireAuth, requireRole('fulfillmentadmin', 'su
               const newOrder = await Order.create(orderData);
               newOrders.push(newOrder);
               console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
+              await sendAutoWelcomeMessage(seller, newOrder);
             }
           }
         }
