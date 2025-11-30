@@ -590,6 +590,7 @@ router.get('/cancelled-orders', async (req, res) => {
 
 
 // Get stored orders from database with pagination support
+
 router.get('/stored-orders', async (req, res) => {
   // 1. UPDATED: Added startDate and endDate to destructuring, removed searchSoldDate
   const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate } = req.query;
@@ -613,20 +614,28 @@ router.get('/stored-orders', async (req, res) => {
       query['buyer.buyerRegistrationAddress.fullName'] = { $regex: searchBuyerName, $options: 'i' };
     }
 
-    // 2. UPDATED: New Date Range Logic
+    // 2. UPDATED: Timezone-Aware Date Range Logic (PST Support)
     if (startDate || endDate) {
       query.dateSold = {};
       
+      // Helper to convert "YYYY-MM-DD" (PST) -> UTC Date Object
+      // PST is UTC-8. So 00:00 PST = 08:00 UTC.
+      const PST_OFFSET_HOURS = 8; 
+
       if (startDate) {
-        // Greater than or equal to Start Date (starts at 00:00:00)
-        query.dateSold.$gte = new Date(startDate);
+        // User selected "2025-11-29". We want 00:00:00 PST on that day.
+        // 00:00 PST = 08:00 UTC
+        const start = new Date(startDate);
+        start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0); 
+        query.dateSold.$gte = start;
       }
       
       if (endDate) {
-        // Less than or equal to End Date
-        // We set the time to 23:59:59.999 to include orders from the very end of that day
+        // User selected "2025-11-29". We want 23:59:59 PST on that day.
+        // 23:59 PST = 07:59 UTC (Next Day)
         const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
+        end.setDate(end.getDate() + 1); // Move to next day
+        end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999); // 07:59:59 UTC
         query.dateSold.$lte = end;
       }
     }
