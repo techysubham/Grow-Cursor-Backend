@@ -10,6 +10,7 @@ import Return from '../models/Return.js';
 import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
 import FitmentCache from '../models/FitmentCache.js';
+import ConversationMeta from '../models/ConversationMeta.js';
 import { parseStringPromise } from 'xml2js';
 const router = express.Router();
 
@@ -3014,6 +3015,176 @@ router.post('/compatibility/values', requireAuth, async (req, res) => {
         console.error("Metadata Fetch Error:", JSON.stringify(err.response?.data || err.message, null, 2));
         res.json({ values: [] });
     }
+});
+
+
+
+// --- NEW ROUTE 1: UPSERT CONVERSATION TAGS (Called from BuyerChatPage) ---
+// 
+router.post('/conversation-meta', requireAuth, async (req, res) => {
+  const { sellerId, buyerUsername, orderId, itemId, category, caseStatus } = req.body;
+
+  if (!category || !caseStatus) {
+    return res.status(400).json({ error: 'Category and Case Status are required' });
+  }
+
+  try {
+    let query = { seller: sellerId };
+    
+    if (orderId) {
+      query.orderId = orderId;
+    } else {
+      query.buyerUsername = buyerUsername;
+      query.itemId = itemId;
+      query.orderId = null;
+    }
+
+    const meta = await ConversationMeta.findOneAndUpdate(
+      query,
+      {
+        seller: sellerId,
+        buyerUsername,
+        orderId: orderId || null,
+        itemId,
+        category,
+        caseStatus,
+        
+        // --- THE LOGIC FIX ---
+        // If the seller clicks "Save" in the chat window, we assume they are working on it.
+        // So we force it back to 'Open' and clear the resolution data.
+        status: 'Open', 
+        resolvedAt: null,
+        resolvedBy: null
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    res.json({ success: true, meta });
+  } catch (err) {
+    console.error('Meta Save Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- NEW ROUTE 2: FETCH TAGS FOR THREAD (Called from BuyerChatPage) ---
+router.get('/conversation-meta/single', requireAuth, async (req, res) => {
+  const { sellerId, buyerUsername, orderId, itemId } = req.query;
+
+  try {
+    let query = { seller: sellerId };
+    if (orderId) {
+      query.orderId = orderId;
+    } else {
+      query.buyerUsername = buyerUsername;
+      query.itemId = itemId;
+      query.orderId = null;
+    }
+
+    const meta = await ConversationMeta.findOne(query);
+    res.json(meta || {}); // Return empty object if not found (cleaner for frontend)
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- NEW ROUTE 3: GET MANAGEMENT LIST (Called from ConversationManagementPage) ---
+// 
+router.get('/conversation-management/list', requireAuth, async (req, res) => {
+  const { status } = req.query; 
+
+  try {
+    let query = {};
+    if (status) query.status = status;
+
+    const list = await ConversationMeta.aggregate([
+      { $match: query },
+      { $sort: { updatedAt: -1 } },
+
+      // 1. LOOKUP SELLER (ConversationMeta -> Seller)
+      {
+        $lookup: {
+            from: 'sellers',
+            localField: 'seller',
+            foreignField: '_id',
+            as: 'sellerDoc'
+        }
+      },
+      // Unwind allows us to access the fields inside sellerDoc directly
+      { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+
+      // 2. LOOKUP USER (Seller -> User) - THIS WAS MISSING
+      {
+        $lookup: {
+            from: 'users', // The collection name for 'User' model is usually lowercase plural 'users'
+            localField: 'sellerDoc.user',
+            foreignField: '_id',
+            as: 'userDoc'
+        }
+      },
+      { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
+
+      // 3. LOOKUP ORDER (To get Buyer Real Name)
+      {
+        $lookup: {
+          from: 'orders',
+          localField: 'orderId',
+          foreignField: 'orderId',
+          as: 'orderInfo'
+        }
+      },
+
+      // 4. PROJECT FINAL SHAPE
+      {
+        $project: {
+          _id: 1,
+          sellerId: '$sellerDoc._id', 
+          // NOW WE PULL USERNAME FROM THE USER DOC
+          sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] }, 
+          buyerUsername: 1,
+          orderId: 1,
+          itemId: 1,
+          category: 1,
+          caseStatus: 1,
+          status: 1,
+          notes: 1,
+          updatedAt: 1,
+          buyerName: { 
+            $ifNull: [
+              { $arrayElemAt: ["$orderInfo.buyer.buyerRegistrationAddress.fullName", 0] }, 
+              "$buyerUsername"
+            ] 
+          }
+        }
+      }
+    ]);
+
+    res.json(list);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- NEW ROUTE 4: RESOLVE CONVERSATION (Called from Management Modal) ---
+router.patch('/conversation-management/:id/resolve', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const { notes, status } = req.body;
+
+  try {
+    const meta = await ConversationMeta.findByIdAndUpdate(
+      id,
+      {
+        notes,
+        status,
+        resolvedAt: status === 'Resolved' ? new Date() : null,
+        resolvedBy: req.user.username
+      },
+      { new: true }
+    );
+    res.json({ success: true, meta });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;
