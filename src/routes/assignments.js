@@ -948,4 +948,79 @@ router.post('/:id/submit',
   }
 );
 
+// --- NEW ROUTE: BULK ASSIGNMENT ---
+router.post('/bulk', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+  try {
+    const { 
+      listerId, 
+      listingPlatformId, 
+      storeId: defaultStoreId, // Renamed to clarify it's a fallback
+      notes, 
+      scheduledDate,
+      assignments // Array of { taskId, quantity, storeId }
+    } = req.body || {};
+
+    if (!listerId || !listingPlatformId || !assignments || !Array.isArray(assignments) || assignments.length === 0) {
+      return res.status(400).json({ message: 'Missing required fields or assignments list.' });
+    }
+
+    const creatorId = (req.user && (req.user.userId || req.user.id));
+    const schedDate = scheduledDate ? new Date(scheduledDate) : new Date();
+
+    const createdAssignments = [];
+    const errors = [];
+
+    for (const item of assignments) {
+      const { taskId, quantity, storeId } = item;
+      
+      // Use specific storeId if provided, otherwise fallback to default
+      const finalStoreId = storeId || defaultStoreId;
+
+      if (!finalStoreId) {
+        errors.push(`Task ${taskId} missing Store ID`);
+        continue;
+      }
+      
+      try {
+        const task = await Task.findById(taskId);
+        if (!task) {
+          errors.push(`Task ${taskId} not found`);
+          continue;
+        }
+
+        if (!task.marketplace) {
+          errors.push(`Task ${task.productTitle} missing marketplace`);
+          continue;
+        }
+
+        const doc = await Assignment.create({
+          task: taskId,
+          lister: listerId,
+          quantity: Number(quantity),
+          listingPlatform: listingPlatformId,
+          store: finalStoreId, // Uses the resolved store ID
+          marketplace: task.marketplace,
+          createdBy: creatorId,
+          notes: notes || '',
+          scheduledDate: schedDate,
+        });
+
+        createdAssignments.push(doc);
+      } catch (err) {
+        console.error(`Failed to assign task ${taskId}:`, err);
+        errors.push(`Failed to assign task ${taskId}`);
+      }
+    }
+
+    res.status(201).json({ 
+      success: true, 
+      count: createdAssignments.length, 
+      errors: errors.length > 0 ? errors : undefined 
+    });
+
+  } catch (e) {
+    console.error('Bulk assign error:', e);
+    res.status(500).json({ message: 'Failed to process bulk assignments.' });
+  }
+});
 export default router;
