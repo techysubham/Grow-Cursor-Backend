@@ -330,9 +330,9 @@ router.get('/mine/with-status',
       const completedTasks = [];
 
       for (const a of allAssignments) {
-        // Check completion based on rangeQuantities sum or completedQuantity
-        const rangeQuantitiesSum = (a.rangeQuantities || []).reduce((sum, rq) => sum + (rq.quantity || 0), 0);
-        const isCompleted = rangeQuantitiesSum >= a.quantity || (a.completedQuantity || 0) >= a.quantity;
+        // An assignment is only "completed" when explicitly submitted (completedAt is set)
+        // Not when ranges are just added
+        const isCompleted = !!a.completedAt;
         
         // Use scheduledDate instead of createdAt to categorize
         const scheduledAt = new Date(a.scheduledDate);
@@ -752,11 +752,12 @@ router.get('/:id/ranges',
 // Add or update range quantity for an assignment
 router.post('/:id/complete-range',
   requireAuth,
-  requireRole('superadmin', 'listingadmin', 'lister'),
+  requireRole('superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { rangeId, quantity } = req.body || {};
+      const { rangeId, quantity, mode = 'set' } = req.body || {};
+      // mode: 'set' = replace quantity, 'add' = add to existing quantity
       
       if (!rangeId || quantity == null || quantity < 0) {
         return res.status(400).json({ message: 'rangeId and quantity (>= 0) required' });
@@ -787,16 +788,20 @@ router.post('/:id/complete-range',
         rq => String(rq.range) === String(rangeId)
       );
 
-      if (quantity === 0) {
-        // Remove the range if quantity is 0
+      if (quantity === 0 && mode === 'set') {
+        // Remove the range if quantity is 0 (only in set mode)
         if (existingIndex >= 0) {
           doc.rangeQuantities.splice(existingIndex, 1);
         }
       } else {
         // Update or add range
         if (existingIndex >= 0) {
-          // Update existing
-          doc.rangeQuantities[existingIndex].quantity = quantity;
+          // Update existing - either set or add based on mode
+          if (mode === 'add') {
+            doc.rangeQuantities[existingIndex].quantity += quantity;
+          } else {
+            doc.rangeQuantities[existingIndex].quantity = quantity;
+          }
         } else {
           // Add new
           doc.rangeQuantities.push({ range: rangeId, quantity });
@@ -821,41 +826,9 @@ router.post('/:id/complete-range',
 
       await doc.save();
 
-      // Handle ListingCompletion record
-      const existingCompletion = await ListingCompletion.findOne({ assignment: doc._id });
-      
-      if (totalDistributed === 0) {
-        // Delete ListingCompletion if no ranges remain
-        if (existingCompletion) {
-          await ListingCompletion.deleteOne({ _id: existingCompletion._id });
-        }
-      } else {
-        // Update or create ListingCompletion record
-        const completionData = {
-          date: new Date(),
-          assignment: doc._id,
-          task: doc.task._id,
-          lister: doc.lister,
-          listingPlatform: doc.listingPlatform,
-          store: doc.store,
-          marketplace: doc.marketplace,
-          category: doc.task.category,
-          subcategory: doc.task.subcategory,
-          rangeCompletions: doc.rangeQuantities
-            .filter(rq => rq.quantity > 0)
-            .map(rq => ({ range: rq.range, quantity: rq.quantity })),
-          totalQuantity: totalDistributed,
-        };
-
-        if (existingCompletion) {
-          // Update existing completion record
-          Object.assign(existingCompletion, completionData);
-          await existingCompletion.save();
-        } else {
-          // Create new completion record
-          await ListingCompletion.create(completionData);
-        }
-      }
+      // NOTE: ListingCompletion is NOT created here anymore
+      // It will only be created when lister explicitly presses "Submit Assignment"
+      // This prevents accidental/incomplete work from showing up in Listing Sheet
 
       const populated = await doc.populate([
         { path: 'task', populate: [{ path: 'sourcePlatform createdBy category subcategory range', select: 'name username' }] },

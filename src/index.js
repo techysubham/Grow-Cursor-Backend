@@ -3,6 +3,10 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
+
+// Load environment variables FIRST before any other imports
+dotenv.config();
+
 import { connectToDatabase } from './lib/db.js';
 import User from './models/User.js';
 import authRoutes from './routes/auth.js';
@@ -24,9 +28,7 @@ import employeeProfilesRoutes from './routes/employeeProfiles.js';
 import storeWiseTasksRoutes from './routes/storeWiseTasks.js';
 
 import amazonAccountRoutes from './routes/amazonAccounts.js';
-
-
-dotenv.config();
+import rangeAnalysisRoutes from './routes/rangeAnalysis.js';
 
 const app = express();
 
@@ -70,6 +72,7 @@ app.use('/api/sellers', sellersRoutes);
 app.use('/api/employee-profiles', employeeProfilesRoutes);
 app.use('/api/store-wise-tasks', storeWiseTasksRoutes);
 app.use('/api/amazon-accounts', amazonAccountRoutes);
+app.use('/api/range-analysis', rangeAnalysisRoutes);
 
 
 const port = process.env.PORT || 5000;
