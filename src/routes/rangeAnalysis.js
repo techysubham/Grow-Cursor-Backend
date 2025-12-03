@@ -34,31 +34,32 @@ const normalizeText = (text) => {
 // Enhanced matching function that checks both full name and model-only
 // This allows matching "Silverado 1500" even when cache has "Chevrolet Silverado 1500"
 // Also handles cases like "F250" matching "Ford F-250" after normalization
-function findBestMatch(lineNormalized, lineLower, models) {
+
+// ============================================
+// AGGRESSIVE MATCHING FOR VEHICLES (eBay Motors)
+// ============================================
+// Uses 4 strategies including model-only matching
+function findBestMatchVehicles(lineNormalized, lineLower, models) {
   let bestMatch = null;
   let bestMatchPos = Infinity;
-  let bestMatchLength = 0; // Prefer longer matches to avoid partial matches (e.g., F-2 vs F-250)
+  let bestMatchLength = 0;
   
   for (const m of models) {
     let matchPos = -1;
     let matchLength = 0;
     
     // Strategy 1: Full name normalized match (e.g., "fordf250" for "Ford F-250")
-    // This is the most specific match - use the full normalized length
     if (m.fullNameNormalized && lineNormalized.includes(m.fullNameNormalized)) {
       matchPos = lineNormalized.indexOf(m.fullNameNormalized);
       matchLength = m.fullNameNormalized.length;
     }
     // Strategy 2: Model-only normalized match (e.g., "f250" without "ford")
-    // Only for model names > 3 chars to avoid false positives
-    // IMPORTANT: Use fullNameNormalized length for comparison to compete fairly with Strategy 1
+    // IMPORTANT: Check if make also appears in line for better accuracy
     else if (m.modelNormalized && m.modelNormalized.length > 3 && lineNormalized.includes(m.modelNormalized)) {
       const modelPos = lineNormalized.indexOf(m.modelNormalized);
-      // Check if make/brand also appears nearby (before the model)
       const makeNorm = m.makeNormalized || m.brandNormalized || '';
       if (makeNorm && lineNormalized.includes(makeNorm)) {
         const makePos = lineNormalized.indexOf(makeNorm);
-        // If make appears before model, use make position and full name length
         if (makePos < modelPos) {
           matchPos = makePos;
           matchLength = m.fullNameNormalized ? m.fullNameNormalized.length : (makeNorm.length + m.modelNormalized.length);
@@ -67,7 +68,6 @@ function findBestMatch(lineNormalized, lineLower, models) {
           matchLength = m.modelNormalized.length;
         }
       } else {
-        // No make found, just use model position
         matchPos = modelPos;
         matchLength = m.modelNormalized.length;
       }
@@ -77,14 +77,13 @@ function findBestMatch(lineNormalized, lineLower, models) {
       matchPos = lineLower.indexOf(m.fullNameLower);
       matchLength = m.fullNameLower.length;
     }
-    // Strategy 4: Model-only lowercase match (e.g., "f-250" or "silverado 1500")
-    // Only for model names > 4 chars to avoid false positives like "car", "van"
+    // Strategy 4: Model-only lowercase match (e.g., "silverado 1500")
     else if (m.modelLower && m.modelLower.length > 4 && lineLower.includes(m.modelLower)) {
       matchPos = lineLower.indexOf(m.modelLower);
       matchLength = m.modelLower.length;
     }
     
-    // Track the best match: prefer earlier position, then longer match (more specific)
+    // Track best match: prefer earlier position, then longer match
     if (matchPos !== -1) {
       if (matchPos < bestMatchPos || (matchPos === bestMatchPos && matchLength > bestMatchLength)) {
         bestMatch = m;
@@ -95,6 +94,55 @@ function findBestMatch(lineNormalized, lineLower, models) {
   }
   
   return bestMatch;
+}
+
+// ============================================
+// CONSERVATIVE MATCHING FOR DEVICES (Phones/Tablets)
+// ============================================
+// Only matches full names - NO model-only matching to avoid false positives
+// like "Touch" matching "UMi Touch" or "Pad Air" matching "OPPO Pad Air"
+function findBestMatchDevices(lineNormalized, lineLower, models) {
+  let bestMatch = null;
+  let bestMatchPos = Infinity;
+  let bestMatchLength = 0;
+  
+  for (const m of models) {
+    let matchPos = -1;
+    let matchLength = 0;
+    
+    // Strategy 1: Full name normalized match (e.g., "appleiphone15promax")
+    // This is the ONLY strategy for devices - must match the complete name
+    if (m.fullNameNormalized && m.fullNameNormalized.length > 4 && lineNormalized.includes(m.fullNameNormalized)) {
+      matchPos = lineNormalized.indexOf(m.fullNameNormalized);
+      matchLength = m.fullNameNormalized.length;
+    }
+    // Strategy 2: Full name lowercase match (e.g., "apple iphone 15 pro max")
+    else if (m.fullNameLower && m.fullNameLower.length > 5 && lineLower.includes(m.fullNameLower)) {
+      matchPos = lineLower.indexOf(m.fullNameLower);
+      matchLength = m.fullNameLower.length;
+    }
+    // NO model-only matching for devices - too many false positives!
+    
+    // Track best match: prefer earlier position, then longer match
+    if (matchPos !== -1) {
+      if (matchPos < bestMatchPos || (matchPos === bestMatchPos && matchLength > bestMatchLength)) {
+        bestMatch = m;
+        bestMatchPos = matchPos;
+        bestMatchLength = matchLength;
+      }
+    }
+  }
+  
+  return bestMatch;
+}
+
+// Wrapper function that chooses the right matching strategy based on type
+function findBestMatch(lineNormalized, lineLower, models, matchType = 'vehicles') {
+  if (matchType === 'vehicles') {
+    return findBestMatchVehicles(lineNormalized, lineLower, models);
+  } else {
+    return findBestMatchDevices(lineNormalized, lineLower, models);
+  }
 }
 
 // Load and cache vehicle models with pre-computed normalized strings
@@ -697,11 +745,10 @@ router.post('/analyze', requireAuth, requireRole('superadmin', 'listingadmin', '
     const modelCounts = new Map(); // Track counts per model
 
     for (const line of lines) {
-      // Use the enhanced findBestMatch function that handles:
-      // - Full name matches (e.g., "Ford F-250" → "fordf250")
-      // - Model-only matches (e.g., "Silverado 1500" matches "Chevrolet Silverado 1500")
-      // - Prefers longer matches (e.g., "F-250" wins over "F-2" for "F250")
-      const foundModel = findBestMatch(line.normalized, line.textLower, allModels);
+      // Use the appropriate matching function based on model type:
+      // - Vehicles: Aggressive matching with model-only support (e.g., "Silverado" → "Chevrolet Silverado")
+      // - Devices: Conservative matching with full name only (to avoid "Touch" → "UMi Touch")
+      const foundModel = findBestMatch(line.normalized, line.textLower, allModels, modelType);
 
       // Record result for this line
       const brandField = modelType === 'vehicles' ? 'make' : 'brand';
