@@ -66,7 +66,7 @@ const OrderSchema = new mongoose.Schema(
     amazonAccount: String,
     arrivingDate: String,
     beforeTax: Number,
-    EstimatedTax: Number,
+    estimatedTax: Number,
     azOrderId: String,
   },
   { timestamps: true }
