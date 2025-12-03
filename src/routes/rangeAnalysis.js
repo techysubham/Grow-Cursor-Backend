@@ -31,118 +31,50 @@ const normalizeText = (text) => {
     .trim();
 };
 
-// Enhanced matching function that checks both full name and model-only
-// This allows matching "Silverado 1500" even when cache has "Chevrolet Silverado 1500"
-// Also handles cases like "F250" matching "Ford F-250" after normalization
-
 // ============================================
-// AGGRESSIVE MATCHING FOR VEHICLES (eBay Motors)
+// SIMPLE FULL-NAME MATCHING (for both Vehicles and Devices)
 // ============================================
-// Uses 4 strategies including model-only matching
-function findBestMatchVehicles(lineNormalized, lineLower, models) {
-  let bestMatch = null;
-  let bestMatchPos = Infinity;
-  let bestMatchLength = 0;
-  
-  for (const m of models) {
-    let matchPos = -1;
-    let matchLength = 0;
-    
-    // Strategy 1: Full name normalized match (e.g., "fordf250" for "Ford F-250")
-    if (m.fullNameNormalized && lineNormalized.includes(m.fullNameNormalized)) {
-      matchPos = lineNormalized.indexOf(m.fullNameNormalized);
-      matchLength = m.fullNameNormalized.length;
-    }
-    // Strategy 2: Model-only normalized match (e.g., "f250" without "ford")
-    // IMPORTANT: Check if make also appears in line for better accuracy
-    else if (m.modelNormalized && m.modelNormalized.length > 3 && lineNormalized.includes(m.modelNormalized)) {
-      const modelPos = lineNormalized.indexOf(m.modelNormalized);
-      const makeNorm = m.makeNormalized || m.brandNormalized || '';
-      if (makeNorm && lineNormalized.includes(makeNorm)) {
-        const makePos = lineNormalized.indexOf(makeNorm);
-        if (makePos < modelPos) {
-          matchPos = makePos;
-          matchLength = m.fullNameNormalized ? m.fullNameNormalized.length : (makeNorm.length + m.modelNormalized.length);
-        } else {
-          matchPos = modelPos;
-          matchLength = m.modelNormalized.length;
-        }
-      } else {
-        matchPos = modelPos;
-        matchLength = m.modelNormalized.length;
-      }
-    }
-    // Strategy 3: Full name lowercase includes (e.g., "ford f-250")
-    else if (m.fullNameLower && lineLower.includes(m.fullNameLower)) {
-      matchPos = lineLower.indexOf(m.fullNameLower);
-      matchLength = m.fullNameLower.length;
-    }
-    // Strategy 4: Model-only lowercase match (e.g., "silverado 1500")
-    else if (m.modelLower && m.modelLower.length > 4 && lineLower.includes(m.modelLower)) {
-      matchPos = lineLower.indexOf(m.modelLower);
-      matchLength = m.modelLower.length;
-    }
-    
-    // Track best match: prefer earlier position, then longer match
-    if (matchPos !== -1) {
-      if (matchPos < bestMatchPos || (matchPos === bestMatchPos && matchLength > bestMatchLength)) {
-        bestMatch = m;
-        bestMatchPos = matchPos;
-        bestMatchLength = matchLength;
-      }
-    }
-  }
-  
-  return bestMatch;
-}
-
-// ============================================
-// CONSERVATIVE MATCHING FOR DEVICES (Phones/Tablets)
-// ============================================
-// Only matches full names - NO model-only matching to avoid false positives
-// like "Touch" matching "UMi Touch" or "Pad Air" matching "OPPO Pad Air"
-function findBestMatchDevices(lineNormalized, lineLower, models) {
-  let bestMatch = null;
-  let bestMatchPos = Infinity;
-  let bestMatchLength = 0;
-  
-  for (const m of models) {
-    let matchPos = -1;
-    let matchLength = 0;
-    
-    // Strategy 1: Full name normalized match (e.g., "appleiphone15promax")
-    // This is the ONLY strategy for devices - must match the complete name
-    if (m.fullNameNormalized && m.fullNameNormalized.length > 4 && lineNormalized.includes(m.fullNameNormalized)) {
-      matchPos = lineNormalized.indexOf(m.fullNameNormalized);
-      matchLength = m.fullNameNormalized.length;
-    }
-    // Strategy 2: Full name lowercase match (e.g., "apple iphone 15 pro max")
-    else if (m.fullNameLower && m.fullNameLower.length > 5 && lineLower.includes(m.fullNameLower)) {
-      matchPos = lineLower.indexOf(m.fullNameLower);
-      matchLength = m.fullNameLower.length;
-    }
-    // NO model-only matching for devices - too many false positives!
-    
-    // Track best match: prefer earlier position, then longer match
-    if (matchPos !== -1) {
-      if (matchPos < bestMatchPos || (matchPos === bestMatchPos && matchLength > bestMatchLength)) {
-        bestMatch = m;
-        bestMatchPos = matchPos;
-        bestMatchLength = matchLength;
-      }
-    }
-  }
-  
-  return bestMatch;
-}
-
-// Wrapper function that chooses the right matching strategy based on type
+// Only matches FULL names from cache and existing ranges
+// NO model-only matching - avoids false positives like "Truck" → "Chevrolet Truck"
+// Keeps longer-match preference to handle F-250 vs F-2 correctly
 function findBestMatch(lineNormalized, lineLower, models, matchType = 'vehicles') {
-  if (matchType === 'vehicles') {
-    return findBestMatchVehicles(lineNormalized, lineLower, models);
-  } else {
-    return findBestMatchDevices(lineNormalized, lineLower, models);
+  let bestMatch = null;
+  let bestMatchPos = Infinity;
+  let bestMatchLength = 0;
+  
+  for (const m of models) {
+    let matchPos = -1;
+    let matchLength = 0;
+    
+    // Strategy 1: Full name normalized match (e.g., "fordf250", "teslamodely")
+    // Removes hyphens/spaces so "Ford F-250" matches "fordf250" in "...fordf250..."
+    if (m.fullNameNormalized && m.fullNameNormalized.length > 3 && lineNormalized.includes(m.fullNameNormalized)) {
+      matchPos = lineNormalized.indexOf(m.fullNameNormalized);
+      matchLength = m.fullNameNormalized.length;
+    }
+    // Strategy 2: Full name lowercase match (e.g., "ford f-250", "tesla model y")
+    // Keeps original spacing/hyphens for exact phrase matching
+    else if (m.fullNameLower && m.fullNameLower.length > 4 && lineLower.includes(m.fullNameLower)) {
+      matchPos = lineLower.indexOf(m.fullNameLower);
+      matchLength = m.fullNameLower.length;
+    }
+    // NO model-only matching - this caused false positives like:
+    // - "Truck" → "Chevrolet Truck"
+    // - "Touch" → "UMi Touch"
+    // - "Forte" → "Kia Forte"
+    
+    // Track best match: prefer earlier position, then LONGER match
+    // This ensures "Ford F-250" (len 9) beats "Ford F-2" (len 7) when both match
+    if (matchPos !== -1) {
+      if (matchPos < bestMatchPos || (matchPos === bestMatchPos && matchLength > bestMatchLength)) {
+        bestMatch = m;
+        bestMatchPos = matchPos;
+        bestMatchLength = matchLength;
+      }
+    }
   }
+  
+  return bestMatch;
 }
 
 // Load and cache vehicle models with pre-computed normalized strings
