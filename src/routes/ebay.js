@@ -7,6 +7,8 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
 import Order from '../models/Order.js';
 import Return from '../models/Return.js';
+import Case from '../models/Case.js';
+import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
 import FitmentCache from '../models/FitmentCache.js';
@@ -14,6 +16,19 @@ import ConversationMeta from '../models/ConversationMeta.js';
 import { parseStringPromise } from 'xml2js';
 const router = express.Router();
 
+// ============================================
+// EBAY OAUTH SCOPES - Single source of truth
+// Used in both initial authorization AND token refresh
+// ============================================
+const EBAY_OAUTH_SCOPES = [
+  'https://api.ebay.com/oauth/api_scope',
+  'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+  'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
+  'https://api.ebay.com/oauth/api_scope/sell.finances',
+  'https://api.ebay.com/oauth/api_scope/sell.account',
+  'https://api.ebay.com/oauth/api_scope/sell.inventory',
+  'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
+].join(' ');
 
 // HELPER: Ensure Seller Token is Valid (Refreshes if < 2 mins left)
 async function ensureValidToken(seller) {
@@ -35,7 +50,7 @@ async function ensureValidToken(seller) {
       qs.stringify({
         grant_type: 'refresh_token',
         refresh_token: seller.ebayTokens.refresh_token,
-        scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+        scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
       }),
       {
         headers: {
@@ -265,19 +280,22 @@ async function extractTrackingNumber(fulfillmentHrefs, accessToken) {
 
 // 1. Start OAuth: Redirect to eBay
 router.get('/connect', (req, res) => {
+  console.log('========================================');
+  console.log('[eBay OAuth] /connect endpoint HIT!');
+  console.log('========================================');
+  
   const { token } = req.query; // Get JWT from query param
   if (!token) return res.status(400).send('Missing authentication token');
   
   const clientId = process.env.EBAY_CLIENT_ID;
   const ruName = process.env.EBAY_RU_NAME;
-  const scope = [
-    'https://api.ebay.com/oauth/api_scope',
-    'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
-  ].join(' ');
   
   // Pass the user's JWT as state parameter so we can identify them in callback
   const state = encodeURIComponent(token);
-  const redirectUrl = `https://auth.ebay.com/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(ruName)}&response_type=code&scope=${encodeURIComponent(scope)}&state=${state}`;
+  const redirectUrl = `https://auth.ebay.com/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(ruName)}&response_type=code&scope=${encodeURIComponent(EBAY_OAUTH_SCOPES)}&state=${state}`;
+  
+  console.log('[eBay OAuth] Scopes requested:', EBAY_OAUTH_SCOPES);
+  console.log('[eBay OAuth] Full redirect URL:', redirectUrl);
   res.redirect(redirectUrl);
 });
 
@@ -312,6 +330,20 @@ router.get('/callback', async (req, res) => {
     // Save tokens to seller
     const seller = await Seller.findOne({ user: userId });
     if (!seller) return res.status(404).send('Seller not found');
+
+    // Log the full token response for debugging
+    console.log(`[eBay OAuth] Full token response keys:`, Object.keys(tokenRes.data));
+    console.log(`[eBay OAuth] Seller connected. Scope granted by eBay: ${tokenRes.data.scope}`);
+    
+    // Check if payment dispute scope was granted
+    const grantedScope = tokenRes.data.scope || '';
+    if (!grantedScope.includes('sell.payment.dispute')) {
+      console.warn(`[eBay OAuth] WARNING: sell.payment.dispute scope NOT granted! Seller will not be able to fetch payment disputes.`);
+      console.warn(`[eBay OAuth] Make sure the scope is enabled in your eBay Developer Portal app settings.`);
+      console.warn(`[eBay OAuth] Granted scopes were: ${grantedScope || 'NONE'}`);
+    } else {
+      console.log(`[eBay OAuth] SUCCESS: sell.payment.dispute scope was granted!`);
+    }
 
     seller.ebayTokens = {
       access_token: tokenRes.data.access_token,
@@ -438,7 +470,7 @@ router.get('/orders', async (req, res) => {
           qs.stringify({
             grant_type: 'refresh_token',
             refresh_token: seller.ebayTokens.refresh_token,
-            scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+            scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
           }),
           {
             headers: {
@@ -610,9 +642,10 @@ router.get('/stored-orders', async (req, res) => {
             { trackingNumber: '' }
         ];
         
-        // Condition 2: Must NOT have an active cancellation request
-        // This ensures you don't see orders that the buyer wants to cancel
-        query.cancelState = { $in: ['NONE_REQUESTED', null, ''] }; 
+        // Condition 2: Include orders with no cancellation OR with IN_PROGRESS cancellation
+        // IN_PROGRESS means buyer requested cancel but seller hasn't responded yet
+        // These still need attention (either ship or cancel)
+        query.cancelState = { $in: ['NONE_REQUESTED', 'IN_PROGRESS', null, ''] }; 
     }
 
     // Apply search filters
@@ -823,7 +856,7 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
               qs.stringify({
                 grant_type: 'refresh_token',
                 refresh_token: seller.ebayTokens.refresh_token,
-                scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+                scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
               }),
               {
                 headers: {
@@ -1153,7 +1186,7 @@ router.post('/poll-new-orders', requireAuth, requireRole('fulfillmentadmin', 'su
             qs.stringify({
               grant_type: 'refresh_token',
               refresh_token: seller.ebayTokens.refresh_token,
-              scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+              scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
             }),
             {
               headers: {
@@ -1338,7 +1371,7 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
             qs.stringify({
               grant_type: 'refresh_token',
               refresh_token: seller.ebayTokens.refresh_token,
-              scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+              scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
             }),
             {
               headers: {
@@ -1810,7 +1843,7 @@ router.post('/fetch-returns', requireAuth, requireRole('fulfillmentadmin', 'supe
               qs.stringify({
                 grant_type: 'refresh_token',
                 refresh_token: seller.ebayTokens.refresh_token,
-                scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
               }),
               {
                 headers: {
@@ -1847,6 +1880,7 @@ router.post('/fetch-returns', requireAuth, requireRole('fulfillmentadmin', 'supe
 
           let newReturns = 0;
           let updatedReturns = 0;
+          let updateDetails = []; // Track updates for frontend snackbar
 
           for (const ebayReturn of returns) {
             // 1. Safe Extraction
@@ -1911,6 +1945,17 @@ router.post('/fetch-returns', requireAuth, requireRole('fulfillmentadmin', 'supe
                  existing.set(returnData);
                  await existing.save();
                  updatedReturns++;
+                 
+                 // Track update details for frontend snackbar
+                 if (!updateDetails) updateDetails = [];
+                 updateDetails.push({
+                   returnId: ebayReturn.returnId,
+                   orderId: returnData.orderId,
+                   changes: {
+                     ...(statusChanged && { status: { from: existing.returnStatus, to: returnData.returnStatus } }),
+                     ...(refundChanged && { refund: { from: existing.refundAmount?.value, to: returnData.refundAmount?.value } })
+                   }
+                 });
               } 
             } else {
               await Return.create(returnData);
@@ -1922,6 +1967,7 @@ router.post('/fetch-returns', requireAuth, requireRole('fulfillmentadmin', 'supe
             sellerName: sellerName,
             newReturns,
             updatedReturns,
+            updateDetails, // Include update details for frontend snackbar
             totalReturns: returns.length
           };
 
@@ -1959,12 +2005,25 @@ router.post('/fetch-returns', requireAuth, requireRole('fulfillmentadmin', 'supe
 // Get stored returns from database
 
 router.get('/stored-returns', async (req, res) => {
-  const { sellerId, status, limit = 100 } = req.query;
+  const { sellerId, status, reason, startDate, endDate, limit = 200 } = req.query;
   
   try {
     let query = {};
     if (sellerId) query.seller = sellerId;
     if (status) query.returnStatus = status;
+    if (reason) query.returnReason = reason;
+    
+    // Date range filter on creationDate
+    if (startDate || endDate) {
+      query.creationDate = {};
+      if (startDate) query.creationDate.$gte = new Date(startDate);
+      if (endDate) {
+        // Include the entire end date (end of day)
+        const endOfDay = new Date(endDate);
+        endOfDay.setHours(23, 59, 59, 999);
+        query.creationDate.$lte = endOfDay;
+      }
+    }
 
     const returns = await Return.find(query)
       .populate({
@@ -1978,13 +2037,456 @@ router.get('/stored-returns', async (req, res) => {
       .sort({ creationDate: -1 })
       .limit(parseInt(limit));
 
-    res.json({ returns, totalReturns: returns.length });
+    // Get total count for the query
+    const totalCount = await Return.countDocuments(query);
+
+    res.json({ returns, totalReturns: returns.length, totalCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 
+// ===== INR CASES ENDPOINTS =====
+
+// Fetch INR cases from eBay Post-Order API and store in DB
+router.post('/fetch-inr-cases', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+  try {
+    const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+      .populate('user', 'username');
+    
+    if (sellers.length === 0) {
+      return res.json({ message: 'No sellers with eBay tokens found', totalCases: 0 });
+    }
+
+    let totalNewCases = 0;
+    let totalUpdatedCases = 0;
+    const errors = [];
+
+    console.log(`[Fetch INR Cases] Starting for ${sellers.length} sellers`);
+
+    const results = await Promise.allSettled(
+      sellers.map(async (seller) => {
+        const sellerName = seller.user?.username || 'Unknown Seller';
+
+        try {
+          // Token refresh logic
+          const nowUTC = Date.now();
+          const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
+          const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
+          let accessToken = seller.ebayTokens.access_token;
+
+          if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
+            console.log(`[Fetch INR Cases] Refreshing token for seller ${sellerName}`);
+            const refreshRes = await axios.post(
+              'https://api.ebay.com/identity/v1/oauth2/token',
+              qs.stringify({
+                grant_type: 'refresh_token',
+                refresh_token: seller.ebayTokens.refresh_token,
+                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
+              }),
+              {
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
+                },
+              }
+            );
+            accessToken = refreshRes.data.access_token;
+            seller.ebayTokens.access_token = accessToken;
+            seller.ebayTokens.expires_in = refreshRes.data.expires_in;
+            seller.ebayTokens.fetchedAt = new Date(nowUTC);
+            await seller.save();
+          }
+
+          // Fetch INR cases from Post-Order API
+          const inquiryUrl = 'https://api.ebay.com/post-order/v2/inquiry/search';
+          const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+          
+          const inquiryRes = await axios.get(inquiryUrl, {
+            headers: {
+              'Authorization': `IAF ${accessToken}`,
+              'Content-Type': 'application/json',
+              'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+            },
+            params: {
+              'creation_date_range_from': thirtyDaysAgo,
+              'limit': 200
+            }
+          });
+
+          const cases = inquiryRes.data.members || [];
+          console.log(`[Fetch INR Cases] Seller ${sellerName}: Found ${cases.length} INR cases`);
+
+          let newCases = 0;
+          let updatedCases = 0;
+          let updateDetails = [];
+
+          for (const ebayCase of cases) {
+            // Determine case type
+            const inquiryType = ebayCase.inquiryType || 'INR';
+            let caseType = 'INR';
+            if (inquiryType === 'SNAD' || inquiryType === 'SIGNIFICANTLY_NOT_AS_DESCRIBED') {
+              caseType = 'SNAD';
+            } else if (inquiryType !== 'INR' && inquiryType !== 'ITEM_NOT_RECEIVED') {
+              caseType = 'OTHER';
+            }
+
+            const caseData = {
+              seller: seller._id,
+              caseId: ebayCase.inquiryId,
+              caseType,
+              orderId: ebayCase.orderId || ebayCase.orderNumber,
+              buyerUsername: ebayCase.buyerLoginName,
+              status: ebayCase.state || ebayCase.status || 'OPEN',
+              
+              // Dates
+              creationDate: ebayCase.creationDate?.value ? new Date(ebayCase.creationDate.value) : null,
+              sellerResponseDueDate: ebayCase.sellerResponseDue?.respondByDate?.value 
+                ? new Date(ebayCase.sellerResponseDue.respondByDate.value) : null,
+              escalationDate: ebayCase.escalationDate?.value ? new Date(ebayCase.escalationDate.value) : null,
+              closedDate: ebayCase.closedDate?.value ? new Date(ebayCase.closedDate.value) : null,
+              
+              // Item Info
+              itemId: ebayCase.itemId,
+              itemTitle: ebayCase.itemTitle,
+              
+              // Amount
+              claimAmount: {
+                value: String(ebayCase.claimAmount?.value || 0),
+                currency: ebayCase.claimAmount?.currency || 'USD'
+              },
+              
+              // Resolution
+              resolution: ebayCase.resolution || null,
+              sellerResponse: ebayCase.sellerResponse || null,
+              
+              rawData: ebayCase
+            };
+
+            const existing = await Case.findOne({ caseId: ebayCase.inquiryId });
+            
+            if (existing) {
+              // Compare for changes
+              const statusChanged = existing.status !== caseData.status;
+              const dueDateChanged = (existing.sellerResponseDueDate?.getTime() || 0) !== 
+                (caseData.sellerResponseDueDate?.getTime() || 0);
+              
+              if (statusChanged || dueDateChanged) {
+                console.log(`[Update] Case ${ebayCase.inquiryId}: Status ${existing.status} -> ${caseData.status}`);
+                existing.set(caseData);
+                await existing.save();
+                updatedCases++;
+                
+                updateDetails.push({
+                  caseId: ebayCase.inquiryId,
+                  orderId: caseData.orderId,
+                  changes: {
+                    ...(statusChanged && { status: { from: existing.status, to: caseData.status } })
+                  }
+                });
+              }
+            } else {
+              await Case.create(caseData);
+              newCases++;
+            }
+          }
+
+          return {
+            sellerName: sellerName,
+            newCases,
+            updatedCases,
+            updateDetails,
+            totalCases: cases.length
+          };
+
+        } catch (err) {
+          console.error(`[Fetch INR Cases] Error for seller ${sellerName}:`, err.message);
+          throw new Error(`${sellerName}: ${err.message}`);
+        }
+      })
+    );
+
+    const successResults = [];
+    results.forEach((result) => {
+      if (result.status === 'fulfilled') {
+        successResults.push(result.value);
+        totalNewCases += result.value.newCases;
+        totalUpdatedCases += result.value.updatedCases;
+      } else {
+        errors.push(result.reason.message);
+      }
+    });
+
+    res.json({
+      message: `Fetched INR cases for ${successResults.length} sellers`,
+      totalNewCases,
+      totalUpdatedCases,
+      results: successResults,
+      errors: errors.length > 0 ? errors : undefined
+    });
+
+  } catch (err) {
+    console.error('[Fetch INR Cases] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get stored INR cases from database
+router.get('/stored-inr-cases', async (req, res) => {
+  const { sellerId, status, caseType, limit = 200 } = req.query;
+  
+  try {
+    let query = {};
+    if (sellerId) query.seller = sellerId;
+    if (status) query.status = status;
+    if (caseType) query.caseType = caseType;
+
+    const cases = await Case.find(query)
+      .populate({
+        path: 'seller',
+        select: 'user',
+        populate: {
+          path: 'user',
+          select: 'username'
+        }
+      })
+      .sort({ creationDate: -1 })
+      .limit(parseInt(limit));
+
+    const totalCount = await Case.countDocuments(query);
+
+    res.json({ cases, totalCases: cases.length, totalCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ===== PAYMENT DISPUTES ENDPOINTS =====
+
+// Fetch Payment Disputes from eBay Fulfillment API and store in DB
+router.post('/fetch-payment-disputes', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+  try {
+    const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+      .populate('user', 'username');
+    
+    if (sellers.length === 0) {
+      return res.json({ message: 'No sellers with eBay tokens found', totalDisputes: 0 });
+    }
+
+    let totalNewDisputes = 0;
+    let totalUpdatedDisputes = 0;
+    const errors = [];
+
+    console.log(`[Fetch Payment Disputes] Starting for ${sellers.length} sellers`);
+
+    const results = await Promise.allSettled(
+      sellers.map(async (seller) => {
+        const sellerName = seller.user?.username || 'Unknown Seller';
+
+        try {
+          // Token refresh logic
+          const nowUTC = Date.now();
+          const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
+          const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
+          let accessToken = seller.ebayTokens.access_token;
+
+          if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
+            console.log(`[Fetch Payment Disputes] Refreshing token for seller ${sellerName}`);
+            const refreshRes = await axios.post(
+              'https://api.ebay.com/identity/v1/oauth2/token',
+              qs.stringify({
+                grant_type: 'refresh_token',
+                refresh_token: seller.ebayTokens.refresh_token,
+                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
+              }),
+              {
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
+                },
+              }
+            );
+            accessToken = refreshRes.data.access_token;
+            seller.ebayTokens.access_token = accessToken;
+            seller.ebayTokens.expires_in = refreshRes.data.expires_in;
+            seller.ebayTokens.fetchedAt = new Date(nowUTC);
+            await seller.save();
+          }
+
+          // Fetch Payment Disputes from Fulfillment API
+          // Uses Bearer token and the payment_dispute_summary endpoint
+          // IMPORTANT: Requires sell.payment.dispute scope (different from sell.fulfillment)
+          // Docs: https://developer.ebay.com/api-docs/sell/fulfillment/resources/payment_dispute/methods/getPaymentDisputeSummaries
+          const disputeUrl = 'https://apiz.ebay.com/sell/fulfillment/v1/payment_dispute_summary';
+          
+          let disputes = [];
+          try {
+            const disputeRes = await axios.get(disputeUrl, {
+              headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+              },
+              params: {
+                'limit': 200
+              }
+            });
+            disputes = disputeRes.data.paymentDisputeSummaries || [];
+            console.log(`[Fetch Payment Disputes] Seller ${sellerName}: Found ${disputes.length} disputes`);
+          } catch (apiErr) {
+            // Log the actual error for debugging
+            const errMsg = apiErr.response?.data?.errors?.[0]?.message || apiErr.message;
+            const errCode = apiErr.response?.status;
+            console.log(`[Fetch Payment Disputes] Seller ${sellerName}: API Error - ${errCode} ${errMsg}`);
+            
+            // 404 might mean no disputes, 403 means missing scope
+            if (errCode === 404) {
+              disputes = [];
+            } else if (errCode === 403) {
+              // Missing sell.payment.dispute scope - seller needs to re-authorize
+              console.log(`[Fetch Payment Disputes] Seller ${sellerName}: Missing sell.payment.dispute scope - needs re-authorization`);
+              throw new Error(`Missing payment dispute scope - seller needs to re-connect eBay account`);
+            } else {
+              // Re-throw other errors
+              throw apiErr;
+            }
+          }
+
+          let newDisputes = 0;
+          let updatedDisputes = 0;
+          let updateDetails = [];
+
+          for (const ebayDispute of disputes) {
+            const disputeData = {
+              seller: seller._id,
+              paymentDisputeId: ebayDispute.paymentDisputeId,
+              orderId: ebayDispute.orderId,
+              buyerUsername: ebayDispute.buyerUsername,
+              
+              // Status & Reason
+              paymentDisputeStatus: ebayDispute.paymentDisputeStatus,
+              reason: ebayDispute.reason,
+              
+              // Dates
+              openDate: ebayDispute.openDate ? new Date(ebayDispute.openDate) : null,
+              respondByDate: ebayDispute.respondByDate ? new Date(ebayDispute.respondByDate) : null,
+              closedDate: ebayDispute.closedDate ? new Date(ebayDispute.closedDate) : null,
+              
+              // Amounts
+              amount: {
+                value: String(ebayDispute.amount?.value || 0),
+                currency: ebayDispute.amount?.currency || 'USD'
+              },
+              
+              // Resolution
+              sellerProtectionDecision: ebayDispute.sellerResponse?.sellerProtectionDecision || null,
+              resolution: ebayDispute.resolution?.resolutionType || null,
+              
+              // Evidence
+              evidenceDeadline: ebayDispute.evidenceDeadline ? new Date(ebayDispute.evidenceDeadline) : null,
+              
+              rawData: ebayDispute
+            };
+
+            const existing = await PaymentDispute.findOne({ paymentDisputeId: ebayDispute.paymentDisputeId });
+            
+            if (existing) {
+              // Compare for changes
+              const statusChanged = existing.paymentDisputeStatus !== disputeData.paymentDisputeStatus;
+              const dueDateChanged = (existing.respondByDate?.getTime() || 0) !== 
+                (disputeData.respondByDate?.getTime() || 0);
+              
+              if (statusChanged || dueDateChanged) {
+                console.log(`[Update] Dispute ${ebayDispute.paymentDisputeId}: Status ${existing.paymentDisputeStatus} -> ${disputeData.paymentDisputeStatus}`);
+                existing.set(disputeData);
+                await existing.save();
+                updatedDisputes++;
+                
+                updateDetails.push({
+                  paymentDisputeId: ebayDispute.paymentDisputeId,
+                  orderId: disputeData.orderId,
+                  changes: {
+                    ...(statusChanged && { status: { from: existing.paymentDisputeStatus, to: disputeData.paymentDisputeStatus } })
+                  }
+                });
+              }
+            } else {
+              await PaymentDispute.create(disputeData);
+              newDisputes++;
+            }
+          }
+
+          return {
+            sellerName: sellerName,
+            newDisputes,
+            updatedDisputes,
+            updateDetails,
+            totalDisputes: disputes.length
+          };
+
+        } catch (err) {
+          console.error(`[Fetch Payment Disputes] Error for seller ${sellerName}:`, err.message);
+          throw new Error(`${sellerName}: ${err.message}`);
+        }
+      })
+    );
+
+    const successResults = [];
+    results.forEach((result) => {
+      if (result.status === 'fulfilled') {
+        successResults.push(result.value);
+        totalNewDisputes += result.value.newDisputes;
+        totalUpdatedDisputes += result.value.updatedDisputes;
+      } else {
+        errors.push(result.reason.message);
+      }
+    });
+
+    res.json({
+      message: `Fetched payment disputes for ${successResults.length} sellers`,
+      totalNewDisputes,
+      totalUpdatedDisputes,
+      results: successResults,
+      errors: errors.length > 0 ? errors : undefined
+    });
+
+  } catch (err) {
+    console.error('[Fetch Payment Disputes] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get stored Payment Disputes from database
+router.get('/stored-payment-disputes', async (req, res) => {
+  const { sellerId, status, reason, limit = 200 } = req.query;
+  
+  try {
+    let query = {};
+    if (sellerId) query.seller = sellerId;
+    if (status) query.paymentDisputeStatus = status;
+    if (reason) query.reason = reason;
+
+    const disputes = await PaymentDispute.find(query)
+      .populate({
+        path: 'seller',
+        select: 'user',
+        populate: {
+          path: 'user',
+          select: 'username'
+        }
+      })
+      .sort({ openDate: -1 })
+      .limit(parseInt(limit));
+
+    const totalCount = await PaymentDispute.countDocuments(query);
+
+    res.json({ disputes, totalDisputes: disputes.length, totalCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
 
@@ -1993,10 +2495,12 @@ router.get('/stored-returns', async (req, res) => {
 router.post('/sync-inbox', requireAuth, requireRole('fulfillmentadmin', 'superadmin','hoc', 'compliancemanager'), async (req, res) => {
   try {
     console.log('[Sync Inbox] Starting smart message sync...');
-    const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } });
+    const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } }).populate('user', 'username email');
     let totalNew = 0;
+    const syncResults = []; // Track per-seller results
 
     for (const seller of sellers) {
+      const sellerName = seller.user?.username || seller.user?.email || seller._id;
       try {
         // 1. Ensure Token is Valid
         const token = await ensureValidToken(seller);
@@ -2009,11 +2513,11 @@ router.post('/sync-inbox', requireAuth, requireRole('fulfillmentadmin', 'superad
             // INCREMENTAL SYNC: Fetch from last poll time
             // We subtract 15 minutes overlap to ensure no messages are missed due to server latency
             startTime = new Date(new Date(seller.lastMessagePolledAt).getTime() - 15 * 60 * 1000);
-            console.log(`[${seller.user}] Incremental sync from: ${startTime.toISOString()}`);
+            console.log(`[${sellerName}] Incremental sync from: ${startTime.toISOString()}`);
         } else {
             // INITIAL SYNC: Fetch last 12 Days
             startTime = new Date(now.getTime() - 12 * 24 * 60 * 60 * 1000);
-            console.log(`[${seller.user}] First-time sync from: ${startTime.toISOString()} (Last 10 Days)`);
+            console.log(`[${sellerName}] First-time sync from: ${startTime.toISOString()} (Last 10 Days)`);
         }
         
         const startTimeStr = startTime.toISOString();
@@ -2051,6 +2555,7 @@ router.post('/sync-inbox', requireAuth, requireRole('fulfillmentadmin', 'superad
         if (result.GetMemberMessagesResponse.Ack[0] === 'Failure') {
             const error = result.GetMemberMessagesResponse.Errors?.[0]?.LongMessage?.[0];
             console.error(`eBay API Failure for seller ${seller._id}:`, error);
+            syncResults.push({ sellerName, newMessages: 0, error: error });
             continue;
         }
 
@@ -2066,7 +2571,8 @@ router.post('/sync-inbox', requireAuth, requireRole('fulfillmentadmin', 'superad
           }
         }
         
-        console.log(`[Sync Inbox] Seller ${seller._id}: Fetched ${messages.length}. Saved ${newForThisSeller} new.`);
+        console.log(`[Sync Inbox] Seller ${sellerName}: Fetched ${messages.length}. Saved ${newForThisSeller} new.`);
+        syncResults.push({ sellerName, newMessages: newForThisSeller, fetched: messages.length });
 
         // 5. Update Polling Timestamp (Only on success)
         seller.lastMessagePolledAt = now;
@@ -2074,10 +2580,11 @@ router.post('/sync-inbox', requireAuth, requireRole('fulfillmentadmin', 'superad
 
       } catch (err) {
         console.error(`Sync error for seller ${seller._id}:`, err.message);
+        syncResults.push({ sellerName, newMessages: 0, error: err.message });
       }
     }
 
-    res.json({ success: true, totalNew });
+    res.json({ success: true, totalNewMessages: totalNew, syncResults });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2442,7 +2949,7 @@ router.post('/fetch-messages', requireAuth, requireRole('fulfillmentadmin', 'sup
               qs.stringify({
                 grant_type: 'refresh_token',
                 refresh_token: seller.ebayTokens.refresh_token,
-                scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
               }),
               {
                 headers: {

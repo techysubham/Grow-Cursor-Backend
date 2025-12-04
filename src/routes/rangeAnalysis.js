@@ -13,6 +13,19 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 const router = Router();
 
 // ============================================
+// EBAY OAUTH SCOPES - Single source of truth
+// ============================================
+const EBAY_OAUTH_SCOPES = [
+  'https://api.ebay.com/oauth/api_scope',
+  'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+  'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
+  'https://api.ebay.com/oauth/api_scope/sell.finances',
+  'https://api.ebay.com/oauth/api_scope/sell.account',
+  'https://api.ebay.com/oauth/api_scope/sell.inventory',
+  'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
+].join(' ');
+
+// ============================================
 // CACHING SYSTEM FOR VEHICLE MODELS
 // ============================================
 // This avoids fetching 8702 documents from MongoDB on every request
@@ -187,7 +200,7 @@ async function ensureValidToken(seller) {
     qs.stringify({
       grant_type: 'refresh_token',
       refresh_token: seller.ebayTokens.refresh_token,
-      scope: 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+      scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
     }),
     {
       headers: {

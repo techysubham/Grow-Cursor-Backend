@@ -53,4 +53,22 @@ router.delete('/marketplaces/:region', requireAuth, requireRole('seller'), async
   res.json(seller);
 });
 
+// Disconnect eBay account (clear tokens) - allows re-authorization with new scopes
+router.delete('/disconnect-ebay', requireAuth, requireRole('seller'), async (req, res) => {
+  try {
+    const seller = await Seller.findOne({ user: req.user.userId });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    
+    // Clear the eBay tokens
+    seller.ebayTokens = {};
+    await seller.save();
+    
+    console.log(`eBay disconnected for seller ${seller._id}`);
+    res.json({ message: 'eBay account disconnected successfully. You can now reconnect with updated permissions.' });
+  } catch (error) {
+    console.error('Error disconnecting eBay:', error);
+    res.status(500).json({ error: 'Failed to disconnect eBay account' });
+  }
+});
+
 export default router;
