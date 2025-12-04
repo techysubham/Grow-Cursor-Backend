@@ -73,6 +73,152 @@ async function ensureValidToken(seller) {
   }
 }
 
+// ============================================
+// HELPER: Fetch ALL Ad Fees from Finances API
+// ============================================
+// Returns a Map of orderId -> adFee amount
+// This is more efficient than fetching per-order
+async function fetchAllAdFees(accessToken, sinceDate = null) {
+  const adFeeMap = new Map();
+  let offset = 0;
+  const limit = 200;
+  let hasMore = true;
+  
+  console.log(`[Finances API] Fetching all AD_FEE transactions...`);
+  
+  try {
+    while (hasMore) {
+      // Build URL with filter - use proper encoding
+      const baseUrl = 'https://apiz.ebay.com/sell/finances/v1/transaction';
+      const filterValue = 'transactionType:{NON_SALE_CHARGE}';
+      
+      console.log(`[Finances API] Calling: ${baseUrl} with filter=${filterValue}, offset=${offset}`);
+      
+      const response = await axios.get(baseUrl, {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+        },
+        params: {
+          filter: filterValue,
+          limit: limit,
+          offset: offset
+        }
+      });
+
+      const transactions = response.data?.transactions || [];
+      console.log(`[Finances API] Fetched ${transactions.length} NON_SALE_CHARGE transactions at offset ${offset}`);
+      
+      for (const txn of transactions) {
+        // Check if this is an AD_FEE transaction
+        if (txn.feeType === 'AD_FEE' && txn.references) {
+          // Find the ORDER_ID reference
+          const orderRef = txn.references.find(ref => ref.referenceType === 'ORDER_ID');
+          
+          if (orderRef) {
+            const orderId = orderRef.referenceId;
+            const feeAmount = Math.abs(parseFloat(txn.amount?.value || 0));
+            
+            // Handle CREDIT (refund) vs DEBIT (charge)
+            // DEBIT = charged, CREDIT = refunded
+            const existingFee = adFeeMap.get(orderId) || 0;
+            if (txn.bookingEntry === 'CREDIT') {
+              // This is a refund of ad fee (subtract from total)
+              adFeeMap.set(orderId, existingFee - feeAmount);
+            } else {
+              // This is a charge (add to total)
+              adFeeMap.set(orderId, existingFee + feeAmount);
+            }
+          }
+        }
+      }
+      
+      // Check if there are more transactions
+      if (transactions.length < limit) {
+        hasMore = false;
+      } else {
+        offset += limit;
+        // Safety limit - don't fetch more than 10000 transactions
+        if (offset >= 10000) {
+          console.log(`[Finances API] Reached safety limit at offset ${offset}`);
+          hasMore = false;
+        }
+      }
+    }
+    
+    console.log(`[Finances API] Built ad fee map with ${adFeeMap.size} orders`);
+    return { success: true, adFeeMap };
+    
+  } catch (error) {
+    if (error.response?.status === 403) {
+      console.log(`[Finances API] Missing sell.finances scope`);
+      return { success: false, error: 'missing_scope', adFeeMap: new Map() };
+    }
+    // Log detailed error info for debugging
+    console.error(`[Finances API] Error fetching ad fees:`, error.message);
+    console.error(`[Finances API] Status:`, error.response?.status);
+    console.error(`[Finances API] Response:`, JSON.stringify(error.response?.data, null, 2));
+    return { success: false, error: error.message, adFeeMap: new Map() };
+  }
+}
+
+// Single order lookup (used when ad fee map is not available)
+async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null) {
+  // If we have a pre-built map, use it
+  if (adFeeMap) {
+    const adFee = adFeeMap.get(orderId) || 0;
+    return { success: true, adFeeGeneral: adFee };
+  }
+  
+  // Otherwise, we need to search through transactions
+  // This is less efficient but works for single lookups
+  try {
+    const response = await axios.get(
+      `https://apiz.ebay.com/sell/finances/v1/transaction`,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+        },
+        params: {
+          filter: `transactionType:{NON_SALE_CHARGE}`,
+          limit: 200
+        }
+      }
+    );
+
+    const transactions = response.data?.transactions || [];
+    let adFeeTotal = 0;
+
+    for (const txn of transactions) {
+      if (txn.feeType === 'AD_FEE' && txn.references) {
+        const matchingRef = txn.references.find(
+          ref => ref.referenceType === 'ORDER_ID' && ref.referenceId === orderId
+        );
+        
+        if (matchingRef) {
+          const feeAmount = Math.abs(parseFloat(txn.amount?.value || 0));
+          if (txn.bookingEntry === 'CREDIT') {
+            adFeeTotal -= feeAmount;
+          } else {
+            adFeeTotal += feeAmount;
+          }
+        }
+      }
+    }
+
+    return { success: true, adFeeGeneral: Math.max(0, adFeeTotal) };
+  } catch (error) {
+    if (error.response?.status === 403) {
+      return { success: false, error: 'missing_scope', adFeeGeneral: null };
+    }
+    console.error(`[Finances API] Error fetching ad fee for ${orderId}:`, error.message);
+    return { success: false, error: error.message, adFeeGeneral: null };
+  }
+}
+
 
 // --- NEW CONFIG: AUTOMATED WELCOME MESSAGE ---
 const ENABLE_AUTO_WELCOME = true; // Set to false to disable
@@ -719,6 +865,120 @@ router.get('/stored-orders', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Test endpoint to check Finances API basic connectivity (no filter)
+router.get('/test-finances-basic', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  const { sellerId } = req.query;
+  
+  if (!sellerId) {
+    return res.status(400).json({ error: 'sellerId query param is required' });
+  }
+  
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller || !seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not found or not connected to eBay' });
+    }
+    
+    const accessToken = await ensureValidToken(seller);
+    
+    console.log(`[Test Finances Basic] Testing API without filter...`);
+    
+    // Try WITHOUT any filter first
+    const response = await axios.get(
+      `https://apiz.ebay.com/sell/finances/v1/transaction`,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+        },
+        params: {
+          limit: 10
+        }
+      }
+    );
+    
+    console.log(`[Test Finances Basic] Success! Found ${response.data?.transactions?.length || 0} transactions`);
+    
+    // Show first transaction for debugging
+    const firstTxn = response.data?.transactions?.[0];
+    
+    res.json({
+      success: true,
+      total: response.data?.total || 0,
+      transactionCount: response.data?.transactions?.length || 0,
+      firstTransaction: firstTxn,
+      allTransactionTypes: [...new Set((response.data?.transactions || []).map(t => t.transactionType))]
+    });
+    
+  } catch (error) {
+    console.error(`[Test Finances Basic] Error:`, error.response?.data || error.message);
+    console.error(`[Test Finances Basic] Status:`, error.response?.status);
+    res.status(error.response?.status || 500).json({
+      error: error.message,
+      ebayError: error.response?.data,
+      status: error.response?.status
+    });
+  }
+});
+
+// Test endpoint to check Finances API for a single order
+router.get('/test-finances/:orderId', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  const { orderId } = req.params;
+  const { sellerId } = req.query;
+  
+  if (!sellerId) {
+    return res.status(400).json({ error: 'sellerId query param is required' });
+  }
+  
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller || !seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not found or not connected to eBay' });
+    }
+    
+    const accessToken = await ensureValidToken(seller);
+    
+    // Make direct API call to see raw response
+    const filterValue = `orderId:{${orderId}}`;
+    console.log(`[Test Finances] Testing order: ${orderId}`);
+    console.log(`[Test Finances] Filter: ${filterValue}`);
+    
+    const response = await axios.get(
+      `https://apiz.ebay.com/sell/finances/v1/transaction`,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+        },
+        params: {
+          filter: filterValue,
+          limit: 50
+        }
+      }
+    );
+    
+    console.log(`[Test Finances] Full response:`, JSON.stringify(response.data, null, 2));
+    
+    res.json({
+      orderId,
+      filter: filterValue,
+      rawResponse: response.data,
+      transactionCount: response.data?.transactions?.length || 0
+    });
+    
+  } catch (error) {
+    console.error(`[Test Finances] Error:`, error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: error.message,
+      ebayError: error.response?.data,
+      status: error.response?.status
+    });
+  }
+});
+
 // Update ad fee general for an order
 router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
   const { orderId } = req.params;
@@ -741,6 +1001,144 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
     
     res.json({ success: true, order });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get count of orders needing ad fee backfill
+router.get('/backfill-ad-fees/count', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  const { sellerId, sinceDate } = req.query;
+  
+  if (!sellerId) {
+    return res.status(400).json({ error: 'sellerId is required' });
+  }
+  
+  try {
+    let query = { seller: sellerId };
+    
+    if (sinceDate) {
+      query.creationDate = { $gte: new Date(sinceDate) };
+    }
+    
+    // Count orders without adFeeGeneral
+    const needsBackfill = await Order.countDocuments({
+      ...query,
+      $or: [
+        { adFeeGeneral: { $exists: false } },
+        { adFeeGeneral: null },
+        { adFeeGeneral: 0 }
+      ]
+    });
+    
+    const totalOrders = await Order.countDocuments(query);
+    const alreadyHasAdFee = totalOrders - needsBackfill;
+    
+    res.json({ 
+      totalOrders, 
+      needsBackfill, 
+      alreadyHasAdFee 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Backfill ad fees from eBay Finances API for orders since a given date
+router.post('/backfill-ad-fees', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  const { sellerId, sinceDate, skipAlreadySet = true } = req.body;
+  
+  if (!sellerId) {
+    return res.status(400).json({ error: 'sellerId is required' });
+  }
+  
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+    
+    if (!seller.ebayTokens || !seller.ebayTokens.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+    
+    // Ensure we have a valid token
+    const accessToken = await ensureValidToken(seller);
+    
+    // Build query for orders
+    let query = { seller: sellerId };
+    const effectiveSinceDate = sinceDate ? new Date(sinceDate) : new Date('2025-11-01');
+    query.creationDate = { $gte: effectiveSinceDate };
+    
+    // Optionally skip orders that already have adFeeGeneral set
+    if (skipAlreadySet) {
+      query.$or = [
+        { adFeeGeneral: { $exists: false } },
+        { adFeeGeneral: null },
+        { adFeeGeneral: 0 }
+      ];
+    }
+    
+    // Get ALL orders to process (no limit)
+    const orders = await Order.find(query).sort({ creationDate: -1 });
+    
+    console.log(`[Backfill Ad Fees] Found ${orders.length} orders to process for seller ${seller.username || seller._id}`);
+    
+    if (orders.length === 0) {
+      return res.json({
+        message: 'No orders found to backfill',
+        results: { total: 0, success: 0, failed: 0, skipped: 0, errors: [] }
+      });
+    }
+    
+    // STEP 1: Fetch ALL ad fees from eBay in one batch (much more efficient!)
+    console.log(`[Backfill Ad Fees] Fetching all ad fees since ${effectiveSinceDate.toISOString()}...`);
+    const adFeeResult = await fetchAllAdFees(accessToken, effectiveSinceDate);
+    
+    if (!adFeeResult.success) {
+      return res.status(500).json({ error: `Failed to fetch ad fees: ${adFeeResult.error}` });
+    }
+    
+    const adFeeMap = adFeeResult.adFeeMap;
+    console.log(`[Backfill Ad Fees] Found ${adFeeMap.size} ad fee transactions from eBay`);
+    
+    const results = {
+      total: orders.length,
+      success: 0,
+      failed: 0,
+      skipped: 0,
+      errors: []
+    };
+    
+    // STEP 2: Match orders to ad fees and update
+    for (let i = 0; i < orders.length; i++) {
+      const order = orders[i];
+      try {
+        const adFee = adFeeMap.get(order.orderId);
+        
+        if (adFee && adFee > 0) {
+          await Order.findByIdAndUpdate(order._id, { adFeeGeneral: adFee });
+          results.success++;
+          console.log(`[Backfill ${i+1}/${orders.length}] Order ${order.orderId}: Ad Fee = $${adFee}`);
+        } else {
+          results.skipped++;
+          console.log(`[Backfill ${i+1}/${orders.length}] Order ${order.orderId}: No ad fee found`);
+        }
+      } catch (orderErr) {
+        results.failed++;
+        if (results.errors.length < 10) {
+          results.errors.push({ orderId: order.orderId, error: orderErr.message });
+        }
+        console.log(`[Backfill ${i+1}/${orders.length}] Order ${order.orderId}: Exception - ${orderErr.message}`);
+      }
+    }
+    
+    res.json({
+      message: `Backfill complete: ${results.success} updated, ${results.skipped} no ad fee, ${results.failed} failed`,
+      results
+    });
+    
+  } catch (err) {
+    console.error('[Backfill Ad Fees] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1245,6 +1643,17 @@ router.post('/poll-new-orders', requireAuth, requireRole('fulfillmentadmin', 'su
               newOrders.push(newOrder);
               console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
               await sendAutoWelcomeMessage(seller, newOrder);
+              
+              // Fetch ad fee from eBay Finances API
+              try {
+                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId);
+                if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
+                  await Order.findByIdAndUpdate(newOrder._id, { adFeeGeneral: adFeeResult.adFeeGeneral });
+                  console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
+                }
+              } catch (adFeeErr) {
+                console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
+              }
             }
           }
         }
@@ -1478,6 +1887,20 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
                 // Always save ALL changes to DB (even non-notifiable)
                 Object.assign(existingOrder, orderData);
                 await existingOrder.save();
+                
+                // Fetch ad fee if not already set
+                if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
+                  try {
+                    const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId);
+                    if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
+                      existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
+                      await existingOrder.save();
+                      console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
+                    }
+                  } catch (adFeeErr) {
+                    console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
+                  }
+                }
                 
                 // Only add to notification list if there are notifiable changes
                 if (notifiableChanges.length > 0) {

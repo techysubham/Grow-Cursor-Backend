@@ -29,6 +29,7 @@ import storeWiseTasksRoutes from './routes/storeWiseTasks.js';
 
 import amazonAccountRoutes from './routes/amazonAccounts.js';
 import rangeAnalysisRoutes from './routes/rangeAnalysis.js';
+import ideasRoutes from './routes/ideas.js';
 
 const app = express();
 
@@ -73,6 +74,7 @@ app.use('/api/employee-profiles', employeeProfilesRoutes);
 app.use('/api/store-wise-tasks', storeWiseTasksRoutes);
 app.use('/api/amazon-accounts', amazonAccountRoutes);
 app.use('/api/range-analysis', rangeAnalysisRoutes);
+app.use('/api/ideas', ideasRoutes);
 
 
 const port = process.env.PORT || 5000;
