@@ -3318,7 +3318,7 @@ router.post('/sync-thread', requireAuth, requireRole('fulfillmentadmin', 'supera
 
 // 3. SEND MESSAGE (Chat Window)
 router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
-  const { orderId, buyerUsername, itemId, body, subject } = req.body;
+  const { orderId, buyerUsername, itemId, body, subject, mediaUrls } = req.body;
 
   try {
     let seller = null;
@@ -3391,6 +3391,11 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
     let xmlRequest;
     let callName;
 
+    // Construct Media XML if images are present
+    const mediaXml = (mediaUrls && mediaUrls.length > 0) 
+      ? `<MessageMedia>${mediaUrls.map(url => `<MediaURL>${url}</MediaURL>`).join('')}</MessageMedia>`
+      : '';
+
     // CASE 1: Transaction Message (Use AddMemberMessageAAQToPartner)
     if (isTransaction) {
       callName = 'AddMemberMessageAAQToPartner';
@@ -3404,6 +3409,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
             <Subject>${subject || 'Regarding your order'}</Subject>
             <QuestionType>General</QuestionType>
             <RecipientID>${finalBuyer}</RecipientID>
+            ${mediaXml}
           </MemberMessage>
         </AddMemberMessageAAQToPartnerRequest>
       `;
@@ -3420,6 +3426,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
             <Body>${body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Body>
             <ParentMessageID>${parentMessageId}</ParentMessageID>
             <RecipientID>${finalBuyer}</RecipientID>
+            ${mediaXml}
           </MemberMessage>
         </AddMemberMessageRTQRequest>
       `;
@@ -3450,6 +3457,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
         sender: 'SELLER',
         subject: subject || 'Reply',
         body: body,
+        mediaUrls: mediaUrls || [],
         read: true,
         messageType: isTransaction ? 'ORDER' : 'INQUIRY',
         messageDate: new Date()

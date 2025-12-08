@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
+import path from 'path';
 
 // Load environment variables FIRST before any other imports
 dotenv.config();
@@ -31,6 +32,7 @@ import amazonAccountRoutes from './routes/amazonAccounts.js';
 import rangeAnalysisRoutes from './routes/rangeAnalysis.js';
 import ideasRoutes from './routes/ideas.js';
 import ordersRoutes from './routes/orders.js';
+import uploadRoutes from './routes/upload.js';
 
 const app = express();
 
@@ -42,6 +44,9 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(morgan('dev'));
+
+// Serve static uploads
+app.use('/uploads', express.static(path.join(process.cwd(), 'public/uploads')));
 
 // Disable caching globally for all API routes
 app.use('/api', (req, res, next) => {
@@ -77,6 +82,7 @@ app.use('/api/amazon-accounts', amazonAccountRoutes);
 app.use('/api/range-analysis', rangeAnalysisRoutes);
 app.use('/api/ideas', ideasRoutes);
 app.use('/api/orders', ordersRoutes);
+app.use('/api/upload', uploadRoutes);
 
 
 const port = process.env.PORT || 5000;
