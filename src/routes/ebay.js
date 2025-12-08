@@ -3,6 +3,8 @@ import axios from 'axios';
 import qs from 'qs';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
+import fs from 'fs';
+import path from 'path';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
 import Order from '../models/Order.js';
@@ -3316,6 +3318,51 @@ router.post('/sync-thread', requireAuth, requireRole('fulfillmentadmin', 'supera
 });
 
 
+// Helper: Upload Image to eBay Picture Services (EPS)
+async function uploadImageToEbay(token, filePath) {
+  try {
+    const fileData = fs.readFileSync(filePath);
+    const base64Data = fileData.toString('base64');
+    const fileName = path.basename(filePath);
+
+    const xmlRequest = `
+      <?xml version="1.0" encoding="utf-8"?>
+      <UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+        <RequesterCredentials>
+          <eBayAuthToken>${token}</eBayAuthToken>
+        </RequesterCredentials>
+        <PictureName>${fileName}</PictureName>
+        <PictureSet>Standard</PictureSet>
+        <ExtensionInDays>30</ExtensionInDays>
+        <PictureData>${base64Data}</PictureData>
+      </UploadSiteHostedPicturesRequest>
+    `;
+
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+      headers: {
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'X-EBAY-API-CALL-NAME': 'UploadSiteHostedPictures',
+        'Content-Type': 'text/xml'
+      }
+    });
+
+    const result = await parseStringPromise(response.data);
+    const ack = result.UploadSiteHostedPicturesResponse.Ack[0];
+
+    if (ack === 'Success' || ack === 'Warning') {
+      const fullUrl = result.UploadSiteHostedPicturesResponse.SiteHostedPictureDetails[0].FullURL[0];
+      return fullUrl;
+    } else {
+      const error = result.UploadSiteHostedPicturesResponse.Errors[0].LongMessage[0];
+      throw new Error(`eBay Upload Failed: ${error}`);
+    }
+  } catch (error) {
+    console.error('Error uploading image to eBay:', error.message);
+    throw error;
+  }
+}
+
 // 3. SEND MESSAGE (Chat Window)
 router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
   const { orderId, buyerUsername, itemId, body, subject, mediaUrls } = req.body;
@@ -3392,8 +3439,34 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
     let callName;
 
     // Construct Media XML if images are present
-    const mediaXml = (mediaUrls && mediaUrls.length > 0) 
-      ? `<MessageMedia>${mediaUrls.map(url => `<MediaURL>${url}</MediaURL>`).join('')}</MessageMedia>`
+    let finalMediaUrls = [];
+    if (mediaUrls && mediaUrls.length > 0) {
+      console.log(`[Send Message] Processing ${mediaUrls.length} images...`);
+      
+      // Convert local URLs to file paths and upload to eBay
+      for (const url of mediaUrls) {
+        try {
+          // Extract filename from URL (e.g., http://localhost:5000/uploads/123.jpg -> 123.jpg)
+          const filename = url.split('/').pop();
+          const filePath = path.join(process.cwd(), 'public/uploads', filename);
+          
+          if (fs.existsSync(filePath)) {
+            console.log(`[Send Message] Uploading ${filename} to eBay...`);
+            const ebayUrl = await uploadImageToEbay(token, filePath);
+            console.log(`[Send Message] Uploaded: ${ebayUrl}`);
+            finalMediaUrls.push(ebayUrl);
+          } else {
+            console.warn(`[Send Message] File not found: ${filePath}`);
+          }
+        } catch (err) {
+          console.error(`[Send Message] Failed to upload image: ${err.message}`);
+          // Continue with other images if one fails
+        }
+      }
+    }
+
+    const mediaXml = (finalMediaUrls.length > 0) 
+      ? `<MessageMedia>${finalMediaUrls.map(url => `<MediaURL>${url}</MediaURL>`).join('')}</MessageMedia>`
       : '';
 
     // CASE 1: Transaction Message (Use AddMemberMessageAAQToPartner)
