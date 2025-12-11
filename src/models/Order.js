@@ -45,6 +45,16 @@ const OrderSchema = new mongoose.Schema(
     transactionFees: Number,
     adFee: Number,
     adFeeGeneral: Number, // Manually editable ad fee
+    // USD converted values
+    subtotalUSD: Number,
+    shippingUSD: Number,
+    salesTaxUSD: Number,
+    discountUSD: Number,
+    transactionFeesUSD: Number,
+    refundTotalUSD: Number, // Total refund amount in USD
+    beforeTaxUSD: Number, // Amazon order before tax amount in USD
+    estimatedTaxUSD: Number, // Amazon estimated tax in USD
+    conversionRate: Number, // Stored conversion rate for reference
     cancelState: String, // NONE_REQUESTED, CANCEL_REQUESTED, CANCELED, etc.
     refunds: Array, // Array of refund objects from paymentSummary.refunds
     trackingNumber: String, // Extracted from fulfillmentHrefs

@@ -15,6 +15,7 @@ import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
 import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
+import ExchangeRate from '../models/ExchangeRate.js';
 import { parseStringPromise } from 'xml2js';
 import imageCache from '../lib/imageCache.js';
 const router = express.Router();
@@ -38,6 +39,65 @@ const EBAY_OAUTH_SCOPES = [
 // ============================================
 // Start automatic cleanup of expired cache entries (runs every 10 minutes)
 imageCache.startAutoCleanup();
+
+// ============================================
+// HELPER: Recalculate USD Fields
+// ============================================
+function recalculateUSDFields(order) {
+  // Get conversion rate (default to 1 for US orders)
+  let conversionRate = 1;
+  
+  if (order.purchaseMarketplaceId !== 'EBAY_US') {
+    const totalDueSeller = order.paymentSummary?.totalDueSeller;
+    if (totalDueSeller?.value && totalDueSeller?.convertedFromValue) {
+      const usdValue = parseFloat(totalDueSeller.value);
+      const originalValue = parseFloat(totalDueSeller.convertedFromValue);
+      if (usdValue > 0 && originalValue > 0) {
+        conversionRate = usdValue / originalValue;
+      }
+    }
+  }
+
+  // Recalculate all USD fields
+  const updates = {
+    conversionRate: parseFloat(conversionRate.toFixed(5))
+  };
+
+  // Convert monetary fields
+  const monetaryFields = [
+    'subtotal', 'shipping', 'salesTax', 'discount', 
+    'transactionFees', 'beforeTax', 'estimatedTax'
+  ];
+
+  monetaryFields.forEach(field => {
+    if (order[field] !== undefined && order[field] !== null && order[field] !== '') {
+      const value = parseFloat(order[field]);
+      if (!isNaN(value)) {
+        updates[`${field}USD`] = parseFloat((value * conversionRate).toFixed(2));
+      }
+    } else {
+      // If field is null/empty, clear the USD field
+      updates[`${field}USD`] = null;
+    }
+  });
+
+  // Calculate refunds
+  if (order.refunds && Array.isArray(order.refunds)) {
+    const totalRefund = order.refunds.reduce((sum, r) => {
+      const amt = parseFloat(r.amount?.value || 0);
+      return sum + (isNaN(amt) ? 0 : amt);
+    }, 0);
+    updates.refundTotalUSD = parseFloat((totalRefund * conversionRate).toFixed(2));
+  } else if (order.paymentSummary?.refunds && Array.isArray(order.paymentSummary.refunds)) {
+    const totalRefund = order.paymentSummary.refunds.reduce((sum, r) => {
+      const amt = parseFloat(r.amount?.value || 0);
+      return sum + (isNaN(amt) ? 0 : amt);
+    }, 0);
+    updates.refundTotalUSD = parseFloat((totalRefund * conversionRate).toFixed(2));
+  }
+
+  return updates;
+}
 
 // HELPER: Ensure Seller Token is Valid (Refreshes if < 2 mins left)
 async function ensureValidToken(seller, retries = 3) {
@@ -903,6 +963,203 @@ router.get('/stored-orders', async (req, res) => {
       }
     });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// HELPER: Get Exchange Rate for Date
+// ============================================
+async function getExchangeRateForDate(date, marketplace = 'EBAY') {
+  try {
+    const targetDate = new Date(date);
+    
+    // Find the most recent rate that was effective on or before the target date
+    const rate = await ExchangeRate.findOne({
+      marketplace,
+      effectiveDate: { $lte: targetDate }
+    })
+      .sort({ effectiveDate: -1 })
+      .limit(1);
+    
+    // Default to 82 if no rate found
+    return rate ? rate.rate : 82;
+  } catch (err) {
+    console.error('Error fetching exchange rate:', err);
+    return 82; // Default fallback
+  }
+}
+
+// NEW ENDPOINT: All Orders with USD conversion
+router.get('/all-orders-usd', async (req, res) => {
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled } = req.query;
+
+  try {
+    let query = {};
+    if (sellerId) {
+      query.seller = sellerId;
+    }
+
+    // Exclude cancelled orders if requested
+    if (excludeCancelled === 'true') {
+      query.$and = [
+        {
+          $or: [
+            { cancelState: { $exists: false } },
+            { cancelState: null },
+            { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+          ]
+        },
+        {
+          $or: [
+            { 'cancelStatus.cancelState': { $exists: false } },
+            { 'cancelStatus.cancelState': null },
+            { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+          ]
+        }
+      ];
+    }
+
+    // Apply search filters
+    if (searchOrderId) {
+      query.orderId = { $regex: searchOrderId, $options: 'i' };
+    }
+
+    if (searchBuyerName) {
+      query['buyer.buyerRegistrationAddress.fullName'] = { $regex: searchBuyerName, $options: 'i' };
+    }
+
+    // Timezone-Aware Date Range Logic
+    if (startDate || endDate) {
+      query.dateSold = {};
+      const PST_OFFSET_HOURS = 8;
+
+      if (startDate) {
+        const start = new Date(startDate);
+        start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
+        query.dateSold.$gte = start;
+      }
+
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setDate(end.getDate() + 1);
+        end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
+        query.dateSold.$lte = end;
+      }
+    }
+
+    if (searchMarketplace && searchMarketplace !== '') {
+      query.purchaseMarketplaceId = searchMarketplace === 'EBAY_ENCA' ? 'EBAY_CA' : searchMarketplace;
+    }
+
+    // Calculate pagination
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+
+    const totalOrders = await Order.countDocuments(query);
+    const totalPages = Math.ceil(totalOrders / limitNum);
+
+    const orders = await Order.find(query)
+      .populate({
+        path: 'seller',
+        populate: {
+          path: 'user',
+          select: 'username email'
+        }
+      })
+      .sort({ creationDate: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    // Fallback: Calculate USD values on-the-fly if missing, and add exchange rate + P.Balance
+    const ordersWithUSD = await Promise.all(orders.map(async order => {
+      const orderObj = order.toObject();
+      
+      // If USD values don't exist, calculate them
+      if (orderObj.subtotalUSD === undefined || orderObj.subtotalUSD === null) {
+        const marketplace = orderObj.purchaseMarketplaceId;
+        
+        if (marketplace === 'EBAY_US') {
+          // US orders - already in USD
+          orderObj.subtotalUSD = orderObj.subtotal || 0;
+          orderObj.shippingUSD = orderObj.shipping || 0;
+          orderObj.salesTaxUSD = orderObj.salesTax || 0;
+          orderObj.discountUSD = orderObj.discount || 0;
+          orderObj.transactionFeesUSD = orderObj.transactionFees || 0;
+          orderObj.conversionRate = 1;
+        } else {
+          // Non-US orders - calculate from paymentSummary
+          let conversionRate = 0;
+          
+          if (orderObj.paymentSummary?.totalDueSeller?.convertedFromValue && 
+              orderObj.paymentSummary?.totalDueSeller?.value) {
+            const originalValue = parseFloat(orderObj.paymentSummary.totalDueSeller.convertedFromValue);
+            const usdValue = parseFloat(orderObj.paymentSummary.totalDueSeller.value);
+            if (originalValue > 0) {
+              conversionRate = usdValue / originalValue;
+            }
+          }
+          
+          // Apply conversion with proper rounding (2 decimal places)
+          orderObj.subtotalUSD = conversionRate ? parseFloat(((orderObj.subtotal || 0) * conversionRate).toFixed(2)) : 0;
+          orderObj.shippingUSD = conversionRate ? parseFloat(((orderObj.shipping || 0) * conversionRate).toFixed(2)) : 0;
+          orderObj.salesTaxUSD = conversionRate ? parseFloat(((orderObj.salesTax || 0) * conversionRate).toFixed(2)) : 0;
+          orderObj.discountUSD = conversionRate ? parseFloat(((orderObj.discount || 0) * conversionRate).toFixed(2)) : 0;
+          orderObj.transactionFeesUSD = conversionRate ? parseFloat(((orderObj.transactionFees || 0) * conversionRate).toFixed(2)) : 0;
+          orderObj.conversionRate = parseFloat(conversionRate.toFixed(5));
+        }
+      }
+      
+      // ALWAYS recalculate refunds from paymentSummary.refunds (in case refunds were added after initial sync)
+      let refundTotal = 0;
+      if (orderObj.paymentSummary?.refunds && Array.isArray(orderObj.paymentSummary.refunds)) {
+        refundTotal = orderObj.paymentSummary.refunds.reduce((sum, refund) => {
+          return sum + parseFloat(refund.amount?.value || 0);
+        }, 0);
+      }
+      const conversionRate = orderObj.conversionRate || 1;
+      orderObj.refundTotalUSD = parseFloat((refundTotal * conversionRate).toFixed(2));
+      
+      // Get exchange rates for order's date (USD to INR)
+      const ebayExchangeRate = await getExchangeRateForDate(orderObj.dateSold || orderObj.creationDate, 'EBAY');
+      const amazonExchangeRate = await getExchangeRateForDate(orderObj.dateSold || orderObj.creationDate, 'AMAZON');
+      orderObj.exchangeRate = ebayExchangeRate;
+      orderObj.amazonExchangeRate = amazonExchangeRate;
+      
+      // Calculate NET and P.Balance
+      // NET = Subtotal - TransactionFees - AdFeeGeneral - Refunds - TDS - T.ID + Discount
+      const total = (orderObj.subtotalUSD || 0) + (orderObj.salesTaxUSD || 0);
+      const tds = total * 0.01; // 1% of Total
+      const tid = 0.24;
+      const net = (orderObj.subtotalUSD || 0)
+        - (orderObj.transactionFeesUSD || 0)
+        - (orderObj.adFeeGeneral || 0)
+        - orderObj.refundTotalUSD
+        - tds
+        - tid
+        + (orderObj.discountUSD || 0);
+      
+      orderObj.pBalance = parseFloat((net * orderObj.exchangeRate).toFixed(2));
+      
+      return orderObj;
+    }));
+
+    console.log(`[All Orders USD] Query: ${JSON.stringify(query)}, Page: ${pageNum}/${totalPages}, Found ${orders.length}/${totalOrders} orders`);
+
+    res.json({
+      orders: ordersWithUSD,
+      pagination: {
+        currentPage: pageNum,
+        totalPages,
+        totalOrders,
+        ordersPerPage: limitNum,
+        hasNextPage: pageNum < totalPages,
+        hasPrevPage: pageNum > 1
+      }
+    });
+  } catch (err) {
+    console.error('[All Orders USD] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2676,6 +2933,56 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
     trackingNumber,
     purchaseMarketplaceId
   };
+
+  // Calculate total refunds
+  let refundTotal = 0;
+  if (ebayOrder.paymentSummary?.refunds && Array.isArray(ebayOrder.paymentSummary.refunds)) {
+    refundTotal = ebayOrder.paymentSummary.refunds.reduce((sum, refund) => {
+      return sum + parseFloat(refund.amount?.value || 0);
+    }, 0);
+  }
+
+  // Calculate and add USD conversion fields
+  if (purchaseMarketplaceId === 'EBAY_US') {
+    // US orders are already in USD
+    orderData.subtotalUSD = orderData.subtotal;
+    orderData.shippingUSD = orderData.shipping;
+    orderData.salesTaxUSD = orderData.salesTax;
+    orderData.discountUSD = orderData.discount;
+    orderData.transactionFeesUSD = orderData.transactionFees;
+    orderData.refundTotalUSD = refundTotal;
+    // Only set USD values for beforeTax/estimatedTax if they exist (manual fields)
+    if (orderData.beforeTax !== undefined && orderData.beforeTax !== null) {
+      orderData.beforeTaxUSD = orderData.beforeTax;
+    }
+    if (orderData.estimatedTax !== undefined && orderData.estimatedTax !== null) {
+      orderData.estimatedTaxUSD = orderData.estimatedTax;
+    }
+    orderData.conversionRate = 1;
+  } else {
+    // For non-US orders, calculate conversion rate from paymentSummary
+    let conversionRate = 0;
+    
+    if (ebayOrder.paymentSummary?.totalDueSeller?.convertedFromValue && 
+        ebayOrder.paymentSummary?.totalDueSeller?.value) {
+      const originalValue = parseFloat(ebayOrder.paymentSummary.totalDueSeller.convertedFromValue);
+      const usdValue = parseFloat(ebayOrder.paymentSummary.totalDueSeller.value);
+      if (originalValue > 0) {
+        conversionRate = usdValue / originalValue;
+      }
+    }
+    
+    // Apply conversion rate to all monetary fields with proper rounding (2 decimal places)
+    orderData.subtotalUSD = conversionRate ? parseFloat((orderData.subtotal * conversionRate).toFixed(2)) : 0;
+    orderData.shippingUSD = conversionRate ? parseFloat((orderData.shipping * conversionRate).toFixed(2)) : 0;
+    orderData.salesTaxUSD = conversionRate ? parseFloat((orderData.salesTax * conversionRate).toFixed(2)) : 0;
+    orderData.discountUSD = conversionRate ? parseFloat((orderData.discount * conversionRate).toFixed(2)) : 0;
+    orderData.transactionFeesUSD = conversionRate ? parseFloat((orderData.transactionFees * conversionRate).toFixed(2)) : 0;
+    orderData.refundTotalUSD = conversionRate ? parseFloat((refundTotal * conversionRate).toFixed(2)) : 0;
+    orderData.beforeTaxUSD = conversionRate ? parseFloat(((orderData.beforeTax || 0) * conversionRate).toFixed(2)) : 0;
+    orderData.estimatedTaxUSD = conversionRate ? parseFloat(((orderData.estimatedTax || 0) * conversionRate).toFixed(2)) : 0;
+    orderData.conversionRate = parseFloat(conversionRate.toFixed(5)); // Store rate with 5 decimal precision
+  }
 
   return orderData;
 }
@@ -4952,9 +5259,44 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
   });
 
   try {
-    const order = await Order.findByIdAndUpdate(orderId, updateData, { new: true });
+    // Find the order first to get full data for USD recalculation
+    const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ error: 'Order not found' });
-    res.json({ success: true, order });
+
+    // Apply manual updates to order object
+    Object.keys(updateData).forEach(key => {
+      order[key] = updateData[key];
+    });
+
+    // Check if any monetary fields were updated
+    const monetaryFields = ['beforeTax', 'estimatedTax', 'amazonRefund'];
+    const updatedMonetaryField = Object.keys(updates).some(key => monetaryFields.includes(key));
+
+    // Recalculate USD values if monetary fields were updated
+    if (updatedMonetaryField) {
+      const usdUpdates = recalculateUSDFields(order);
+      Object.keys(usdUpdates).forEach(key => {
+        order[key] = usdUpdates[key];
+      });
+    }
+
+    // Save the updated order
+    await order.save();
+
+    // Populate seller info for response
+    await order.populate({
+      path: 'seller',
+      populate: {
+        path: 'user',
+        select: 'username email'
+      }
+    });
+
+    res.json({ 
+      success: true, 
+      order,
+      recalculated: updatedMonetaryField ? 'USD values recalculated' : null
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -34,6 +34,7 @@ import ideasRoutes from './routes/ideas.js';
 import ordersRoutes from './routes/orders.js';
 import uploadRoutes from './routes/upload.js';
 import creditCardRoutes from './routes/creditCards.js';
+import exchangeRatesRoutes from './routes/exchangeRates.js';
 
 const app = express();
 
@@ -85,6 +86,7 @@ app.use('/api/ideas', ideasRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/credit-cards', creditCardRoutes);
+app.use('/api/exchange-rates', exchangeRatesRoutes);
 
 
 const port = process.env.PORT || 5000;
