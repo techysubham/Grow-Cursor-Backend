@@ -4189,13 +4189,26 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
       }
     }
 
+    // Prepare message body with image URLs (eBay APIs don't support MessageMedia for sending)
+    // Always escape the original message body first
+    let finalBody = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    
+    if (finalMediaUrls.length > 0) {
+      // Format image URLs as clickable links
+      // Try multiple formats to ensure maximum compatibility:
+      // 1. Plain URL (eBay should auto-detect)
+      // 2. With descriptive text
+      const imageLinks = finalMediaUrls.map((url, index) => {
+        return `Image ${index + 1}: ${url}`;
+      }).join('\n');
+      
+      finalBody += '\n\n---\nAttached Image(s):\n' + imageLinks;
+      console.log('[Send Message] ⚠️ eBay APIs do not support MessageMedia for outgoing messages. Added URLs to message body.');
+    }
+
     // CASE 1: Transaction Message (Use AddMemberMessageAAQToPartner)
     if (isTransaction) {
       callName = 'AddMemberMessageAAQToPartner';
-      
-      const mediaXml = (finalMediaUrls.length > 0) 
-        ? `<MessageMedia>${finalMediaUrls.map(url => `<MediaURL>${url}</MediaURL>`).join('')}</MessageMedia>`
-        : '';
       
       xmlRequest = `
         <?xml version="1.0" encoding="utf-8"?>
@@ -4203,11 +4216,10 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
           <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
           <ItemID>${finalItemId}</ItemID>
           <MemberMessage>
-            <Body>${body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Body>
+            <Body>${finalBody}</Body>
             <Subject>${subject || 'Regarding your order'}</Subject>
             <QuestionType>General</QuestionType>
             <RecipientID>${finalBuyer}</RecipientID>
-            ${mediaXml}
           </MemberMessage>
         </AddMemberMessageAAQToPartnerRequest>
       `;
@@ -4215,13 +4227,6 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
     // CASE 2: Inquiry Message (Use AddMemberMessageRTQ - Respond To Question)
     else {
       callName = 'AddMemberMessageRTQ';
-      
-      // AddMemberMessageRTQ does not support MessageMedia - append image URLs to body instead
-      let finalBody = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      if (finalMediaUrls.length > 0) {
-        finalBody += '\\n\\nImage(s): ' + finalMediaUrls.join(' ');
-        console.log('[Send Message] ⚠️ RTQ does not support media attachments. Added URLs to message body.');
-      }
       
       xmlRequest = `
         <?xml version="1.0" encoding="utf-8"?>
