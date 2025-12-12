@@ -5,6 +5,8 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
+import sharp from 'sharp';
+import FormData from 'form-data';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
 import Order from '../models/Order.js';
@@ -3987,32 +3989,79 @@ router.post('/sync-thread', requireAuth, requireRole('fulfillmentadmin', 'supera
 
 
 // Helper: Upload Image to eBay Picture Services (EPS)
+// Buyers use the exact same process - they upload via eBay's UI which calls UploadSiteHostedPictures
+// The MediaURL we receive from buyers is also from i.ebayimg.com domain
 async function uploadImageToEbay(token, filePath) {
   try {
-    const fileData = fs.readFileSync(filePath);
-    const base64Data = fileData.toString('base64');
-    const fileName = path.basename(filePath);
+    console.log('[eBay Upload] Processing image:', filePath);
+    
+    // Step 1: Process image with Sharp
+    const metadata = await sharp(filePath).metadata();
+    console.log('[eBay Upload] Original format:', metadata.format, `${metadata.width}x${metadata.height}`);
+    
+    // Step 2: Convert to JPEG with optimal settings for eBay
+    let processedBuffer = await sharp(filePath)
+      .rotate() // Auto-rotate based on EXIF
+      .resize(1600, 1600, { 
+        fit: 'inside', 
+        withoutEnlargement: true 
+      })
+      .flatten({ background: { r: 255, g: 255, b: 255 } }) // Remove transparency
+      .jpeg({ 
+        quality: 95,
+        chromaSubsampling: '4:4:4', // No chroma subsampling for better quality
+        force: true
+      })
+      .toBuffer();
+    
+    // Check file size
+    let fileSizeMB = processedBuffer.length / (1024 * 1024);
+    if (fileSizeMB > 7) {
+      console.log('[eBay Upload] Image too large, recompressing...');
+      processedBuffer = await sharp(processedBuffer)
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      fileSizeMB = processedBuffer.length / (1024 * 1024);
+    }
+    
+    console.log(`[eBay Upload] Processed: ${fileSizeMB.toFixed(2)}MB JPEG`);
+    
+    const fileName = path.basename(filePath).replace(/\.[^/.]+$/, '.jpg');
 
-    const xmlRequest = `
-      <?xml version="1.0" encoding="utf-8"?>
-      <UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-        <RequesterCredentials>
-          <eBayAuthToken>${token}</eBayAuthToken>
-        </RequesterCredentials>
-        <PictureName>${fileName}</PictureName>
-        <PictureSet>Standard</PictureSet>
-        <ExtensionInDays>30</ExtensionInDays>
-        <PictureData>${base64Data}</PictureData>
-      </UploadSiteHostedPicturesRequest>
-    `;
+    // Step 3: Use multipart/form-data (eBay's recommended method)
+    const form = new FormData();
+    
+    // Add XML payload as first part
+    const xmlPayload = `<?xml version="1.0" encoding="utf-8"?>
+<UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>${token}</eBayAuthToken>
+  </RequesterCredentials>
+  <PictureName>${fileName}</PictureName>
+  <PictureSet>Standard</PictureSet>
+</UploadSiteHostedPicturesRequest>`;
+    
+    form.append('XML Payload', xmlPayload, {
+      contentType: 'text/xml; charset=utf-8'
+    });
+    
+    // Add binary image as second part
+    form.append(fileName, processedBuffer, {
+      filename: fileName,
+      contentType: 'image/jpeg'
+    });
 
-    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    // Step 4: Upload to eBay Picture Services
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', form, {
       headers: {
+        ...form.getHeaders(),
         'X-EBAY-API-SITEID': '0',
         'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-        'X-EBAY-API-CALL-NAME': 'UploadSiteHostedPictures',
-        'Content-Type': 'text/xml'
-      }
+        'X-EBAY-API-CALL-NAME': 'UploadSiteHostedPictures'
+      },
+      timeout: 30000,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity
     });
 
     const result = await parseStringPromise(response.data);
@@ -4020,13 +4069,20 @@ async function uploadImageToEbay(token, filePath) {
 
     if (ack === 'Success' || ack === 'Warning') {
       const fullUrl = result.UploadSiteHostedPicturesResponse.SiteHostedPictureDetails[0].FullURL[0];
+      console.log('[eBay Upload] ✅ Success:', fullUrl);
       return fullUrl;
     } else {
-      const error = result.UploadSiteHostedPicturesResponse.Errors[0].LongMessage[0];
-      throw new Error(`eBay Upload Failed: ${error}`);
+      const errors = result.UploadSiteHostedPicturesResponse.Errors;
+      const errorMsg = errors[0].LongMessage[0];
+      const errorCode = errors[0].ErrorCode?.[0];
+      console.error('[eBay Upload] ❌ Failed:', errorCode, errorMsg);
+      throw new Error(`eBay Upload Failed: ${errorMsg}`);
     }
   } catch (error) {
-    console.error('Error uploading image to eBay:', error.message);
+    console.error('[eBay Upload] Error:', error.message);
+    if (error.response?.data) {
+      console.error('[eBay Upload] Response:', error.response.data.substring(0, 500));
+    }
     throw error;
   }
 }
@@ -4133,24 +4189,37 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
       }
     }
 
-    const mediaXml = (finalMediaUrls.length > 0) 
-      ? `<MessageMedia>${finalMediaUrls.map(url => `<MediaURL>${url}</MediaURL>`).join('')}</MessageMedia>`
-      : '';
+    // Prepare message body with image URLs (eBay APIs don't support MessageMedia for sending)
+    // Always escape the original message body first
+    let finalBody = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    
+    if (finalMediaUrls.length > 0) {
+      // Format image URLs as clickable links
+      // Try multiple formats to ensure maximum compatibility:
+      // 1. Plain URL (eBay should auto-detect)
+      // 2. With descriptive text
+      const imageLinks = finalMediaUrls.map((url, index) => {
+        return `Image ${index + 1}: ${url}`;
+      }).join('\n');
+      
+      finalBody += '\n\n---\nAttached Image(s):\n' + imageLinks;
+      console.log('[Send Message] ⚠️ eBay APIs do not support MessageMedia for outgoing messages. Added URLs to message body.');
+    }
 
     // CASE 1: Transaction Message (Use AddMemberMessageAAQToPartner)
     if (isTransaction) {
       callName = 'AddMemberMessageAAQToPartner';
+      
       xmlRequest = `
         <?xml version="1.0" encoding="utf-8"?>
         <AddMemberMessageAAQToPartnerRequest xmlns="urn:ebay:apis:eBLBaseComponents">
           <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
           <ItemID>${finalItemId}</ItemID>
           <MemberMessage>
-            <Body>${body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Body>
+            <Body>${finalBody}</Body>
             <Subject>${subject || 'Regarding your order'}</Subject>
             <QuestionType>General</QuestionType>
             <RecipientID>${finalBuyer}</RecipientID>
-            ${mediaXml}
           </MemberMessage>
         </AddMemberMessageAAQToPartnerRequest>
       `;
@@ -4158,16 +4227,16 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
     // CASE 2: Inquiry Message (Use AddMemberMessageRTQ - Respond To Question)
     else {
       callName = 'AddMemberMessageRTQ';
+      
       xmlRequest = `
         <?xml version="1.0" encoding="utf-8"?>
         <AddMemberMessageRTQRequest xmlns="urn:ebay:apis:eBLBaseComponents">
           <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
           <ItemID>${finalItemId}</ItemID>
           <MemberMessage>
-            <Body>${body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Body>
+            <Body>${finalBody}</Body>
             <ParentMessageID>${parentMessageId}</ParentMessageID>
             <RecipientID>${finalBuyer}</RecipientID>
-            ${mediaXml}
           </MemberMessage>
         </AddMemberMessageRTQRequest>
       `;
@@ -4198,7 +4267,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
         sender: 'SELLER',
         subject: subject || 'Reply',
         body: body,
-        mediaUrls: mediaUrls || [],
+        mediaUrls: finalMediaUrls || [],
         read: true,
         messageType: isTransaction ? 'ORDER' : 'INQUIRY',
         messageDate: new Date()
