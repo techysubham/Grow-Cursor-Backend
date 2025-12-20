@@ -31,7 +31,7 @@ const OrderSchema = new mongoose.Schema(
     // Shipping address fields
     shippingFullName: String,
     shippingAddressLine1: String,
-  shippingAddressLine2: String,
+    shippingAddressLine2: String,
     shippingCity: String,
     shippingState: String,
     shippingPostalCode: String,
@@ -56,7 +56,9 @@ const OrderSchema = new mongoose.Schema(
     estimatedTaxUSD: Number, // Amazon estimated tax in USD
     conversionRate: Number, // Stored conversion rate for reference
     cancelState: String, // NONE_REQUESTED, CANCEL_REQUESTED, CANCELED, etc.
-    refunds: Array, // Array of refund objects from paymentSummary.refunds
+    refunds: Array, // Array of refund objects from paymentSummary.refunds (for display only)
+    // Simple earnings field (auto for PAID, $0 for FULLY_REFUNDED, manual for PARTIALLY_REFUNDED)
+    orderEarnings: Number,
     trackingNumber: String, // Extracted from fulfillmentHrefs
     manualTrackingNumber: String, // Manually entered tracking number (separate from trackingNumber)
     purchaseMarketplaceId: String, // e.g., EBAY_US, EBAY_AUS, EBAY_Canada

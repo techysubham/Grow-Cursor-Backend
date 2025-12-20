@@ -307,6 +307,89 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null) {
   }
 }
 
+// ============================================
+// HELPER: Handle Order Payment Status Change
+// ============================================
+/**
+ * Handles refund processing when orderPaymentStatus changes
+ * FULLY_REFUNDED: Set earnings to $0
+ * PARTIALLY_REFUNDED: Set earnings to null (user will manually enter)
+ * @param {Object} existingOrder - The order document from DB
+ * @param {String} newPaymentStatus - The new payment status from eBay
+ * @param {String} accessToken - Valid eBay access token
+ * @param {ObjectId} sellerId - The seller ID
+ * @returns {Object} - Updated order data or null if no action needed
+ */
+async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, accessToken, sellerId) {
+  const oldStatus = existingOrder.orderPaymentStatus;
+  
+  // Only process if status actually changed
+  if (oldStatus === newPaymentStatus) {
+    return null;
+  }
+
+  console.log(`[Refund Handler] Status change detected for ${existingOrder.orderId}: ${oldStatus} → ${newPaymentStatus}`);
+
+  if (newPaymentStatus === 'FULLY_REFUNDED') {
+    // ========== FULLY REFUNDED: Set earnings to $0 ==========
+    console.log(`[Refund Handler] FULLY_REFUNDED: Setting earnings to $0 for ${existingOrder.orderId}`);
+    
+    return {
+      subtotal: 0,
+      subtotalUSD: 0,
+      shipping: 0,
+      shippingUSD: 0,
+      salesTax: 0,
+      salesTaxUSD: 0,
+      discount: 0,
+      discountUSD: 0,
+      transactionFees: 0,
+      transactionFeesUSD: 0,
+      adFeeGeneral: 0,
+      orderEarnings: 0
+    };
+    
+  } else if (newPaymentStatus === 'PARTIALLY_REFUNDED') {
+    // ========== PARTIALLY REFUNDED: Set earnings to null (user will manually enter) ==========
+    console.log(`[Refund Handler] PARTIALLY_REFUNDED: Setting earnings to null for ${existingOrder.orderId}`);
+    
+    try {
+      // Fetch updated ad fee from Finances API
+      const adFeeResult = await fetchOrderAdFee(accessToken, existingOrder.orderId);
+      const adFeeGeneral = adFeeResult.success ? adFeeResult.adFeeGeneral : existingOrder.adFeeGeneral;
+
+      return {
+        adFeeGeneral,
+        orderEarnings: null // User must manually enter earnings
+      };
+      
+    } catch (error) {
+      console.error(`[Refund Handler] Error fetching ad fee for ${existingOrder.orderId}:`, error.message);
+      return {
+        orderEarnings: null // User must manually enter earnings
+      };
+    }
+  }
+
+  // No action needed for other statuses
+  return null;
+}
+
+// ============================================
+// HELPER: Calculate Order Earnings (Not needed anymore - kept for compatibility)
+// ============================================
+/**
+ * Simple function that returns $0 for FULLY_REFUNDED orders
+ * Not actively used - earnings are calculated in buildOrderData() for PAID orders
+ * @returns {Object} - { orderEarnings: 0 }
+ */
+function calculateOrderEarnings() {
+  // FULLY_REFUNDED orders always show $0 earnings
+  return {
+    orderEarnings: 0
+  };
+}
+
 
 // --- NEW CONFIG: AUTOMATED WELCOME MESSAGE ---
 const ENABLE_AUTO_WELCOME = true; // Set to false to disable
@@ -869,7 +952,7 @@ router.get('/cancelled-orders', async (req, res) => {
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, awaitingShipment, hasFulfillmentNotes } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes } = req.query;
 
   try {
     let query = {};
@@ -928,6 +1011,11 @@ router.get('/stored-orders', async (req, res) => {
 
     if (searchMarketplace && searchMarketplace !== '') {
       query.purchaseMarketplaceId = searchMarketplace === 'EBAY_ENCA' ? 'EBAY_CA' : searchMarketplace;
+    }
+
+    // Payment Status Filter
+    if (paymentStatus && paymentStatus !== '') {
+      query.orderPaymentStatus = paymentStatus;
     }
 
     // Calculate pagination
@@ -1339,6 +1427,36 @@ router.get('/backfill-ad-fees/count', requireAuth, requireRole('fulfillmentadmin
       alreadyHasAdFee
     });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update order earnings for partially refunded orders
+router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { orderEarnings } = req.body;
+
+    if (orderEarnings === undefined || orderEarnings === null) {
+      return res.status(400).json({ error: 'orderEarnings is required' });
+    }
+
+    const order = await Order.findOne({ orderId });
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    // Update order earnings
+    order.orderEarnings = parseFloat(orderEarnings);
+    await order.save();
+
+    res.json({ 
+      success: true, 
+      orderId,
+      orderEarnings: order.orderEarnings
+    });
+  } catch (err) {
+    console.error('Error updating order earnings:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2031,7 +2149,30 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
                 const dbModTime = new Date(existingOrder.lastModifiedDate).getTime();
 
                 if (ebayModTime > dbModTime) {
-                  const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+                  let orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+                  
+                  // ========== HANDLE REFUND STATUS CHANGES ==========
+                  const refundData = await handleOrderPaymentStatusChange(
+                    existingOrder,
+                    ebayOrder.orderPaymentStatus,
+                    accessToken,
+                    seller._id
+                  );
+
+                  // If refund handling returned data, merge it
+                  if (refundData) {
+                    orderData = { ...orderData, ...refundData };
+                    
+                    // Also calculate and add refund breakdown for partially refunded orders
+                    if (ebayOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
+                      const refundBreakdown = calculateRefundBreakdown(ebayOrder);
+                      orderData.refundItemAmount = refundBreakdown.refundItemAmount;
+                      orderData.refundTaxAmount = refundBreakdown.refundTaxAmount;
+                      orderData.refundTotalToBuyer = refundBreakdown.refundTotalToBuyer;
+                      orderData.ebayPaidTaxRefund = refundBreakdown.ebayPaidTaxRefund;
+                    }
+                  }
+                  
                   Object.assign(existingOrder, orderData);
                   await existingOrder.save();
                   updatedOrders.push(existingOrder);
@@ -2101,7 +2242,30 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
                   }
 
                   // ONLY NOW fetch full order data (includes expensive tracking lookup)
-                  const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+                  let orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+
+                  // ========== HANDLE REFUND STATUS CHANGES ==========
+                  // Check if payment status changed to FULLY_REFUNDED or PARTIALLY_REFUNDED
+                  const refundData = await handleOrderPaymentStatusChange(
+                    existingOrder,
+                    ebayOrder.orderPaymentStatus,
+                    accessToken,
+                    seller._id
+                  );
+
+                  // If refund handling returned data, merge it with orderData
+                  if (refundData) {
+                    orderData = { ...orderData, ...refundData };
+                    
+                    // Also calculate and add refund breakdown for partially refunded orders
+                    if (ebayOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
+                      const refundBreakdown = calculateRefundBreakdown(ebayOrder);
+                      orderData.refundItemAmount = refundBreakdown.refundItemAmount;
+                      orderData.refundTaxAmount = refundBreakdown.refundTaxAmount;
+                      orderData.refundTotalToBuyer = refundBreakdown.refundTotalToBuyer;
+                      orderData.ebayPaidTaxRefund = refundBreakdown.ebayPaidTaxRefund;
+                    }
+                  }
 
                   // Define fields that should trigger notifications
                   const notifiableFields = [
@@ -2715,8 +2879,23 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
                     const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId);
                     if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
                       existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
+                      existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
+                      
+                      // Recalculate orderEarnings if this is a PAID order
+                      if (existingOrder.orderPaymentStatus === 'PAID') {
+                        const subtotal = parseFloat(existingOrder.subtotalUSD || 0);
+                        const discount = parseFloat(existingOrder.discountUSD || 0);
+                        const salesTax = parseFloat(existingOrder.salesTaxUSD || 0);
+                        const transactionFees = parseFloat(existingOrder.transactionFeesUSD || 0);
+                        const adFee = parseFloat(existingOrder.adFeeGeneralUSD || 0);
+                        const shipping = parseFloat(existingOrder.shippingUSD || 0);
+                        existingOrder.orderEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
+                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
+                      } else {
+                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
+                      }
+                      
                       await existingOrder.save();
-                      console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
                     }
                   } catch (adFeeErr) {
                     console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
@@ -2984,6 +3163,20 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
     orderData.beforeTaxUSD = conversionRate ? parseFloat(((orderData.beforeTax || 0) * conversionRate).toFixed(2)) : 0;
     orderData.estimatedTaxUSD = conversionRate ? parseFloat(((orderData.estimatedTax || 0) * conversionRate).toFixed(2)) : 0;
     orderData.conversionRate = parseFloat(conversionRate.toFixed(5)); // Store rate with 5 decimal precision
+  }
+
+  // Auto-calculate orderEarnings for normal (non-refunded) orders
+  // For PAID orders, calculate: subtotal + discount - salesTax - transactionFees - adFee - shipping
+  if (orderData.orderPaymentStatus === 'PAID') {
+    const subtotal = parseFloat(orderData.subtotalUSD || 0);
+    const discount = parseFloat(orderData.discountUSD || 0); // Already negative
+    const salesTax = parseFloat(orderData.salesTaxUSD || 0);
+    const transactionFees = parseFloat(orderData.transactionFeesUSD || 0);
+    const adFee = parseFloat(orderData.adFeeGeneralUSD || orderData.adFee || 0);
+    const shipping = parseFloat(orderData.shippingUSD || 0);
+    
+    // Order earnings = subtotal + discount - salesTax - transactionFees - adFee - shipping
+    orderData.orderEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
   }
 
   return orderData;
