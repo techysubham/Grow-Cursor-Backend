@@ -27,6 +27,7 @@ import ebayRoutes from './routes/ebay.js';
 import sellersRoutes from './routes/sellers.js';
 import employeeProfilesRoutes from './routes/employeeProfiles.js';
 import storeWiseTasksRoutes from './routes/storeWiseTasks.js';
+import listerInfoRoutes from './routes/listerInfo.js';
 
 import amazonAccountRoutes from './routes/amazonAccounts.js';
 import rangeAnalysisRoutes from './routes/rangeAnalysis.js';
@@ -81,6 +82,7 @@ app.use('/api/ebay', ebayRoutes);
 app.use('/api/sellers', sellersRoutes);
 app.use('/api/employee-profiles', employeeProfilesRoutes);
 app.use('/api/store-wise-tasks', storeWiseTasksRoutes);
+app.use('/api/lister-info', listerInfoRoutes);
 app.use('/api/amazon-accounts', amazonAccountRoutes);
 app.use('/api/range-analysis', rangeAnalysisRoutes);
 app.use('/api/ideas', ideasRoutes);
