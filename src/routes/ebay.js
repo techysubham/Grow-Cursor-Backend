@@ -101,6 +101,101 @@ function recalculateUSDFields(order) {
   return updates;
 }
 
+// ============================================
+// HELPER: Calculate Financial Fields (All Orders Sheet)
+// ============================================
+// Calculates TDS, TID, NET, and P.Balance INR based on orderEarnings
+async function calculateFinancials(order, marketplace = 'EBAY') {
+  const updates = {
+    tid: 0.24 // Fixed Transaction ID
+  };
+
+  // If orderEarnings is null or undefined, set all financial fields to null
+  if (order.orderEarnings === null || order.orderEarnings === undefined) {
+    updates.tds = null;
+    updates.net = null;
+    updates.pBalanceINR = null;
+    updates.ebayExchangeRate = null;
+    return updates;
+  }
+
+  const earnings = parseFloat(order.orderEarnings) || 0;
+
+  // TDS = 1% of orderEarnings
+  updates.tds = parseFloat((earnings * 0.01).toFixed(2));
+
+  // NET = orderEarnings - tds - tid
+  updates.net = parseFloat((earnings - updates.tds - updates.tid).toFixed(2));
+
+  // P.Balance INR = net × exchangeRate
+  // Fetch latest eBay exchange rate for the marketplace
+  try {
+    const exchangeRate = await ExchangeRate.findOne({ marketplace }).sort({ effectiveDate: -1 });
+    if (exchangeRate && exchangeRate.rate) {
+      updates.ebayExchangeRate = exchangeRate.rate; // Store the eBay exchange rate used
+      updates.pBalanceINR = parseFloat((updates.net * exchangeRate.rate).toFixed(2));
+    } else {
+      updates.ebayExchangeRate = null;
+      updates.pBalanceINR = null; // No exchange rate available
+    }
+  } catch (err) {
+    console.error('[Calculate Financials] Error fetching exchange rate:', err);
+    updates.ebayExchangeRate = null;
+    updates.pBalanceINR = null;
+  }
+
+  return updates;
+}
+
+// Calculate Amazon-side financial fields
+async function calculateAmazonFinancials(order) {
+  const updates = {};
+
+  const beforeTax = parseFloat(order.beforeTaxUSD) || 0;
+  const estimatedTax = parseFloat(order.estimatedTaxUSD) || 0;
+  
+  // Amazon Total = Before Tax + Estimated Tax
+  updates.amazonTotal = parseFloat((beforeTax + estimatedTax).toFixed(2));
+
+  // Check if order is FULLY_REFUNDED or PARTIALLY_REFUNDED
+  const paymentStatus = order.paymentSummary?.payments?.[0]?.paymentStatus;
+  const isRefunded = paymentStatus === 'FULLY_REFUNDED' || paymentStatus === 'PARTIALLY_REFUNDED';
+
+  // Fetch latest Amazon exchange rate
+  try {
+    const exchangeRate = await ExchangeRate.findOne({ marketplace: 'AMAZON' }).sort({ effectiveDate: -1 });
+    if (exchangeRate && exchangeRate.rate) {
+      updates.amazonExchangeRate = exchangeRate.rate; // Store the Amazon exchange rate used
+      updates.amazonTotalINR = parseFloat((updates.amazonTotal * exchangeRate.rate).toFixed(2));
+      
+      // Marketplace Fee = 4% of amazonTotalINR
+      updates.marketplaceFee = parseFloat((updates.amazonTotalINR * 0.04).toFixed(2));
+      
+      // IGST = 18% of marketplace fee, BUT 0 if order is refunded
+      updates.igst = isRefunded ? 0 : parseFloat((updates.marketplaceFee * 0.18).toFixed(2));
+      
+      // Total CC = Marketplace Fee + IGST
+      updates.totalCC = parseFloat((updates.marketplaceFee + updates.igst).toFixed(2));
+    } else {
+      // No exchange rate available, set to null
+      updates.amazonExchangeRate = null;
+      updates.amazonTotalINR = null;
+      updates.marketplaceFee = null;
+      updates.igst = null;
+      updates.totalCC = null;
+    }
+  } catch (err) {
+    console.error('[Calculate Amazon Financials] Error fetching exchange rate:', err);
+    updates.amazonExchangeRate = null;
+    updates.amazonTotalINR = null;
+    updates.marketplaceFee = null;
+    updates.igst = null;
+    updates.totalCC = null;
+  }
+
+  return updates;
+}
+
 // HELPER: Ensure Seller Token is Valid (Refreshes if < 2 mins left)
 async function ensureValidToken(seller, retries = 3) {
   const now = Date.now();
@@ -334,6 +429,11 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
     // ========== FULLY REFUNDED: Set earnings to $0 ==========
     console.log(`[Refund Handler] FULLY_REFUNDED: Setting earnings to $0 for ${existingOrder.orderId}`);
     
+    // Calculate financial fields with $0 earnings
+    const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
+                       existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+    const financials = await calculateFinancials({ orderEarnings: 0 }, marketplace);
+    
     return {
       subtotal: 0,
       subtotalUSD: 0,
@@ -346,7 +446,8 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
       transactionFees: 0,
       transactionFeesUSD: 0,
       adFeeGeneral: 0,
-      orderEarnings: 0
+      orderEarnings: 0,
+      ...financials
     };
     
   } else if (newPaymentStatus === 'PARTIALLY_REFUNDED') {
@@ -358,15 +459,28 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
       const adFeeResult = await fetchOrderAdFee(accessToken, existingOrder.orderId);
       const adFeeGeneral = adFeeResult.success ? adFeeResult.adFeeGeneral : existingOrder.adFeeGeneral;
 
+      // Calculate financial fields with null earnings
+      const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
+                         existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+      const financials = await calculateFinancials({ orderEarnings: null }, marketplace);
+
       return {
         adFeeGeneral,
-        orderEarnings: null // User must manually enter earnings
+        orderEarnings: null, // User must manually enter earnings
+        ...financials
       };
       
     } catch (error) {
       console.error(`[Refund Handler] Error fetching ad fee for ${existingOrder.orderId}:`, error.message);
+      
+      // Calculate financial fields with null earnings
+      const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
+                         existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+      const financials = await calculateFinancials({ orderEarnings: null }, marketplace);
+      
       return {
-        orderEarnings: null // User must manually enter earnings
+        orderEarnings: null, // User must manually enter earnings
+        ...financials
       };
     }
   }
@@ -1377,15 +1491,40 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
   }
 
   try {
-    const order = await Order.findByIdAndUpdate(
-      orderId,
-      { adFeeGeneral: parseFloat(adFeeGeneral) },
-      { new: true }
-    );
-
+    const order = await Order.findById(orderId);
+    
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
+
+    // Update ad fee
+    order.adFeeGeneral = parseFloat(adFeeGeneral);
+    
+    // Recalculate earnings if not FULLY_REFUNDED or PARTIALLY_REFUNDED
+    const paymentStatus = order.paymentSummary?.payments?.[0]?.paymentStatus;
+    if (paymentStatus !== 'FULLY_REFUNDED' && paymentStatus !== 'PARTIALLY_REFUNDED') {
+      // Recalculate earnings: Subtotal + Shipping - Transaction Fees - Ad Fees
+      const subtotal = parseFloat(order.subtotalUSD) || 0;
+      const shipping = parseFloat(order.shippingUSD) || 0;
+      const transactionFees = parseFloat(order.transactionFeesUSD) || 0;
+      const adFee = parseFloat(adFeeGeneral) || 0;
+      
+      order.orderEarnings = parseFloat((subtotal + shipping - transactionFees - adFee).toFixed(2));
+      
+      // Recalculate financial fields based on new earnings
+      const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
+                         order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+      const financials = await calculateFinancials(order, marketplace);
+      
+      // Update financial fields
+      Object.assign(order, financials);
+    }
+    
+    // Recalculate Amazon financials
+    const amazonFinancials = await calculateAmazonFinancials(order);
+    Object.assign(order, amazonFinancials);
+    
+    await order.save();
 
     res.json({ success: true, order });
   } catch (err) {
@@ -1448,15 +1587,76 @@ router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfil
 
     // Update order earnings
     order.orderEarnings = parseFloat(orderEarnings);
+    
+    // Recalculate financial fields (TDS, TID, NET, P.Balance INR)
+    const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
+                       order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+    const financials = await calculateFinancials({ orderEarnings: order.orderEarnings }, marketplace);
+    
+    // Apply financial calculations
+    order.tds = financials.tds;
+    order.tid = financials.tid;
+    order.net = financials.net;
+    order.pBalanceINR = financials.pBalanceINR;
+    order.ebayExchangeRate = financials.ebayExchangeRate;
+    
     await order.save();
 
     res.json({ 
       success: true, 
       orderId,
-      orderEarnings: order.orderEarnings
+      orderEarnings: order.orderEarnings,
+      tds: order.tds,
+      tid: order.tid,
+      net: order.net,
+      pBalanceINR: order.pBalanceINR,
+      ebayExchangeRate: order.ebayExchangeRate
     });
   } catch (err) {
     console.error('Error updating order earnings:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Handle Amazon refund received - zero out Amazon costs
+router.post('/orders/:orderId/amazon-refund-received', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    const order = await Order.findOne({ orderId });
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    // Zero out Amazon costs
+    order.beforeTaxUSD = 0;
+    order.estimatedTaxUSD = 0;
+    
+    // Recalculate Amazon financial fields (will all become 0)
+    const amazonFinancials = await calculateAmazonFinancials(order);
+    order.amazonTotal = amazonFinancials.amazonTotal;
+    order.amazonTotalINR = amazonFinancials.amazonTotalINR;
+    order.marketplaceFee = amazonFinancials.marketplaceFee;
+    order.igst = amazonFinancials.igst;
+    order.totalCC = amazonFinancials.totalCC;
+    order.amazonExchangeRate = amazonFinancials.amazonExchangeRate;
+    
+    await order.save();
+
+    res.json({ 
+      success: true, 
+      orderId,
+      beforeTaxUSD: order.beforeTaxUSD,
+      estimatedTaxUSD: order.estimatedTaxUSD,
+      amazonTotal: order.amazonTotal,
+      amazonTotalINR: order.amazonTotalINR,
+      marketplaceFee: order.marketplaceFee,
+      igst: order.igst,
+      totalCC: order.totalCC,
+      amazonExchangeRate: order.amazonExchangeRate
+    });
+  } catch (err) {
+    console.error('Error handling Amazon refund received:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1534,7 +1734,28 @@ router.post('/backfill-ad-fees', requireAuth, requireRole('fulfillmentadmin', 's
         const adFee = adFeeMap.get(order.orderId);
 
         if (adFee && adFee > 0) {
-          await Order.findByIdAndUpdate(order._id, { adFeeGeneral: adFee });
+          // Update ad fee and recalculate earnings if it's a PAID order
+          const updates = { adFeeGeneral: adFee };
+          
+          if (order.orderPaymentStatus === 'PAID') {
+            // Recalculate earnings with new ad fee
+            const subtotal = parseFloat(order.subtotalUSD || 0);
+            const discount = parseFloat(order.discountUSD || 0);
+            const salesTax = parseFloat(order.salesTaxUSD || 0);
+            const transactionFees = parseFloat(order.transactionFeesUSD || 0);
+            const shipping = parseFloat(order.shippingUSD || 0);
+            
+            const newEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
+            updates.orderEarnings = newEarnings;
+            
+            // Recalculate financial fields
+            const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
+                               order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+            const financials = await calculateFinancials({ orderEarnings: newEarnings }, marketplace);
+            Object.assign(updates, financials);
+          }
+          
+          await Order.findByIdAndUpdate(order._id, updates);
           results.success++;
           console.log(`[Backfill ${i + 1}/${orders.length}] Order ${order.orderId}: Ad Fee = $${adFee}`);
         } else {
@@ -2890,6 +3111,16 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
                         const adFee = parseFloat(existingOrder.adFeeGeneralUSD || 0);
                         const shipping = parseFloat(existingOrder.shippingUSD || 0);
                         existingOrder.orderEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
+                        
+                        // Recalculate financial fields (TDS, TID, NET, P.Balance INR)
+                        const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
+                                           existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                        const financials = await calculateFinancials({ orderEarnings: existingOrder.orderEarnings }, marketplace);
+                        existingOrder.tds = financials.tds;
+                        existingOrder.tid = financials.tid;
+                        existingOrder.net = financials.net;
+                        existingOrder.pBalanceINR = financials.pBalanceINR;
+                        
                         console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
                       } else {
                         console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
@@ -3177,6 +3408,16 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
     
     // Order earnings = subtotal + discount - salesTax - transactionFees - adFee - shipping
     orderData.orderEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
+    
+    // Calculate financial fields (TDS, TID, NET, P.Balance INR)
+    const marketplace = purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
+                       purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+    const financials = await calculateFinancials({ orderEarnings: orderData.orderEarnings }, marketplace);
+    Object.assign(orderData, financials);
+    
+    // Calculate Amazon-side financial fields
+    const amazonFinancials = await calculateAmazonFinancials(orderData);
+    Object.assign(orderData, amazonFinancials);
   }
 
   return orderData;
@@ -5540,6 +5781,14 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
       Object.keys(usdUpdates).forEach(key => {
         order[key] = usdUpdates[key];
       });
+      
+      // If beforeTaxUSD or estimatedTaxUSD changed, recalculate Amazon financials
+      if (updates.beforeTax !== undefined || updates.estimatedTax !== undefined) {
+        const amazonFinancials = await calculateAmazonFinancials(order);
+        Object.keys(amazonFinancials).forEach(key => {
+          order[key] = amazonFinancials[key];
+        });
+      }
     }
 
     // Save the updated order
@@ -5705,6 +5954,134 @@ router.post('/cache/clear', requireAuth, requireRole('superadmin'), (req, res) =
   } catch (error) {
     console.error('Error clearing cache:', error);
     res.status(500).json({ error: 'Failed to clear cache' });
+  }
+});
+
+// Seller Analytics - Aggregated data by day/week/month
+router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+  try {
+    const { sellerId, groupBy = 'day', startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: 'Start date and end date are required' });
+    }
+
+    // Build match query with timezone-aware date filtering (same as stored-orders)
+    const matchQuery = {
+      // Exclude cancelled orders
+      $and: [
+        {
+          $or: [
+            { cancelState: { $exists: false } },
+            { cancelState: null },
+            { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+          ]
+        },
+        {
+          $or: [
+            { 'cancelStatus.cancelState': { $exists: false } },
+            { 'cancelStatus.cancelState': null },
+            { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+          ]
+        }
+      ]
+    };
+
+    // Timezone-Aware Date Range Logic (PST - same as FulfillmentDashboard)
+    const PST_OFFSET_HOURS = 8;
+    matchQuery.dateSold = {};
+    
+    const start = new Date(startDate);
+    start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
+    matchQuery.dateSold.$gte = start;
+
+    const end = new Date(endDate);
+    end.setDate(end.getDate() + 1);
+    end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
+    matchQuery.dateSold.$lte = end;
+
+    if (sellerId) {
+      matchQuery.seller = new mongoose.Types.ObjectId(sellerId);
+    }
+
+    // Determine grouping format with PST timezone
+    let dateGroupFormat;
+    if (groupBy === 'day') {
+      dateGroupFormat = { $dateToString: { format: '%Y-%m-%d', date: '$dateSold', timezone: 'America/Los_Angeles' } };
+    } else if (groupBy === 'week') {
+      dateGroupFormat = { $dateToString: { format: '%Y-W%V', date: '$dateSold', timezone: 'America/Los_Angeles' } };
+    } else if (groupBy === 'month') {
+      dateGroupFormat = { $dateToString: { format: '%Y-%m', date: '$dateSold', timezone: 'America/Los_Angeles' } };
+    } else {
+      return res.status(400).json({ error: 'Invalid groupBy parameter. Use day, week, or month.' });
+    }
+
+    // Aggregation pipeline
+    const analytics = await Order.aggregate([
+      { $match: matchQuery },
+      {
+        $group: {
+          _id: dateGroupFormat,
+          totalOrders: { $sum: 1 },
+          totalSubtotal: { $sum: { $ifNull: ['$subtotalUSD', 0] } },
+          totalShipping: { $sum: { $ifNull: ['$shippingUSD', 0] } },
+          totalSalesTax: { $sum: { $ifNull: ['$salesTaxUSD', 0] } },
+          totalDiscount: { $sum: { $ifNull: ['$discountUSD', 0] } },
+          totalTransactionFees: { $sum: { $ifNull: ['$transactionFeesUSD', 0] } },
+          totalAdFees: { $sum: { $ifNull: ['$adFeeGeneral', 0] } },
+          totalEarnings: { $sum: { $ifNull: ['$orderEarnings', 0] } },
+          totalPBalanceINR: { $sum: { $ifNull: ['$pBalanceINR', 0] } },
+          totalAmazonCosts: { $sum: { $ifNull: ['$amazonTotalINR', 0] } },
+          totalCreditCardFees: { $sum: { $ifNull: ['$totalCC', 0] } }
+        }
+      },
+      {
+        $project: {
+          period: '$_id',
+          totalOrders: 1,
+          totalSubtotal: { $round: ['$totalSubtotal', 2] },
+          totalShipping: { $round: ['$totalShipping', 2] },
+          totalSalesTax: { $round: ['$totalSalesTax', 2] },
+          totalDiscount: { $round: ['$totalDiscount', 2] },
+          totalTransactionFees: { $round: ['$totalTransactionFees', 2] },
+          totalAdFees: { $round: ['$totalAdFees', 2] },
+          totalEarnings: { $round: ['$totalEarnings', 2] },
+          totalPBalanceINR: { $round: ['$totalPBalanceINR', 2] },
+          totalAmazonCosts: { $round: ['$totalAmazonCosts', 2] },
+          totalCreditCardFees: { $round: ['$totalCreditCardFees', 2] },
+          totalProfit: { 
+            $round: [
+              { 
+                $subtract: [
+                  { $subtract: ['$totalPBalanceINR', '$totalAmazonCosts'] },
+                  '$totalCreditCardFees'
+                ]
+              },
+              2
+            ]
+          },
+          _id: 0
+        }
+      },
+      { $sort: { period: 1 } }
+    ]);
+
+    // Calculate overall summary
+    const summary = analytics.reduce((acc, row) => {
+      acc.totalOrders += row.totalOrders;
+      acc.totalEarnings += row.totalEarnings;
+      acc.totalProfit += row.totalProfit;
+      return acc;
+    }, { totalOrders: 0, totalEarnings: 0, totalProfit: 0 });
+
+    summary.avgOrderValue = summary.totalOrders > 0 
+      ? parseFloat((summary.totalEarnings / summary.totalOrders).toFixed(2))
+      : 0;
+
+    res.json({ analytics, summary });
+  } catch (err) {
+    console.error('Error fetching seller analytics:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 

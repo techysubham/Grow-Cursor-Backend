@@ -82,6 +82,19 @@ const OrderSchema = new mongoose.Schema(
     azOrderId: String,
     amazonRefund: Number,
     cardName: String, // Reference to credit card name
+    // Financial calculations (All Orders Sheet)
+    tds: Number, // Tax Deducted at Source (1% of orderEarnings)
+    tid: { type: Number, default: 0.24 }, // Transaction ID (fixed at $0.24)
+    net: Number, // orderEarnings - tds - tid
+    pBalanceINR: Number, // net * exchangeRate (for selected marketplace)
+    ebayExchangeRate: Number, // Manual eBay exchange rate used for P.Balance calculation
+    amazonExchangeRate: Number, // Manual Amazon exchange rate (set by user for Amazon purchases)
+    // Amazon financial calculations
+    amazonTotal: Number, // beforeTaxUSD + estimatedTaxUSD
+    amazonTotalINR: Number, // amazonTotal * amazonExchangeRate
+    marketplaceFee: Number, // 4% of amazonTotalINR
+    igst: Number, // 18% of marketplaceFee
+    totalCC: Number, // marketplaceFee + igst
   },
   { timestamps: true }
 );
