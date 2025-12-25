@@ -151,8 +151,24 @@ async function calculateFinancials(order, marketplace = 'EBAY') {
 async function calculateAmazonFinancials(order) {
   const updates = {};
 
-  const beforeTax = parseFloat(order.beforeTaxUSD) || 0;
-  const estimatedTax = parseFloat(order.estimatedTaxUSD) || 0;
+  // For US orders, if USD fields are missing, fall back to base currency fields
+  const isUSOrder = order.purchaseMarketplaceId === 'EBAY_US' || order.conversionRate === 1;
+  let beforeTaxUSD = parseFloat(order.beforeTaxUSD);
+  let estimatedTaxUSD = parseFloat(order.estimatedTaxUSD);
+  
+  if (isUSOrder) {
+    if (!beforeTaxUSD && order.beforeTax !== undefined) {
+      beforeTaxUSD = parseFloat(order.beforeTax) || 0;
+      updates.beforeTaxUSD = beforeTaxUSD; // Update the missing field
+    }
+    if (!estimatedTaxUSD && order.estimatedTax !== undefined) {
+      estimatedTaxUSD = parseFloat(order.estimatedTax) || 0;
+      updates.estimatedTaxUSD = estimatedTaxUSD; // Update the missing field
+    }
+  }
+  
+  const beforeTax = beforeTaxUSD || 0;
+  const estimatedTax = estimatedTaxUSD || 0;
   
   // Amazon Total = Before Tax + Estimated Tax
   updates.amazonTotal = parseFloat((beforeTax + estimatedTax).toFixed(2));
@@ -160,6 +176,11 @@ async function calculateAmazonFinancials(order) {
   // Check if order is FULLY_REFUNDED or PARTIALLY_REFUNDED
   const paymentStatus = order.paymentSummary?.payments?.[0]?.paymentStatus;
   const isRefunded = paymentStatus === 'FULLY_REFUNDED' || paymentStatus === 'PARTIALLY_REFUNDED';
+  
+  // IGST=0 logic only applies to orders from Nov 28, 2025 onwards
+  const orderDate = new Date(order.creationDate || order.dateSold);
+  const nov28_2025 = new Date('2025-11-28T00:00:00.000Z');
+  const applyIGSTZeroForRefunds = orderDate >= nov28_2025;
 
   // Fetch latest Amazon exchange rate
   try {
@@ -171,8 +192,8 @@ async function calculateAmazonFinancials(order) {
       // Marketplace Fee = 4% of amazonTotalINR
       updates.marketplaceFee = parseFloat((updates.amazonTotalINR * 0.04).toFixed(2));
       
-      // IGST = 18% of marketplace fee, BUT 0 if order is refunded
-      updates.igst = isRefunded ? 0 : parseFloat((updates.marketplaceFee * 0.18).toFixed(2));
+      // IGST = 18% of marketplace fee, BUT 0 if order is refunded AND from Nov 28, 2025 onwards
+      updates.igst = (isRefunded && applyIGSTZeroForRefunds) ? 0 : parseFloat((updates.marketplaceFee * 0.18).toFixed(2));
       
       // Total CC = Marketplace Fee + IGST
       updates.totalCC = parseFloat((updates.marketplaceFee + updates.igst).toFixed(2));
