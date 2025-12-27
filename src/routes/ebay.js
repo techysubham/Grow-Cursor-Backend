@@ -48,7 +48,7 @@ imageCache.startAutoCleanup();
 function recalculateUSDFields(order) {
   // Get conversion rate (default to 1 for US orders)
   let conversionRate = 1;
-  
+
   if (order.purchaseMarketplaceId !== 'EBAY_US') {
     const totalDueSeller = order.paymentSummary?.totalDueSeller;
     if (totalDueSeller?.value && totalDueSeller?.convertedFromValue) {
@@ -67,7 +67,7 @@ function recalculateUSDFields(order) {
 
   // Convert monetary fields
   const monetaryFields = [
-    'subtotal', 'shipping', 'salesTax', 'discount', 
+    'subtotal', 'shipping', 'salesTax', 'discount',
     'transactionFees', 'beforeTax', 'estimatedTax'
   ];
 
@@ -163,7 +163,7 @@ async function calculateAmazonFinancials(order) {
   const isUSOrder = order.purchaseMarketplaceId === 'EBAY_US' || order.conversionRate === 1;
   let beforeTaxUSD = parseFloat(order.beforeTaxUSD);
   let estimatedTaxUSD = parseFloat(order.estimatedTaxUSD);
-  
+
   if (isUSOrder) {
     if (!beforeTaxUSD && order.beforeTax !== undefined) {
       beforeTaxUSD = parseFloat(order.beforeTax) || 0;
@@ -174,17 +174,17 @@ async function calculateAmazonFinancials(order) {
       updates.estimatedTaxUSD = estimatedTaxUSD; // Update the missing field
     }
   }
-  
+
   const beforeTax = beforeTaxUSD || 0;
   const estimatedTax = estimatedTaxUSD || 0;
-  
+
   // Amazon Total = Before Tax + Estimated Tax
   updates.amazonTotal = parseFloat((beforeTax + estimatedTax).toFixed(2));
 
   // Check if order is FULLY_REFUNDED or PARTIALLY_REFUNDED
   const paymentStatus = order.paymentSummary?.payments?.[0]?.paymentStatus;
   const isRefunded = paymentStatus === 'FULLY_REFUNDED' || paymentStatus === 'PARTIALLY_REFUNDED';
-  
+
   // IGST=0 logic only applies to orders from Nov 28, 2025 onwards
   const orderDate = new Date(order.creationDate || order.dateSold);
   const nov28_2025 = new Date('2025-11-28T00:00:00.000Z');
@@ -196,13 +196,13 @@ async function calculateAmazonFinancials(order) {
     if (exchangeRate && exchangeRate.rate) {
       updates.amazonExchangeRate = exchangeRate.rate; // Store the Amazon exchange rate used
       updates.amazonTotalINR = parseFloat((updates.amazonTotal * exchangeRate.rate).toFixed(2));
-      
+
       // Marketplace Fee = 4% of amazonTotalINR
       updates.marketplaceFee = parseFloat((updates.amazonTotalINR * 0.04).toFixed(2));
-      
+
       // IGST = 18% of marketplace fee, BUT 0 if order is refunded AND from Nov 28, 2025 onwards
       updates.igst = (isRefunded && applyIGSTZeroForRefunds) ? 0 : parseFloat((updates.marketplaceFee * 0.18).toFixed(2));
-      
+
       // Total CC = Marketplace Fee + IGST
       updates.totalCC = parseFloat((updates.marketplaceFee + updates.igst).toFixed(2));
     } else {
@@ -278,14 +278,14 @@ async function ensureValidToken(seller, retries = 3) {
     } catch (err) {
       const status = err.response?.status;
       const isRetryable = status === 503 || status === 429 || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT';
-      
+
       if (isRetryable && attempt < retries) {
         const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // Exponential backoff: 1s, 2s, 4s (max 5s)
         console.log(`[Token Refresh] ⚠️ Attempt ${attempt} failed with ${status || err.code}, retrying in ${waitTime}ms...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
         continue;
       }
-      
+
       console.error(`[Token Refresh] ❌ Failed for ${seller._id} after ${attempt} attempts:`, err.message);
       throw new Error(`Failed to refresh eBay token: ${err.response?.status || err.message}`);
     }
@@ -453,7 +453,7 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null) {
  */
 async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, accessToken, sellerId) {
   const oldStatus = existingOrder.orderPaymentStatus;
-  
+
   // Only process if status actually changed
   if (oldStatus === newPaymentStatus) {
     return null;
@@ -464,12 +464,12 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
   if (newPaymentStatus === 'FULLY_REFUNDED') {
     // ========== FULLY REFUNDED: Set earnings to $0 ==========
     console.log(`[Refund Handler] FULLY_REFUNDED: Setting earnings to $0 for ${existingOrder.orderId}`);
-    
+
     // Calculate financial fields with $0 earnings
-    const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
-                       existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+    const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+      existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
     const financials = await calculateFinancials({ orderEarnings: 0 }, marketplace);
-    
+
     return {
       subtotal: 0,
       subtotalUSD: 0,
@@ -485,19 +485,19 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
       orderEarnings: 0,
       ...financials
     };
-    
+
   } else if (newPaymentStatus === 'PARTIALLY_REFUNDED') {
     // ========== PARTIALLY REFUNDED: Set earnings to null (user will manually enter) ==========
     console.log(`[Refund Handler] PARTIALLY_REFUNDED: Setting earnings to null for ${existingOrder.orderId}`);
-    
+
     try {
       // Fetch updated ad fee from Finances API
       const adFeeResult = await fetchOrderAdFee(accessToken, existingOrder.orderId);
       const adFeeGeneral = adFeeResult.success ? adFeeResult.adFeeGeneral : existingOrder.adFeeGeneral;
 
       // Calculate financial fields with null earnings
-      const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
-                         existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+      const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+        existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
       const financials = await calculateFinancials({ orderEarnings: null }, marketplace);
 
       return {
@@ -505,15 +505,15 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
         orderEarnings: null, // User must manually enter earnings
         ...financials
       };
-      
+
     } catch (error) {
       console.error(`[Refund Handler] Error fetching ad fee for ${existingOrder.orderId}:`, error.message);
-      
+
       // Calculate financial fields with null earnings
-      const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
-                         existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+      const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+        existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
       const financials = await calculateFinancials({ orderEarnings: null }, marketplace);
-      
+
       return {
         orderEarnings: null, // User must manually enter earnings
         ...financials
@@ -1213,7 +1213,7 @@ router.get('/stored-orders', async (req, res) => {
 async function getExchangeRateForDate(date, marketplace = 'EBAY') {
   try {
     const targetDate = new Date(date);
-    
+
     // Find the most recent rate that was effective on or before the target date
     const rate = await ExchangeRate.findOne({
       marketplace,
@@ -1221,7 +1221,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
     })
       .sort({ effectiveDate: -1 })
       .limit(1);
-    
+
     // Default to 82 if no rate found
     return rate ? rate.rate : 82;
   } catch (err) {
@@ -1315,11 +1315,11 @@ router.get('/all-orders-usd', async (req, res) => {
     // Fallback: Calculate USD values on-the-fly if missing, and add exchange rate + P.Balance
     const ordersWithUSD = await Promise.all(orders.map(async order => {
       const orderObj = order.toObject();
-      
+
       // If USD values don't exist, calculate them
       if (orderObj.subtotalUSD === undefined || orderObj.subtotalUSD === null) {
         const marketplace = orderObj.purchaseMarketplaceId;
-        
+
         if (marketplace === 'EBAY_US') {
           // US orders - already in USD
           orderObj.subtotalUSD = orderObj.subtotal || 0;
@@ -1331,16 +1331,16 @@ router.get('/all-orders-usd', async (req, res) => {
         } else {
           // Non-US orders - calculate from paymentSummary
           let conversionRate = 0;
-          
-          if (orderObj.paymentSummary?.totalDueSeller?.convertedFromValue && 
-              orderObj.paymentSummary?.totalDueSeller?.value) {
+
+          if (orderObj.paymentSummary?.totalDueSeller?.convertedFromValue &&
+            orderObj.paymentSummary?.totalDueSeller?.value) {
             const originalValue = parseFloat(orderObj.paymentSummary.totalDueSeller.convertedFromValue);
             const usdValue = parseFloat(orderObj.paymentSummary.totalDueSeller.value);
             if (originalValue > 0) {
               conversionRate = usdValue / originalValue;
             }
           }
-          
+
           // Apply conversion with proper rounding (2 decimal places)
           orderObj.subtotalUSD = conversionRate ? parseFloat(((orderObj.subtotal || 0) * conversionRate).toFixed(2)) : 0;
           orderObj.shippingUSD = conversionRate ? parseFloat(((orderObj.shipping || 0) * conversionRate).toFixed(2)) : 0;
@@ -1350,7 +1350,7 @@ router.get('/all-orders-usd', async (req, res) => {
           orderObj.conversionRate = parseFloat(conversionRate.toFixed(5));
         }
       }
-      
+
       // ALWAYS recalculate refunds from paymentSummary.refunds (in case refunds were added after initial sync)
       let refundTotal = 0;
       if (orderObj.paymentSummary?.refunds && Array.isArray(orderObj.paymentSummary.refunds)) {
@@ -1360,13 +1360,13 @@ router.get('/all-orders-usd', async (req, res) => {
       }
       const conversionRate = orderObj.conversionRate || 1;
       orderObj.refundTotalUSD = parseFloat((refundTotal * conversionRate).toFixed(2));
-      
+
       // Get exchange rates for order's date (USD to INR)
       const ebayExchangeRate = await getExchangeRateForDate(orderObj.dateSold || orderObj.creationDate, 'EBAY');
       const amazonExchangeRate = await getExchangeRateForDate(orderObj.dateSold || orderObj.creationDate, 'AMAZON');
       orderObj.exchangeRate = ebayExchangeRate;
       orderObj.amazonExchangeRate = amazonExchangeRate;
-      
+
       // Calculate NET and P.Balance
       // NET = Subtotal - TransactionFees - AdFeeGeneral - Refunds - TDS - T.ID + Discount
       const total = (orderObj.subtotalUSD || 0) + (orderObj.salesTaxUSD || 0);
@@ -1379,9 +1379,9 @@ router.get('/all-orders-usd', async (req, res) => {
         - tds
         - tid
         + (orderObj.discountUSD || 0);
-      
+
       orderObj.pBalance = parseFloat((net * orderObj.exchangeRate).toFixed(2));
-      
+
       return orderObj;
     }));
 
@@ -1528,14 +1528,14 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
 
   try {
     const order = await Order.findById(orderId);
-    
+
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
 
     // Update ad fee
     order.adFeeGeneral = parseFloat(adFeeGeneral);
-    
+
     // Recalculate earnings if not FULLY_REFUNDED or PARTIALLY_REFUNDED
     const paymentStatus = order.paymentSummary?.payments?.[0]?.paymentStatus;
     if (paymentStatus !== 'FULLY_REFUNDED' && paymentStatus !== 'PARTIALLY_REFUNDED') {
@@ -1544,22 +1544,22 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
       const shipping = parseFloat(order.shippingUSD) || 0;
       const transactionFees = parseFloat(order.transactionFeesUSD) || 0;
       const adFee = parseFloat(adFeeGeneral) || 0;
-      
+
       order.orderEarnings = parseFloat((subtotal + shipping - transactionFees - adFee).toFixed(2));
-      
+
       // Recalculate financial fields based on new earnings
-      const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
-                         order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+      const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+        order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
       const financials = await calculateFinancials(order, marketplace);
-      
+
       // Update financial fields
       Object.assign(order, financials);
     }
-    
+
     // Recalculate Amazon financials
     const amazonFinancials = await calculateAmazonFinancials(order);
     Object.assign(order, amazonFinancials);
-    
+
     await order.save();
 
     res.json({ success: true, order });
@@ -1623,23 +1623,23 @@ router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfil
 
     // Update order earnings
     order.orderEarnings = parseFloat(orderEarnings);
-    
+
     // Recalculate financial fields (TDS, TID, NET, P.Balance INR)
-    const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
-                       order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+    const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+      order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
     const financials = await calculateFinancials({ orderEarnings: order.orderEarnings }, marketplace);
-    
+
     // Apply financial calculations
     order.tds = financials.tds;
     order.tid = financials.tid;
     order.net = financials.net;
     order.pBalanceINR = financials.pBalanceINR;
     order.ebayExchangeRate = financials.ebayExchangeRate;
-    
+
     await order.save();
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       orderId,
       orderEarnings: order.orderEarnings,
       tds: order.tds,
@@ -1667,7 +1667,7 @@ router.post('/orders/:orderId/amazon-refund-received', requireAuth, requireRole(
     // Zero out Amazon costs
     order.beforeTaxUSD = 0;
     order.estimatedTaxUSD = 0;
-    
+
     // Recalculate Amazon financial fields (will all become 0)
     const amazonFinancials = await calculateAmazonFinancials(order);
     order.amazonTotal = amazonFinancials.amazonTotal;
@@ -1676,11 +1676,11 @@ router.post('/orders/:orderId/amazon-refund-received', requireAuth, requireRole(
     order.igst = amazonFinancials.igst;
     order.totalCC = amazonFinancials.totalCC;
     order.amazonExchangeRate = amazonFinancials.amazonExchangeRate;
-    
+
     await order.save();
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       orderId,
       beforeTaxUSD: order.beforeTaxUSD,
       estimatedTaxUSD: order.estimatedTaxUSD,
@@ -1772,7 +1772,7 @@ router.post('/backfill-ad-fees', requireAuth, requireRole('fulfillmentadmin', 's
         if (adFee && adFee > 0) {
           // Update ad fee and recalculate earnings if it's a PAID order
           const updates = { adFeeGeneral: adFee };
-          
+
           if (order.orderPaymentStatus === 'PAID') {
             // Recalculate earnings with new ad fee
             const subtotal = parseFloat(order.subtotalUSD || 0);
@@ -1780,17 +1780,17 @@ router.post('/backfill-ad-fees', requireAuth, requireRole('fulfillmentadmin', 's
             const salesTax = parseFloat(order.salesTaxUSD || 0);
             const transactionFees = parseFloat(order.transactionFeesUSD || 0);
             const shipping = parseFloat(order.shippingUSD || 0);
-            
+
             const newEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
             updates.orderEarnings = newEarnings;
-            
+
             // Recalculate financial fields
-            const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
-                               order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+            const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+              order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
             const financials = await calculateFinancials({ orderEarnings: newEarnings }, marketplace);
             Object.assign(updates, financials);
           }
-          
+
           await Order.findByIdAndUpdate(order._id, updates);
           results.success++;
           console.log(`[Backfill ${i + 1}/${orders.length}] Order ${order.orderId}: Ad Fee = $${adFee}`);
@@ -2094,10 +2094,10 @@ router.post('/orders/:orderId/upload-tracking-multiple', async (req, res) => {
 
     for (let i = 0; i < trackingData.length; i++) {
       const { itemId, trackingNumber, carrier } = trackingData[i];
-      
+
       // Find matching line item(s) with this itemId
       const matchingLineItems = order.lineItems.filter(li => li.legacyItemId === itemId);
-      
+
       if (matchingLineItems.length === 0) {
         errors.push(`Item ${itemId} not found in order`);
         continue;
@@ -2140,10 +2140,10 @@ router.post('/orders/:orderId/upload-tracking-multiple', async (req, res) => {
 
       } catch (err) {
         console.error(`[Upload Multiple Tracking] ❌ Error uploading tracking #${i + 1}:`, err.response?.data || err.message);
-        
+
         const errorMsg = err.response?.data?.errors?.map(e => e.message).join(', ') || err.message;
         errors.push(`Item ${itemId}: ${errorMsg}`);
-        
+
         fulfillmentResults.push({
           itemId,
           trackingNumber: trackingNumber.trim(),
@@ -2184,7 +2184,7 @@ router.post('/orders/:orderId/upload-tracking-multiple', async (req, res) => {
       // Update database with first tracking number (for display purposes)
       // Store all tracking numbers in a comma-separated format or JSON
       const allTrackingNumbers = trackingData.map(t => t.trackingNumber.trim()).join(', ');
-      
+
       order.trackingNumber = allTrackingNumbers;
       order.manualTrackingNumber = allTrackingNumbers;
       order.orderFulfillmentStatus = isFulfilled ? 'FULFILLED' : order.orderFulfillmentStatus;
@@ -2204,7 +2204,7 @@ router.post('/orders/:orderId/upload-tracking-multiple', async (req, res) => {
 
     } catch (verifyErr) {
       console.warn(`[Upload Multiple Tracking] ⚠️ Verification failed:`, verifyErr.message);
-      
+
       // Still update DB even if verification fails (tracking was uploaded)
       const allTrackingNumbers = trackingData.map(t => t.trackingNumber.trim()).join(', ');
       order.trackingNumber = allTrackingNumbers;
@@ -2407,7 +2407,7 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
 
                 if (ebayModTime > dbModTime) {
                   let orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
-                  
+
                   // ========== HANDLE REFUND STATUS CHANGES ==========
                   const refundData = await handleOrderPaymentStatusChange(
                     existingOrder,
@@ -2419,7 +2419,7 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
                   // If refund handling returned data, merge it
                   if (refundData) {
                     orderData = { ...orderData, ...refundData };
-                    
+
                     // Also calculate and add refund breakdown for partially refunded orders
                     if (ebayOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
                       const refundBreakdown = calculateRefundBreakdown(ebayOrder);
@@ -2429,7 +2429,7 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
                       orderData.ebayPaidTaxRefund = refundBreakdown.ebayPaidTaxRefund;
                     }
                   }
-                  
+
                   Object.assign(existingOrder, orderData);
                   await existingOrder.save();
                   updatedOrders.push(existingOrder);
@@ -2513,7 +2513,7 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
                   // If refund handling returned data, merge it with orderData
                   if (refundData) {
                     orderData = { ...orderData, ...refundData };
-                    
+
                     // Also calculate and add refund breakdown for partially refunded orders
                     if (ebayOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
                       const refundBreakdown = calculateRefundBreakdown(ebayOrder);
@@ -2823,7 +2823,7 @@ router.post('/resync-from-dec1', requireAuth, requireRole('fulfillmentadmin', 's
 
     const resyncStartDate = new Date('2025-12-01T08:00:00.000Z');
     const currentTimeUTC = new Date();
-    
+
     const results = {
       totalOrders: 0,
       newOrders: 0,
@@ -2834,30 +2834,30 @@ router.post('/resync-from-dec1', requireAuth, requireRole('fulfillmentadmin', 's
 
     for (const seller of sellers) {
       const sellerName = seller.user?.username || seller.businessName || seller._id;
-      
+
       try {
         console.log(`\n[${sellerName}] Starting resync from Dec 1, 2025...`);
-        
+
         const accessToken = await ensureValidToken(seller);
-        
+
         // Fetch orders from Dec 1, 2025 8AM UTC to now
         const filter = `creationdate:[${resyncStartDate.toISOString()}..${currentTimeUTC.toISOString()}]`;
         console.log(`[${sellerName}] Filter: ${filter}`);
-        
+
         const ebayOrders = await fetchAllOrdersWithPagination(accessToken, filter, sellerName);
         console.log(`[${sellerName}] Fetched ${ebayOrders.length} orders from eBay`);
-        
+
         let newCount = 0;
         let updateCount = 0;
-        
+
         for (const ebayOrder of ebayOrders) {
           try {
             // Build order data with USD conversion
             const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
-            
+
             // Check if order exists in DB
             const existingOrder = await Order.findOne({ orderId: ebayOrder.orderId });
-            
+
             if (existingOrder) {
               // Update existing order, preserve Amazon details
               await Order.updateOne(
@@ -2904,9 +2904,9 @@ router.post('/resync-from-dec1', requireAuth, requireRole('fulfillmentadmin', 's
             results.errors.push({ seller: sellerName, orderId: ebayOrder.orderId, error: err.message });
           }
         }
-        
+
         console.log(`[${sellerName}] ✅ New: ${newCount}, Updated: ${updateCount}`);
-        
+
         results.totalOrders += ebayOrders.length;
         results.newOrders += newCount;
         results.updatedOrders += updateCount;
@@ -2916,7 +2916,7 @@ router.post('/resync-from-dec1', requireAuth, requireRole('fulfillmentadmin', 's
           new: newCount,
           updated: updateCount
         });
-        
+
       } catch (err) {
         console.error(`[${sellerName}] ❌ Error:`, err.message);
         results.errors.push({ seller: sellerName, error: err.message });
@@ -2928,7 +2928,7 @@ router.post('/resync-from-dec1', requireAuth, requireRole('fulfillmentadmin', 's
     console.log(`New Orders: ${results.newOrders}`);
     console.log(`Updated Orders: ${results.updatedOrders}`);
     console.log(`Errors: ${results.errors.length}`);
-    
+
     res.json({
       success: true,
       message: 'Resync from Dec 1, 2025 completed',
@@ -3137,7 +3137,7 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
                     if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
                       existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                       existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
-                      
+
                       // Recalculate orderEarnings if this is a PAID order
                       if (existingOrder.orderPaymentStatus === 'PAID') {
                         const subtotal = parseFloat(existingOrder.subtotalUSD || 0);
@@ -3147,21 +3147,21 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
                         const adFee = parseFloat(existingOrder.adFeeGeneralUSD || 0);
                         const shipping = parseFloat(existingOrder.shippingUSD || 0);
                         existingOrder.orderEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
-                        
+
                         // Recalculate financial fields (TDS, TID, NET, P.Balance INR)
-                        const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
-                                           existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                        const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                          existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                         const financials = await calculateFinancials({ orderEarnings: existingOrder.orderEarnings }, marketplace);
                         existingOrder.tds = financials.tds;
                         existingOrder.tid = financials.tid;
                         existingOrder.net = financials.net;
                         existingOrder.pBalanceINR = financials.pBalanceINR;
-                        
+
                         console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
                       } else {
                         console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
                       }
-                      
+
                       await existingOrder.save();
                     }
                   } catch (adFeeErr) {
@@ -3410,16 +3410,16 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
   } else {
     // For non-US orders, calculate conversion rate from paymentSummary
     let conversionRate = 0;
-    
-    if (ebayOrder.paymentSummary?.totalDueSeller?.convertedFromValue && 
-        ebayOrder.paymentSummary?.totalDueSeller?.value) {
+
+    if (ebayOrder.paymentSummary?.totalDueSeller?.convertedFromValue &&
+      ebayOrder.paymentSummary?.totalDueSeller?.value) {
       const originalValue = parseFloat(ebayOrder.paymentSummary.totalDueSeller.convertedFromValue);
       const usdValue = parseFloat(ebayOrder.paymentSummary.totalDueSeller.value);
       if (originalValue > 0) {
         conversionRate = usdValue / originalValue;
       }
     }
-    
+
     // Apply conversion rate to all monetary fields with proper rounding (2 decimal places)
     orderData.subtotalUSD = conversionRate ? parseFloat((orderData.subtotal * conversionRate).toFixed(2)) : 0;
     orderData.shippingUSD = conversionRate ? parseFloat((orderData.shipping * conversionRate).toFixed(2)) : 0;
@@ -3441,16 +3441,16 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
     const transactionFees = parseFloat(orderData.transactionFeesUSD || 0);
     const adFee = parseFloat(orderData.adFeeGeneralUSD || orderData.adFee || 0);
     const shipping = parseFloat(orderData.shippingUSD || 0);
-    
+
     // Order earnings = subtotal + discount - salesTax - transactionFees - adFee - shipping
     orderData.orderEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
-    
+
     // Calculate financial fields (TDS, TID, NET, P.Balance INR)
-    const marketplace = purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' : 
-                       purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+    const marketplace = purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+      purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
     const financials = await calculateFinancials({ orderEarnings: orderData.orderEarnings }, marketplace);
     Object.assign(orderData, financials);
-    
+
     // Calculate Amazon-side financial fields
     const amazonFinancials = await calculateAmazonFinancials(orderData);
     Object.assign(orderData, amazonFinancials);
@@ -4464,26 +4464,26 @@ router.post('/sync-thread', requireAuth, requireRole('fulfillmentadmin', 'supera
 async function uploadImageToEbay(token, filePath) {
   try {
     console.log('[eBay Upload] Processing image:', filePath);
-    
+
     // Step 1: Process image with Sharp
     const metadata = await sharp(filePath).metadata();
     console.log('[eBay Upload] Original format:', metadata.format, `${metadata.width}x${metadata.height}`);
-    
+
     // Step 2: Convert to JPEG with optimal settings for eBay
     let processedBuffer = await sharp(filePath)
       .rotate() // Auto-rotate based on EXIF
-      .resize(1600, 1600, { 
-        fit: 'inside', 
-        withoutEnlargement: true 
+      .resize(1600, 1600, {
+        fit: 'inside',
+        withoutEnlargement: true
       })
       .flatten({ background: { r: 255, g: 255, b: 255 } }) // Remove transparency
-      .jpeg({ 
+      .jpeg({
         quality: 95,
         chromaSubsampling: '4:4:4', // No chroma subsampling for better quality
         force: true
       })
       .toBuffer();
-    
+
     // Check file size
     let fileSizeMB = processedBuffer.length / (1024 * 1024);
     if (fileSizeMB > 7) {
@@ -4493,14 +4493,14 @@ async function uploadImageToEbay(token, filePath) {
         .toBuffer();
       fileSizeMB = processedBuffer.length / (1024 * 1024);
     }
-    
+
     console.log(`[eBay Upload] Processed: ${fileSizeMB.toFixed(2)}MB JPEG`);
-    
+
     const fileName = path.basename(filePath).replace(/\.[^/.]+$/, '.jpg');
 
     // Step 3: Use multipart/form-data (eBay's recommended method)
     const form = new FormData();
-    
+
     // Add XML payload as first part
     const xmlPayload = `<?xml version="1.0" encoding="utf-8"?>
 <UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
@@ -4510,11 +4510,11 @@ async function uploadImageToEbay(token, filePath) {
   <PictureName>${fileName}</PictureName>
   <PictureSet>Standard</PictureSet>
 </UploadSiteHostedPicturesRequest>`;
-    
+
     form.append('XML Payload', xmlPayload, {
       contentType: 'text/xml; charset=utf-8'
     });
-    
+
     // Add binary image as second part
     form.append(fileName, processedBuffer, {
       filename: fileName,
@@ -4584,18 +4584,18 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
       isTransaction = true; // This is a real transaction
     } else {
       // Get the most recent message from this buyer
-      const query = isDirect 
+      const query = isDirect
         ? { buyerUsername, itemId: 'DIRECT_MESSAGE', sender: 'BUYER' }
         : { buyerUsername, itemId, sender: 'BUYER' };
-      
+
       const prevMsg = await Message.findOne(query)
         .sort({ messageDate: -1 })
         .populate('seller');
-      
+
       if (prevMsg) {
         seller = prevMsg.seller;
         parentMessageId = prevMsg.externalMessageId; // eBay's message ID
-        
+
         // Check if this inquiry is related to an order
         if (prevMsg.orderId) {
           isTransaction = true;
@@ -4611,7 +4611,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
 
     // DIRECT messages: Cannot reply via API (eBay limitation)
     if (isDirect) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Cannot reply to direct messages via API. These are account-level messages that must be replied to through eBay\'s messaging center.',
         hint: 'Direct messages (without item context) cannot be replied to programmatically.'
       });
@@ -4636,14 +4636,14 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
     let finalMediaUrls = [];
     if (mediaUrls && mediaUrls.length > 0) {
       console.log(`[Send Message] Processing ${mediaUrls.length} images...`);
-      
+
       // Convert local URLs to file paths and upload to eBay
       for (const url of mediaUrls) {
         try {
           // Extract filename from URL (e.g., http://localhost:5000/uploads/123.jpg -> 123.jpg)
           const filename = url.split('/').pop();
           const filePath = path.join(process.cwd(), 'public/uploads', filename);
-          
+
           if (fs.existsSync(filePath)) {
             console.log(`[Send Message] Uploading ${filename} to eBay...`);
             const ebayUrl = await uploadImageToEbay(token, filePath);
@@ -4662,7 +4662,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
     // Prepare message body with image URLs (eBay APIs don't support MessageMedia for sending)
     // Always escape the original message body first
     let finalBody = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    
+
     if (finalMediaUrls.length > 0) {
       // Format image URLs as clickable links
       // Try multiple formats to ensure maximum compatibility:
@@ -4671,7 +4671,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
       const imageLinks = finalMediaUrls.map((url, index) => {
         return `Image ${index + 1}: ${url}`;
       }).join('\n');
-      
+
       finalBody += '\n\n---\nAttached Image(s):\n' + imageLinks;
       console.log('[Send Message] ⚠️ eBay APIs do not support MessageMedia for outgoing messages. Added URLs to message body.');
     }
@@ -4679,7 +4679,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
     // CASE 1: Transaction Message (Use AddMemberMessageAAQToPartner)
     if (isTransaction) {
       callName = 'AddMemberMessageAAQToPartner';
-      
+
       xmlRequest = `
         <?xml version="1.0" encoding="utf-8"?>
         <AddMemberMessageAAQToPartnerRequest xmlns="urn:ebay:apis:eBLBaseComponents">
@@ -4693,11 +4693,11 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
           </MemberMessage>
         </AddMemberMessageAAQToPartnerRequest>
       `;
-    } 
+    }
     // CASE 2: Inquiry Message (Use AddMemberMessageRTQ - Respond To Question)
     else {
       callName = 'AddMemberMessageRTQ';
-      
+
       xmlRequest = `
         <?xml version="1.0" encoding="utf-8"?>
         <AddMemberMessageRTQRequest xmlns="urn:ebay:apis:eBLBaseComponents">
@@ -4742,7 +4742,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
         messageType: isTransaction ? 'ORDER' : 'INQUIRY',
         messageDate: new Date()
       });
-      
+
       console.log(`[Send Message] ✅ Message sent successfully using ${callName}`);
       return res.json({ success: true, message: newMsg });
     } else {
@@ -4761,7 +4761,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
 // 4. GET THREADS (With Pagination & Search)
 router.get('/chat/threads', requireAuth, async (req, res) => {
   try {
-    const { sellerId, page = 1, limit = 20, search = '' } = req.query;
+    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL' } = req.query;
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
@@ -4826,6 +4826,27 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         buyerName: { $arrayElemAt: ["$orderDetails.buyer.buyerRegistrationAddress.fullName", 0] }
       }
     });
+
+    // 5.1. FILTER BY TYPE (NEW)
+    if (filterType === 'ORDER') {
+      pipeline.push({
+        $match: {
+          $or: [
+            { messageType: 'ORDER' },
+            { orderId: { $ne: null } }
+          ]
+        }
+      });
+    } else if (filterType === 'INQUIRY') {
+      pipeline.push({
+        $match: {
+          $and: [
+            { messageType: { $ne: 'ORDER' } },
+            { orderId: null }
+          ]
+        }
+      });
+    }
 
     // 6. SEARCH FILTER (Applied AFTER grouping so we search distinct threads)
     if (search && search.trim() !== '') {
@@ -5817,7 +5838,7 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
       Object.keys(usdUpdates).forEach(key => {
         order[key] = usdUpdates[key];
       });
-      
+
       // If beforeTaxUSD or estimatedTaxUSD changed, recalculate Amazon financials
       if (updates.beforeTax !== undefined || updates.estimatedTax !== undefined) {
         const amazonFinancials = await calculateAmazonFinancials(order);
@@ -5839,8 +5860,8 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
       }
     });
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       order,
       recalculated: updatedMonetaryField ? 'USD values recalculated' : null
     });
@@ -5912,12 +5933,12 @@ router.get('/item-images/:itemId', requireAuth, async (req, res) => {
     });
 
     const xmlText = await response.text();
-    
+
     // Parse XML to extract image URLs
     const pictureURLRegex = /<PictureURL>(.*?)<\/PictureURL>/g;
     const images = [];
     let match;
-    
+
     while ((match = pictureURLRegex.exec(xmlText)) !== null) {
       images.push(match[1]);
     }
@@ -5967,7 +5988,7 @@ router.get('/cache/stats', requireAuth, requireRole('superadmin', 'fulfillmentad
   try {
     const stats = imageCache.getStats();
     const sizeInfo = imageCache.getSizeInfo();
-    
+
     res.json({
       ...stats,
       storage: sizeInfo,
@@ -5983,9 +6004,9 @@ router.get('/cache/stats', requireAuth, requireRole('superadmin', 'fulfillmentad
 router.post('/cache/clear', requireAuth, requireRole('superadmin'), (req, res) => {
   try {
     imageCache.clear();
-    res.json({ 
-      success: true, 
-      message: 'Image cache cleared successfully' 
+    res.json({
+      success: true,
+      message: 'Image cache cleared successfully'
     });
   } catch (error) {
     console.error('Error clearing cache:', error);
@@ -6026,7 +6047,7 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
     // Timezone-Aware Date Range Logic (PST - same as FulfillmentDashboard)
     const PST_OFFSET_HOURS = 8;
     matchQuery.dateSold = {};
-    
+
     const start = new Date(startDate);
     start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
     matchQuery.dateSold.$gte = start;
@@ -6107,7 +6128,7 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
       return acc;
     }, { totalOrders: 0, totalEarnings: 0, totalProfit: 0 });
 
-    summary.avgOrderValue = summary.totalOrders > 0 
+    summary.avgOrderValue = summary.totalOrders > 0
       ? parseFloat((summary.totalEarnings / summary.totalOrders).toFixed(2))
       : 0;
 
