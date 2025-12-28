@@ -8,7 +8,8 @@ const TransactionSchema = new mongoose.Schema(
         amount: { type: Number, required: true },
         remark: { type: String },
         source: { type: String, enum: ['MANUAL', 'PAYONEER'], default: 'MANUAL' },
-        sourceId: { type: mongoose.Schema.Types.ObjectId, ref: 'PayoneerRecord' } // Link to source record
+        sourceId: { type: mongoose.Schema.Types.ObjectId, ref: 'PayoneerRecord' }, // Link to source record
+        creditCardName: { type: mongoose.Schema.Types.ObjectId, ref: 'CreditCardName' } // NEW: For Debit transactions to a card
     },
     { timestamps: true }
 );

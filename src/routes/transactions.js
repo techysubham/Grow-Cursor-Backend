@@ -50,11 +50,54 @@ router.get('/balance-summary', requireAuth, requireRole('superadmin'), async (re
     }
 });
 
+// GET /api/transactions/credit-card-summary
+router.get('/credit-card-summary', requireAuth, requireRole('superadmin'), async (req, res) => {
+    try {
+        const summary = await Transaction.aggregate([
+            {
+                $match: {
+                    creditCardName: { $exists: true, $ne: null }
+                }
+            },
+            {
+                $group: {
+                    _id: '$creditCardName',
+                    totalReceived: { $sum: '$amount' }
+                }
+            },
+            {
+                $lookup: {
+                    from: 'creditcardnames',
+                    localField: '_id',
+                    foreignField: '_id',
+                    as: 'cardDetails'
+                }
+            },
+            {
+                $unwind: '$cardDetails'
+            },
+            {
+                $project: {
+                    cardName: '$cardDetails.name',
+                    balance: '$totalReceived'
+                }
+            },
+            {
+                $sort: { cardName: 1 }
+            }
+        ]);
+        res.json(summary);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // GET /api/transactions - List all
 router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
     try {
         const transactions = await Transaction.find()
             .populate('bankAccount', 'name')
+            .populate('creditCardName', 'name')
             .sort({ date: -1 });
         res.json(transactions);
     } catch (err) {
@@ -65,7 +108,7 @@ router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 // POST /api/transactions - Create Manual Transaction
 router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
     try {
-        const { date, bankAccount, transactionType, amount, remark } = req.body;
+        const { date, bankAccount, transactionType, amount, remark, creditCardName } = req.body;
 
         if (!date || !bankAccount || !transactionType || !amount) {
             return res.status(400).json({ error: 'Missing required fields' });
@@ -77,11 +120,13 @@ router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
             transactionType,
             amount,
             remark,
-            source: 'MANUAL'
+            source: 'MANUAL',
+            creditCardName: transactionType === 'Debit' ? creditCardName : undefined
         });
 
         await newTransaction.save();
         await newTransaction.populate('bankAccount', 'name');
+        await newTransaction.populate('creditCardName', 'name');
 
         res.status(201).json(newTransaction);
     } catch (err) {
@@ -107,9 +152,11 @@ router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
         if (transactionType) transaction.transactionType = transactionType;
         if (amount) transaction.amount = amount;
         if (remark !== undefined) transaction.remark = remark;
+        if (creditCardName !== undefined) transaction.creditCardName = transactionType === 'Debit' ? creditCardName : undefined;
 
         await transaction.save();
         await transaction.populate('bankAccount', 'name');
+        await transaction.populate('creditCardName', 'name');
 
         res.json(transaction);
     } catch (err) {
