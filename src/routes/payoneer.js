@@ -36,14 +36,7 @@ router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
                     select: 'username'
                 }
             })
-            .populate({
-                path: 'paymentAccount',
-                select: 'name',
-                populate: {
-                    path: 'bankAccount',
-                    select: 'name'
-                }
-            })
+            .populate('bankAccount', 'name') // Direct population
             .sort({ paymentDate: -1 });
         res.json(records);
     } catch (err) {
@@ -54,17 +47,16 @@ router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 // POST /api/payoneer - Create new record
 router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
     try {
-        const { paymentAccount, paymentDate, amount, exchangeRate, store } = req.body;
+        const { bankAccount, paymentDate, amount, exchangeRate, store } = req.body;
 
-        if (!paymentAccount || !paymentDate || !amount || !exchangeRate || !store) {
+        if (!bankAccount || !paymentDate || !amount || !exchangeRate || !store) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
 
         const calcs = calculateFields(amount, exchangeRate);
 
         const newRecord = new PayoneerRecord({
-            paymentAccount,
-            // bankName removed, accessed via relation
+            bankAccount,
             paymentDate,
             store,
             ...calcs
@@ -82,31 +74,22 @@ router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
                     select: 'username'
                 }
             },
-            {
-                path: 'paymentAccount',
-                select: 'name',
-                populate: { path: 'bankAccount', select: 'name' }
-            }
+            { path: 'bankAccount', select: 'name' }
         ]);
 
         // --- SYNC WITH TRANSACTION ---
         try {
-            // Find the Bank Account ID from the Payment Account
-            const paymentAcc = await newRecord.paymentAccount; // Already populated
-            if (paymentAcc && paymentAcc.bankAccount) {
-                await Transaction.create({
-                    date: newRecord.paymentDate,
-                    bankAccount: paymentAcc.bankAccount._id,
-                    transactionType: 'Credit',
-                    amount: newRecord.bankDeposit,
-                    remark: 'Payoneer',
-                    source: 'PAYONEER',
-                    sourceId: newRecord._id
-                });
-            }
+            await Transaction.create({
+                date: newRecord.paymentDate,
+                bankAccount: newRecord.bankAccount._id, // Direct ID
+                transactionType: 'Credit',
+                amount: newRecord.bankDeposit,
+                remark: 'Payoneer',
+                source: 'PAYONEER',
+                sourceId: newRecord._id
+            });
         } catch (syncErr) {
             console.error('Failed to sync Payoneer to Transaction:', syncErr);
-            // Optional: Choose to revert PayoneerRecord creation or just log error
         }
 
         res.status(201).json(newRecord);
@@ -119,18 +102,17 @@ router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
     try {
         const { id } = req.params;
-        const { paymentAccount, paymentDate, amount, exchangeRate, store } = req.body;
+        const { bankAccount, paymentDate, amount, exchangeRate, store } = req.body;
 
         const record = await PayoneerRecord.findById(id);
         if (!record) return res.status(404).json({ error: 'Record not found' });
 
         // Update basic fields if provided
-        if (paymentAccount) record.paymentAccount = paymentAccount;
+        if (bankAccount) record.bankAccount = bankAccount;
         if (paymentDate) record.paymentDate = paymentDate;
         if (store) record.store = store;
 
         // Recalculate if amount or rate changes
-        // We use the new value if provided, otherwise fallback to existing
         const newAmount = amount !== undefined ? amount : record.amount;
         const newRate = exchangeRate !== undefined ? exchangeRate : record.exchangeRate;
 
@@ -152,29 +134,20 @@ router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
                     select: 'username'
                 }
             },
-            {
-                path: 'paymentAccount',
-                select: 'name',
-                populate: { path: 'bankAccount', select: 'name' }
-            }
+            { path: 'bankAccount', select: 'name' }
         ]);
 
         // --- SYNC UPDATE TRANSACTION ---
         try {
-            // Re-fetch bank account ID just in case payment account changed
-            const paymentAcc = await record.paymentAccount;
-
-            if (paymentAcc && paymentAcc.bankAccount) {
-                await Transaction.findOneAndUpdate(
-                    { source: 'PAYONEER', sourceId: record._id },
-                    {
-                        date: record.paymentDate,
-                        bankAccount: paymentAcc.bankAccount._id,
-                        amount: record.bankDeposit
-                    },
-                    { upsert: true } // Create if missing for some reason
-                );
-            }
+            await Transaction.findOneAndUpdate(
+                { source: 'PAYONEER', sourceId: record._id },
+                {
+                    date: record.paymentDate,
+                    bankAccount: record.bankAccount._id, // Direct ID
+                    amount: record.bankDeposit
+                },
+                { upsert: true }
+            );
         } catch (syncErr) {
             console.error('Failed to sync update to Transaction:', syncErr);
         }

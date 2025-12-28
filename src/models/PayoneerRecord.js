@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 const PayoneerRecordSchema = new mongoose.Schema(
     {
-        paymentAccount: { type: mongoose.Schema.Types.ObjectId, ref: 'PaymentAccount', required: true },
+        bankAccount: { type: mongoose.Schema.Types.ObjectId, ref: 'BankAccount', required: true },
 
         paymentDate: { type: Date, required: true },
         amount: { type: Number, required: true }, // Amount in USD (presumably)
