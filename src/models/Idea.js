@@ -24,6 +24,11 @@ const IdeaSchema = new mongoose.Schema(
     createdBy: { type: String, required: true }, // Name of the person
     createdByUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Optional: if logged in
     assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Optional: assign to someone
+    pickedUpBy: { 
+      type: String, 
+      enum: ['aaryan', 'rajarshi', 'prassanna'], 
+      required: false 
+    },
     comments: [
       {
         text: String,

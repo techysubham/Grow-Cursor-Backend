@@ -93,12 +93,13 @@ router.post('/', async (req, res) => {
 // PUBLIC ROUTE - But you might want to restrict this later
 router.patch('/:id', async (req, res) => {
   try {
-    const { status, priority, assignedTo, resolvedBy, completeByDate } = req.body;
+    const { status, priority, assignedTo, pickedUpBy, resolvedBy, completeByDate } = req.body;
     
     const updateData = {};
     if (status) updateData.status = status;
     if (priority) updateData.priority = priority;
     if (assignedTo) updateData.assignedTo = assignedTo;
+    if (pickedUpBy !== undefined) updateData.pickedUpBy = pickedUpBy;
     if (completeByDate !== undefined) updateData.completeByDate = completeByDate;
     
     if (status === 'completed' && !req.body.resolvedAt) {
