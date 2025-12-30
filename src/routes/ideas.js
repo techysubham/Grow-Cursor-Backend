@@ -95,12 +95,16 @@ router.patch('/:id', async (req, res) => {
   try {
     const { status, priority, assignedTo, pickedUpBy, resolvedBy, completeByDate } = req.body;
     
+    console.log('PATCH /ideas/:id', { id: req.params.id, pickedUpBy });
+    
     const updateData = {};
     if (status) updateData.status = status;
     if (priority) updateData.priority = priority;
     if (assignedTo) updateData.assignedTo = assignedTo;
-    if (pickedUpBy !== undefined) updateData.pickedUpBy = pickedUpBy;
+    if (pickedUpBy !== undefined) updateData.pickedUpBy = pickedUpBy || null;
     if (completeByDate !== undefined) updateData.completeByDate = completeByDate;
+    
+    console.log('Update data:', updateData);
     
     if (status === 'completed' && !req.body.resolvedAt) {
       updateData.resolvedAt = new Date();
@@ -117,8 +121,10 @@ router.patch('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Idea not found' });
     }
 
+    console.log('Updated idea pickedUpBy:', idea.pickedUpBy);
     res.json(idea);
   } catch (err) {
+    console.error('Error updating idea:', err);
     res.status(500).json({ error: err.message });
   }
 });
