@@ -1,5 +1,6 @@
 import express from 'express';
 import Transaction from '../models/Transaction.js';
+import Order from '../models/Order.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -53,7 +54,8 @@ router.get('/balance-summary', requireAuth, requireRole('superadmin'), async (re
 // GET /api/transactions/credit-card-summary
 router.get('/credit-card-summary', requireAuth, requireRole('superadmin'), async (req, res) => {
     try {
-        const summary = await Transaction.aggregate([
+        // Step 1: Get total transferred TO each credit card via transactions
+        const transactionSummary = await Transaction.aggregate([
             {
                 $match: {
                     creditCardName: { $exists: true, $ne: null }
@@ -62,7 +64,7 @@ router.get('/credit-card-summary', requireAuth, requireRole('superadmin'), async
             {
                 $group: {
                     _id: '$creditCardName',
-                    totalReceived: { $sum: '$amount' }
+                    totalTransferred: { $sum: '$amount' }
                 }
             },
             {
@@ -78,14 +80,49 @@ router.get('/credit-card-summary', requireAuth, requireRole('superadmin'), async
             },
             {
                 $project: {
+                    _id: 1,
                     cardName: '$cardDetails.name',
-                    balance: '$totalReceived'
+                    totalTransferred: 1
+                }
+            }
+        ]);
+
+        // Step 2: Get total spent FROM each credit card via orders
+        const orderSummary = await Order.aggregate([
+            {
+                $match: {
+                    cardName: { $exists: true, $ne: null, $ne: '' }
                 }
             },
             {
-                $sort: { cardName: 1 }
+                $group: {
+                    _id: '$cardName',
+                    totalSpent: {
+                        $sum: {
+                            $add: [
+                                { $ifNull: ['$amazonTotalINR', 0] },
+                                { $ifNull: ['$totalCC', 0] }
+                            ]
+                        }
+                    }
+                }
             }
         ]);
+
+        // Step 3: Combine and calculate remaining balance
+        const summary = transactionSummary.map(trans => {
+            const orderData = orderSummary.find(order => order._id === trans.cardName);
+            const totalSpent = orderData ? orderData.totalSpent : 0;
+            
+            return {
+                _id: trans._id,
+                cardName: trans.cardName,
+                totalTransferred: trans.totalTransferred,
+                totalSpent: totalSpent,
+                balance: trans.totalTransferred - totalSpent
+            };
+        });
+
         res.json(summary);
     } catch (err) {
         res.status(500).json({ error: err.message });
