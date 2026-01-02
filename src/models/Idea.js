@@ -29,6 +29,7 @@ const IdeaSchema = new mongoose.Schema(
       enum: ['aaryan', 'rajarshi', 'prassanna'], 
       required: false 
     },
+    notes: { type: String, default: '' }, // Progress notes for person working on the issue
     comments: [
       {
         text: String,
