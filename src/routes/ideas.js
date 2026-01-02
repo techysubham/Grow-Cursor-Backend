@@ -93,7 +93,7 @@ router.post('/', async (req, res) => {
 // PUBLIC ROUTE - But you might want to restrict this later
 router.patch('/:id', async (req, res) => {
   try {
-    const { status, priority, assignedTo, pickedUpBy, resolvedBy, completeByDate } = req.body;
+    const { status, priority, assignedTo, pickedUpBy, resolvedBy, completeByDate, notes } = req.body;
     
     console.log('PATCH /ideas/:id', { id: req.params.id, pickedUpBy });
     
@@ -103,6 +103,7 @@ router.patch('/:id', async (req, res) => {
     if (assignedTo) updateData.assignedTo = assignedTo;
     if (pickedUpBy !== undefined) updateData.pickedUpBy = pickedUpBy || null;
     if (completeByDate !== undefined) updateData.completeByDate = completeByDate;
+    if (notes !== undefined) updateData.notes = notes;
     
     console.log('Update data:', updateData);
     
