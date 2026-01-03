@@ -42,6 +42,7 @@ import payoneerRoutes from './routes/payoneer.js';
 import paymentAccountRoutes from './routes/paymentAccounts.js';
 import transactionRoutes from './routes/transactions.js';
 import bankAccountRoutes from './routes/bankAccounts.js';
+import columnPresetRoutes from './routes/columnPresets.js';
 
 const app = express();
 
@@ -101,6 +102,7 @@ app.use('/api/payoneer', payoneerRoutes);
 app.use('/api/payment-accounts', paymentAccountRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/bank-accounts', bankAccountRoutes);
+app.use('/api/column-presets', columnPresetRoutes);
 
 
 const port = process.env.PORT || 5000;
