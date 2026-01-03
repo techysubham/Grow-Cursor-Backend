@@ -17,11 +17,56 @@ router.get('/', requireAuth, async (req, res) => {
 
 // POST: Add new Amazon Account (Restricted to specific roles)
 router.post('/', requireAuth, requireRole('superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
-  const { name } = req.body;
+  const { name, addressLine1, addressLine2, city, state, postalCode, country, phoneNumber, notes } = req.body;
   if (!name) return res.status(400).json({ error: 'Account name is required' });
   
   try {
-    const account = await AmazonAccount.create({ name });
+    const account = await AmazonAccount.create({ 
+      name, 
+      addressLine1: addressLine1 || '', 
+      addressLine2: addressLine2 || '', 
+      city: city || '', 
+      state: state || '', 
+      postalCode: postalCode || '', 
+      country: country || '', 
+      phoneNumber: phoneNumber || '', 
+      notes: notes || '' 
+    });
+    res.json(account);
+  } catch (e) {
+    if (e.code === 11000) {
+      return res.status(400).json({ error: 'Account name already exists' });
+    }
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// PATCH: Update an account
+router.patch('/:id', requireAuth, requireRole('superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+  const { name, addressLine1, addressLine2, city, state, postalCode, country, phoneNumber, notes } = req.body;
+  
+  try {
+    const updateData = {};
+    if (name !== undefined) updateData.name = name;
+    if (addressLine1 !== undefined) updateData.addressLine1 = addressLine1;
+    if (addressLine2 !== undefined) updateData.addressLine2 = addressLine2;
+    if (city !== undefined) updateData.city = city;
+    if (state !== undefined) updateData.state = state;
+    if (postalCode !== undefined) updateData.postalCode = postalCode;
+    if (country !== undefined) updateData.country = country;
+    if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
+    if (notes !== undefined) updateData.notes = notes;
+
+    const account = await AmazonAccount.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      { new: true, runValidators: true }
+    );
+    
+    if (!account) {
+      return res.status(404).json({ error: 'Account not found' });
+    }
+    
     res.json(account);
   } catch (e) {
     if (e.code === 11000) {
