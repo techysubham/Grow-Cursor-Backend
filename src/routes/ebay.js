@@ -4761,7 +4761,7 @@ router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'super
 // 4. GET THREADS (With Pagination & Search)
 router.get('/chat/threads', requireAuth, async (req, res) => {
   try {
-    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '' } = req.query;
+    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false' } = req.query;
 
 
     const pageNum = parseInt(page);
@@ -4898,6 +4898,13 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       // If filtering by specific marketplace
       pipeline.push({
         $match: { computedMarketplaceId: filterMarketplace }
+      });
+    }
+
+    // 5.4 FILTER BY UNREAD STATUS (NEW)
+    if (showUnreadOnly === 'true') {
+      pipeline.push({
+        $match: { unreadCount: { $gt: 0 } }
       });
     }
 
