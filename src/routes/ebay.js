@@ -1102,7 +1102,7 @@ router.get('/cancelled-orders', async (req, res) => {
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes } = req.query;
 
   try {
     let query = {};
@@ -1138,6 +1138,14 @@ router.get('/stored-orders', async (req, res) => {
 
     if (searchBuyerName) {
       query['buyer.buyerRegistrationAddress.fullName'] = { $regex: searchBuyerName, $options: 'i' };
+    }
+
+    // Item ID search (searches both lineItems.legacyItemId and itemNumber)
+    if (searchItemId) {
+      query.$or = [
+        { 'lineItems.legacyItemId': { $regex: searchItemId, $options: 'i' } },
+        { itemNumber: { $regex: searchItemId, $options: 'i' } }
+      ];
     }
 
     // Timezone-Aware Date Range Logic
