@@ -3946,15 +3946,20 @@ router.post('/fetch-inr-cases', requireAuth, requireRole('fulfillmentadmin', 'su
               caseId: ebayCase.inquiryId,
               caseType,
               orderId: ebayCase.orderId || ebayCase.orderNumber,
-              buyerUsername: ebayCase.buyerLoginName,
-              status: ebayCase.state || ebayCase.status || 'OPEN',
+              buyerUsername: ebayCase.buyer || ebayCase.buyerLoginName,
+              // FIX: eBay returns 'inquiryStatusEnum' not 'state' or 'status'
+              status: ebayCase.inquiryStatusEnum || ebayCase.state || ebayCase.status || 'OPEN',
 
               // Dates
               creationDate: ebayCase.creationDate?.value ? new Date(ebayCase.creationDate.value) : null,
-              sellerResponseDueDate: ebayCase.sellerResponseDue?.respondByDate?.value
-                ? new Date(ebayCase.sellerResponseDue.respondByDate.value) : null,
+              // FIX: eBay returns 'respondByDate' directly, not nested under 'sellerResponseDue'
+              sellerResponseDueDate: ebayCase.respondByDate?.value 
+                ? new Date(ebayCase.respondByDate.value) 
+                : (ebayCase.sellerResponseDue?.respondByDate?.value ? new Date(ebayCase.sellerResponseDue.respondByDate.value) : null),
               escalationDate: ebayCase.escalationDate?.value ? new Date(ebayCase.escalationDate.value) : null,
               closedDate: ebayCase.closedDate?.value ? new Date(ebayCase.closedDate.value) : null,
+              // FIX: Also store lastModifiedDate from eBay
+              lastModifiedDate: ebayCase.lastModifiedDate?.value ? new Date(ebayCase.lastModifiedDate.value) : null,
 
               // Item Info
               itemId: ebayCase.itemId,

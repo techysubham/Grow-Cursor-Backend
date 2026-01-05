@@ -6,13 +6,14 @@ const CaseSchema = new mongoose.Schema({
   caseType: { type: String, enum: ['INR', 'SNAD', 'OTHER'], default: 'INR' },
   orderId: String,
   buyerUsername: String,
-  status: { type: String, default: 'OPEN' }, // OPEN, CLOSED, ON_HOLD, WAITING_FOR_SELLER
+  status: { type: String, default: 'OPEN' }, // OPEN, CLOSED, WAITING_BUYER_RESPONSE, WAITING_SELLER_RESPONSE, ON_HOLD
   
   // Dates
   creationDate: Date,
   sellerResponseDueDate: Date,
   escalationDate: Date,
   closedDate: Date,
+  lastModifiedDate: Date,
   
   // Item Info
   itemId: String,
