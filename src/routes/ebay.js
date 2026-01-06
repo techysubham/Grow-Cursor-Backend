@@ -1102,7 +1102,7 @@ router.get('/cancelled-orders', async (req, res) => {
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount } = req.query;
 
   try {
     let query = {};
@@ -1128,6 +1128,22 @@ router.get('/stored-orders', async (req, res) => {
     // --- Has Fulfillment Notes Filter ---
     if (hasFulfillmentNotes === 'true') {
       query.fulfillmentNotes = { $exists: true, $nin: ['', null] };
+    }
+
+    // --- Amazon Arrivals Filter ---
+    if (amazonArriving === 'true') {
+      // Only show orders with arrivingDate in ISO format (YYYY-MM-DD)
+      query.arrivingDate = { 
+        $exists: true, 
+        $ne: null, 
+        $ne: '',
+        $regex: /^\d{4}-\d{2}-\d{2}/ // Only ISO formatted dates
+      };
+    }
+
+    // Amazon Account Filter
+    if (amazonAccount && amazonAccount !== '') {
+      query.amazonAccount = amazonAccount;
     }
 
     // Apply search filters
@@ -1192,8 +1208,14 @@ router.get('/stored-orders', async (req, res) => {
           select: 'username email'
         }
       })
-      // Sorting: ShipBy Date for awaiting (Oldest First), Creation Date otherwise (Newest First)
-      .sort(awaitingShipment === 'true' ? { shipByDate: 1 } : { creationDate: -1 })
+      // Sorting: ShipBy Date for awaiting (Oldest First), Arriving Date for Amazon Arrivals, Creation Date otherwise (Newest First)
+      .sort(
+        awaitingShipment === 'true' 
+          ? { shipByDate: 1 } 
+          : amazonArriving === 'true'
+            ? { arrivingDate: arrivalSort === 'desc' ? -1 : 1 }
+            : { creationDate: -1 }
+      )
       .skip(skip)
       .limit(limitNum);
 
