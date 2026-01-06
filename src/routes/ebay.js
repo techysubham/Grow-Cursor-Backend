@@ -3622,6 +3622,39 @@ router.patch('/orders/:orderId/fulfillment-notes', async (req, res) => {
   }
 });
 
+// Dismiss order from Amazon Arrivals (soft delete - clears arrivingDate)
+router.patch('/orders/:orderId/dismiss-arrival', requireAuth, async (req, res) => {
+  const { orderId } = req.params;
+  
+  try {
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    
+    // Clear the arriving date (soft delete)
+    order.arrivingDate = null;
+    await order.save();
+    
+    // Populate seller info for response
+    await order.populate({
+      path: 'seller',
+      populate: {
+        path: 'user',
+        select: 'username email'
+      }
+    });
+    
+    res.json({ 
+      success: true, 
+      message: 'Order dismissed from Amazon Arrivals',
+      order 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ===== RETURN REQUESTS ENDPOINTS =====
 
 // Fetch return requests from eBay Post-Order API and store in DB
