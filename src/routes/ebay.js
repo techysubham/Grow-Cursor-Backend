@@ -5722,6 +5722,119 @@ const escapeXml = (unsafe) => {
   });
 };
 
+// ============================================
+// API USAGE STATS CACHE (5-minute TTL)
+// ============================================
+const apiUsageCache = new Map();
+
+// Helper: Fetch eBay API usage stats using modern Analytics API (REST/JSON)
+async function fetchApiUsageStats(token) {
+  try {
+    // Use the modern Analytics API (REST-based, JSON response)
+    const response = await axios.get(
+      'https://api.ebay.com/developer/analytics/v1_beta/rate_limit/',
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        params: {
+          api_name: 'TradingAPI',
+          api_context: 'TradingAPI'
+        }
+      }
+    );
+
+    const rateLimits = response.data?.rateLimits || [];
+    
+    // Find the TradingAPI context
+    const tradingAPI = rateLimits.find(
+      api => api.apiContext === 'TradingAPI' || api.apiName === 'TradingAPI'
+    );
+
+    if (!tradingAPI || !tradingAPI.resources) {
+      // Return default if no data found
+      return {
+        success: true,
+        used: 0,
+        limit: 5000,
+        remaining: 5000,
+        resetTime: new Date(Date.now() + 86400000).toISOString(), // 24 hours from now
+        hoursUntilReset: 24
+      };
+    }
+
+    // Find ReviseFixedPriceItem resource
+    const reviseResource = tradingAPI.resources.find(
+      r => r.name === 'ReviseFixedPriceItem'
+    );
+
+    if (!reviseResource || !reviseResource.rates || reviseResource.rates.length === 0) {
+      // Return default if specific resource not found
+      return {
+        success: true,
+        used: 0,
+        limit: 5000,
+        remaining: 5000,
+        resetTime: new Date(Date.now() + 86400000).toISOString(),
+        hoursUntilReset: 24
+      };
+    }
+
+    // Get the daily rate limit (timeWindow = 86400 seconds = 1 day)
+    const dailyRate = reviseResource.rates.find(r => r.timeWindow === 86400) || reviseResource.rates[0];
+
+    const used = dailyRate.count || 0;
+    const limit = dailyRate.limit || 5000;
+    const remaining = dailyRate.remaining || (limit - used);
+    const resetTime = dailyRate.reset || new Date(Date.now() + 86400000).toISOString();
+    
+    // Calculate hours until reset
+    const resetDate = new Date(resetTime);
+    const now = new Date();
+    const diffMs = resetDate - now;
+    const hoursUntilReset = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60)));
+
+    return {
+      success: true,
+      used: used,
+      limit: limit,
+      remaining: remaining,
+      resetTime: resetTime,
+      hoursUntilReset: hoursUntilReset
+    };
+  } catch (err) {
+    console.error('Error fetching API usage stats:', err.message);
+    
+    // If error response contains rate limit data, try to parse it
+    if (err.response?.data) {
+      console.error('API Response:', JSON.stringify(err.response.data, null, 2));
+    }
+    
+    throw err;
+  }
+}
+
+// Helper: Get cached or fresh usage stats
+async function getCachedUsageStats(sellerId, token) {
+  const cacheKey = `usage_${sellerId}`;
+  const cached = apiUsageCache.get(cacheKey);
+  
+  // Return cached if less than 5 minutes old
+  if (cached && (Date.now() - cached.timestamp < 5 * 60 * 1000)) {
+    return cached.data;
+  }
+  
+  // Fetch fresh data
+  const freshData = await fetchApiUsageStats(token);
+  apiUsageCache.set(cacheKey, {
+    data: freshData,
+    timestamp: Date.now()
+  });
+  
+  return freshData;
+}
+
 // 4. UPDATE COMPATIBILITY (Using ReplaceAll Strategy)
 router.post('/update-compatibility', requireAuth, async (req, res) => {
   const { sellerId, itemId, compatibilityList } = req.body;
@@ -5788,7 +5901,35 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
     // 1. Handle Failures
     if (ack === 'Failure') {
       const errors = result.ReviseFixedPriceItemResponse.Errors || [];
-      throw new Error(`eBay Failed: ${errors.map(e => e.LongMessage[0]).join('; ')}`);
+      const errorMessage = errors.map(e => e.LongMessage[0]).join('; ');
+      
+      // Check if it's a rate limit error
+      const isRateLimitError = errorMessage.includes('exceeded usage limit') || 
+                               errorMessage.includes('call limit') ||
+                               errorMessage.includes('Developer Analytics API');
+      
+      if (isRateLimitError) {
+        try {
+          // Fetch usage stats
+          const usageStats = await getCachedUsageStats(sellerId, token);
+          return res.status(429).json({ 
+            error: errorMessage,
+            rateLimitInfo: {
+              used: usageStats.used,
+              limit: usageStats.limit,
+              remaining: usageStats.remaining,
+              resetTime: usageStats.resetTime,
+              hoursUntilReset: usageStats.hoursUntilReset
+            }
+          });
+        } catch (statsError) {
+          // If stats fetch fails, still return rate limit error
+          console.error('Failed to fetch usage stats:', statsError.message);
+          return res.status(429).json({ error: errorMessage });
+        }
+      }
+      
+      throw new Error(`eBay Failed: ${errorMessage}`);
     }
 
     // 2. Handle Warnings
@@ -5823,6 +5964,33 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
 });
 
 
+
+// 4.5. GET EBAY API USAGE STATS
+router.get('/api-usage-stats', requireAuth, async (req, res) => {
+  const { sellerId } = req.query;
+  
+  if (!sellerId) {
+    return res.status(400).json({ error: 'sellerId is required' });
+  }
+  
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+    
+    const token = await ensureValidToken(seller);
+    const stats = await getCachedUsageStats(sellerId, token);
+    
+    res.json(stats);
+  } catch (err) {
+    console.error('Error fetching API usage stats:', err.message);
+    res.status(500).json({ 
+      error: 'Failed to fetch API usage stats',
+      success: false
+    });
+  }
+});
 
 // 5. GET COMPATIBILITY METADATA (REST API Version)
 router.post('/compatibility/values', requireAuth, async (req, res) => {
