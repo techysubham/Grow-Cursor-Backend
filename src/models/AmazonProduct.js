@@ -34,6 +34,10 @@ const amazonProductSchema = new mongoose.Schema({
   images: [{
     type: String
   }],
+  ebayImage: {
+    type: String,
+    trim: true
+  },
   rawData: {
     type: mongoose.Schema.Types.Mixed
   },

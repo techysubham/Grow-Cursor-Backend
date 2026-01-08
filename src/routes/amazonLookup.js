@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth.js';
 import AmazonProduct from '../models/AmazonProduct.js';
 import ProductUmbrella from '../models/ProductUmbrella.js';
 import { generateWithGemini, replacePlaceholders } from '../utils/gemini.js';
+import { createEbayImageWithOverlay, deleteEbayImage } from '../utils/imageProcessor.js';
 
 const router = express.Router();
 
@@ -143,6 +144,20 @@ router.post('/', requireAuth, async (req, res) => {
         amazonProductData.sellerId = sellerId;
       }
 
+      // Process eBay image with overlay if we have images
+      let ebayImagePath = null;
+      if (allImages.length > 0) {
+        try {
+          console.log(`Processing eBay image overlay for ASIN ${asin}...`);
+          ebayImagePath = await createEbayImageWithOverlay(allImages[0], 'usa-seller');
+          amazonProductData.ebayImage = ebayImagePath;
+          console.log(`eBay image created: ${ebayImagePath}`);
+        } catch (error) {
+          console.error('Error creating eBay image overlay:', error);
+          // Continue without eBay image if processing fails
+        }
+      }
+
       const amazonProduct = new AmazonProduct(amazonProductData);
 
       await amazonProduct.save();
@@ -153,6 +168,7 @@ router.post('/', requireAuth, async (req, res) => {
       return res.json({
         ...productData,
         customFields,
+        ebayImage: ebayImagePath,
         saved: true,
         _id: amazonProduct._id,
         seller: amazonProduct.sellerId,
@@ -220,6 +236,11 @@ router.delete('/:id', requireAuth, async (req, res) => {
 
     if (!product) {
       return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Delete associated eBay image file if it exists
+    if (product.ebayImage) {
+      await deleteEbayImage(product.ebayImage);
     }
 
     res.json({ message: 'Product deleted successfully' });
