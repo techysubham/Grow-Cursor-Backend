@@ -60,7 +60,11 @@ const amazonProductSchema = new mongoose.Schema({
   }
 });
 
-amazonProductSchema.index({ asin: 1, sellerId: 1, productUmbrellaId: 1 });
+// Compound index for unique constraint: same ASIN cannot be added twice for the same seller
+amazonProductSchema.index({ asin: 1, sellerId: 1 }, { unique: true });
+
+// Additional index for query performance
+amazonProductSchema.index({ productUmbrellaId: 1 });
 
 amazonProductSchema.pre('save', function(next) {
   this.updatedAt = Date.now();

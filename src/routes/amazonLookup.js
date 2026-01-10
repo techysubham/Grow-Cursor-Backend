@@ -82,6 +82,27 @@ router.post('/', requireAuth, async (req, res) => {
 
     // If sellerId and productUmbrellaId are provided, save to database
     if (productUmbrellaId) {
+      // Check for duplicate: same ASIN + same seller (regardless of umbrella)
+      const duplicateCheck = {
+        asin
+      };
+      
+      // Handle sellerId - it can be null/undefined, so we need to check accordingly
+      if (sellerId) {
+        duplicateCheck.sellerId = sellerId;
+      } else {
+        duplicateCheck.sellerId = null;
+      }
+
+      const existingProduct = await AmazonProduct.findOne(duplicateCheck);
+      
+      if (existingProduct) {
+        return res.status(409).json({ 
+          error: 'This product already exists for the selected seller',
+          productId: existingProduct._id
+        });
+      }
+
       // Fetch the product umbrella with custom columns
       const umbrella = await ProductUmbrella.findById(productUmbrellaId)
         .populate('customColumns.columnId');
