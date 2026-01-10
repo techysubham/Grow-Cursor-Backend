@@ -212,16 +212,26 @@ router.post('/', requireAuth, async (req, res) => {
 // Get all saved Amazon products
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { sellerId, productUmbrellaId } = req.query;
+    const { sellerId, productUmbrellaId, includeDeleted } = req.query;
     const filter = {};
     
     if (sellerId) filter.sellerId = sellerId;
     if (productUmbrellaId) filter.productUmbrellaId = productUmbrellaId;
+    
+    // By default, exclude deleted products unless explicitly requested
+    if (includeDeleted === 'true') {
+      // Show only deleted products
+      filter.deleted = true;
+    } else {
+      // Show only active (non-deleted) products
+      filter.deleted = { $ne: true };
+    }
 
     const products = await AmazonProduct.find(filter)
       .populate({ path: 'sellerId', populate: { path: 'user', select: 'username email' } })
       .populate('productUmbrellaId', 'name')
       .populate('createdBy', 'name email')
+      .populate('deletedBy', 'name email')
       .sort({ createdAt: -1 });
 
     res.json(products);
@@ -250,8 +260,56 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 });
 
-// Delete Amazon product
+// Soft delete Amazon product (mark as deleted)
 router.delete('/:id', requireAuth, async (req, res) => {
+  try {
+    const product = await AmazonProduct.findById(req.params.id);
+
+    if (!product) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Mark as deleted instead of removing
+    product.deleted = true;
+    product.deletedAt = new Date();
+    product.deletedBy = req.user.userId;
+    await product.save();
+
+    res.json({ message: 'Product archived successfully', product });
+  } catch (error) {
+    console.error('Error archiving Amazon product:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Restore archived product
+router.patch('/:id/restore', requireAuth, async (req, res) => {
+  try {
+    const product = await AmazonProduct.findById(req.params.id);
+
+    if (!product) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Restore the product
+    product.deleted = false;
+    product.deletedAt = null;
+    product.deletedBy = null;
+    await product.save();
+
+    await product.populate({ path: 'sellerId', populate: { path: 'user', select: 'username email' } });
+    await product.populate('productUmbrellaId', 'name');
+    await product.populate('createdBy', 'name email');
+
+    res.json({ message: 'Product restored successfully', product });
+  } catch (error) {
+    console.error('Error restoring Amazon product:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Permanently delete Amazon product
+router.delete('/:id/permanent', requireAuth, async (req, res) => {
   try {
     const product = await AmazonProduct.findByIdAndDelete(req.params.id);
 
@@ -264,9 +322,9 @@ router.delete('/:id', requireAuth, async (req, res) => {
       await deleteEbayImage(product.ebayImage);
     }
 
-    res.json({ message: 'Product deleted successfully' });
+    res.json({ message: 'Product permanently deleted successfully' });
   } catch (error) {
-    console.error('Error deleting Amazon product:', error);
+    console.error('Error permanently deleting Amazon product:', error);
     res.status(500).json({ error: error.message });
   }
 });
