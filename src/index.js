@@ -46,6 +46,8 @@ import columnPresetRoutes from './routes/columnPresets.js';
 import amazonLookupRoutes from './routes/amazonLookup.js';
 import productUmbrellaRoutes from './routes/productUmbrellas.js';
 import customColumnsRoutes from './routes/customColumns.js';
+import listingTemplateRoutes from './routes/listingTemplates.js';
+import templateListingsRoutes from './routes/templateListings.js';
 
 const app = express();
 
@@ -109,6 +111,8 @@ app.use('/api/column-presets', columnPresetRoutes);
 app.use('/api/amazon-lookup', amazonLookupRoutes);
 app.use('/api/product-umbrellas', productUmbrellaRoutes);
 app.use('/api/custom-columns', customColumnsRoutes);
+app.use('/api/listing-templates', listingTemplateRoutes);
+app.use('/api/template-listings', templateListingsRoutes);
 
 
 const port = process.env.PORT || 5000;
