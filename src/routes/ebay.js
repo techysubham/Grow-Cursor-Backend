@@ -547,11 +547,9 @@ const WELCOME_TEMPLATE = `Hello {BUYER_NAME},
 
 Thank you for your recent purchase!
 
-Orders usually ship within 24–48 hours, but due to the festive season, handling time may be slightly longer.
+Orders are typically shipped within 12–24 hours. We will keep you updated, and once your order is shipped, the tracking details will be available on your eBay order page.
 
-We’ll keep you updated, and once your order ships, the tracking details will be added to your eBay order page.
-
-If you need any assistance, please feel free to message us anytime. We wish you a wonderful day!`;
+If you need any assistance, please feel free to message us at any time. Wishing you a wonderful day!`;
 
 // --- HELPER: Send Auto Welcome Message ---
 async function sendAutoWelcomeMessage(seller, order) {
