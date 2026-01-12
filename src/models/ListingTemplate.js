@@ -34,6 +34,42 @@ const customColumnSchema = new mongoose.Schema({
   }
 }, { _id: false });
 
+const fieldConfigSchema = new mongoose.Schema({
+  ebayField: {
+    type: String,
+    required: true,
+    enum: [
+      'title', 'startPrice', 'buyItNowPrice', 'description', 
+      'itemPhotoUrl', 'categoryName', 'brand', 'location',
+      'videoId', 'upc', 'relationship', 'relationshipDetails'
+    ]
+  },
+  source: {
+    type: String,
+    enum: ['ai', 'direct'],
+    default: 'ai'
+  },
+  promptTemplate: String,
+  amazonField: String,
+  transform: {
+    type: String,
+    enum: ['none', 'pipeSeparated', 'removeSymbol', 'htmlFormat', 'truncate80'],
+    default: 'none'
+  },
+  enabled: {
+    type: Boolean,
+    default: true
+  }
+}, { _id: false });
+
+const asinAutomationSchema = new mongoose.Schema({
+  enabled: {
+    type: Boolean,
+    default: false
+  },
+  fieldConfigs: [fieldConfigSchema]
+}, { _id: false });
+
 const listingTemplateSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -57,6 +93,10 @@ const listingTemplateSchema = new mongoose.Schema({
     }
   },
   customColumns: [customColumnSchema],
+  asinAutomation: {
+    type: asinAutomationSchema,
+    default: { enabled: false, fieldConfigs: [] }
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

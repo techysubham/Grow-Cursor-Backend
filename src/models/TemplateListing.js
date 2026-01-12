@@ -77,6 +77,13 @@ const templateListingSchema = new mongoose.Schema({
   returnProfileName: String,
   paymentProfileName: String,
   
+  // ASIN reference for tracking (NOT exported to CSV)
+  _asinReference: {
+    type: String,
+    trim: true,
+    select: false
+  },
+  
   // CUSTOM COLUMNS (flexible Map structure)
   customFields: {
     type: Map,

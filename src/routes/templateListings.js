@@ -2,6 +2,7 @@ import express from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import TemplateListing from '../models/TemplateListing.js';
 import ListingTemplate from '../models/ListingTemplate.js';
+import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
 
 const router = express.Router();
 
@@ -149,6 +150,62 @@ router.delete('/:id', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Error deleting listing:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ASIN Autofill endpoint
+router.post('/autofill-from-asin', requireAuth, async (req, res) => {
+  try {
+    const { asin, templateId } = req.body;
+    
+    if (!asin || !templateId) {
+      return res.status(400).json({ 
+        error: 'ASIN and Template ID are required' 
+      });
+    }
+    
+    // 1. Fetch template with automation config
+    const template = await ListingTemplate.findById(templateId);
+    
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    
+    if (!template.asinAutomation?.enabled) {
+      return res.status(400).json({ 
+        error: 'ASIN automation is not enabled for this template' 
+      });
+    }
+    
+    // 2. Fetch fresh Amazon data
+    console.log(`Fetching Amazon data for ASIN: ${asin}`);
+    const amazonData = await fetchAmazonData(asin);
+    
+    // 3. Apply field configurations (AI + direct mappings)
+    console.log(`Processing ${template.asinAutomation.fieldConfigs.length} field configs`);
+    const autoFilledData = await applyFieldConfigs(
+      amazonData,
+      template.asinAutomation.fieldConfigs
+    );
+    
+    // 4. Return auto-filled data
+    res.json({
+      success: true,
+      asin,
+      autoFilledData,
+      amazonSource: {
+        title: amazonData.title,
+        brand: amazonData.brand,
+        price: amazonData.price,
+        imageCount: amazonData.images.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('ASIN autofill error:', error);
+    res.status(500).json({ 
+      error: error.message || 'Failed to fetch and process ASIN data' 
+    });
   }
 });
 
