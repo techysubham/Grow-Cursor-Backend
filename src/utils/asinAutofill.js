@@ -68,9 +68,11 @@ export async function fetchAmazonData(asin) {
 
 /**
  * Apply field configurations to generate auto-fill data
+ * Separates core eBay fields and custom columns
  */
 export async function applyFieldConfigs(amazonData, fieldConfigs) {
-  const autoFilledData = {};
+  const coreFields = {};
+  const customFields = {};
   
   // Placeholder data for AI prompts
   const placeholderData = {
@@ -84,18 +86,20 @@ export async function applyFieldConfigs(amazonData, fieldConfigs) {
   for (const config of fieldConfigs) {
     if (!config.enabled) continue;
     
+    const targetObject = config.fieldType === 'custom' ? customFields : coreFields;
+    
     try {
-      if (config.source === 'direct') {
-        // Direct mapping from Amazon field
+      if (config.source === 'direct' && config.fieldType === 'core') {
+        // Direct mapping only available for core fields
         let value = amazonData[config.amazonField];
         
         // Apply transformations
         value = applyTransform(value, config.transform);
         
-        autoFilledData[config.ebayField] = value;
+        targetObject[config.ebayField] = value;
         
       } else if (config.source === 'ai') {
-        // AI generation using prompt template
+        // AI generation for both core and custom fields
         const processedPrompt = replacePlaceholders(
           config.promptTemplate, 
           placeholderData
@@ -103,23 +107,24 @@ export async function applyFieldConfigs(amazonData, fieldConfigs) {
         
         let generatedValue = await generateWithGemini(processedPrompt);
         
-        // Auto-truncate titles to 80 chars
-        if (config.ebayField === 'title' && generatedValue.length > 80) {
+        // Auto-truncate titles to 80 chars (only for core title field)
+        if (config.fieldType === 'core' && config.ebayField === 'title' && generatedValue.length > 80) {
           generatedValue = generatedValue.substring(0, 80);
         }
         
-        autoFilledData[config.ebayField] = generatedValue;
+        targetObject[config.ebayField] = generatedValue;
       }
       
-      console.log(`Auto-filled ${config.ebayField}: ${autoFilledData[config.ebayField]?.substring(0, 50)}...`);
+      const fieldLabel = config.fieldType === 'custom' ? `[Custom] ${config.ebayField}` : config.ebayField;
+      console.log(`Auto-filled ${fieldLabel}: ${targetObject[config.ebayField]?.substring(0, 50)}...`);
       
     } catch (error) {
       console.error(`Error processing ${config.ebayField}:`, error);
-      autoFilledData[config.ebayField] = '';
+      targetObject[config.ebayField] = '';
     }
   }
   
-  return autoFilledData;
+  return { coreFields, customFields };
 }
 
 /**

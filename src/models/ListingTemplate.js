@@ -35,14 +35,16 @@ const customColumnSchema = new mongoose.Schema({
 }, { _id: false });
 
 const fieldConfigSchema = new mongoose.Schema({
+  fieldType: {
+    type: String,
+    enum: ['core', 'custom'],
+    default: 'core'
+  },
   ebayField: {
     type: String,
-    required: true,
-    enum: [
-      'title', 'startPrice', 'buyItNowPrice', 'description', 
-      'itemPhotoUrl', 'categoryName', 'brand', 'location',
-      'videoId', 'upc', 'relationship', 'relationshipDetails'
-    ]
+    required: true
+    // No enum - can be core field name OR custom column name
+    // Validation happens at application level based on fieldType
   },
   source: {
     type: String,
