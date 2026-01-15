@@ -381,6 +381,15 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
       ...buildDateRangeMatch('dateSold')
     };
 
+    // Define status mappings first (needed for overall open counts)
+    const caseOpen = new Set(['OPEN', 'WAITING_SELLER_RESPONSE', 'WAITING_FOR_SELLER']);
+    const caseAttended = new Set(['ON_HOLD', 'WAITING_BUYER_RESPONSE', 'WAITING_FOR_BUYER']);
+    const caseResolved = new Set(['CLOSED', 'RESOLVED']);
+
+    const disputeOpen = new Set(['OPEN', 'WAITING_FOR_SELLER_RESPONSE']);
+    const disputeAttended = new Set(['UNDER_REVIEW']);
+    const disputeResolved = new Set(['RESOLVED_BUYER_FAVOUR', 'RESOLVED_SELLER_FAVOUR', 'CLOSED']);
+
     // Cancellations: orders with cancelState in list, date is worksheetDate (dateSold || creationDate)
     const cancellationStates = ['CANCEL_REQUESTED', 'IN_PROGRESS', 'CANCELED', 'CANCELLED'];
     const cancellationsMatchStage = {
@@ -455,12 +464,23 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
       }
     ];
 
-    const [totalOrders, cancellationsByStatus, returnsByStatus, inrByStatus, disputesByStatus] = await Promise.all([
+    // Open counts on cards should be overall (ignore date filter).
+    // Rates (based on totals + totalOrders) should still respect date filter.
+    const [totalOrders, cancellationsByStatus, returnsByStatus, inrByStatus, disputesByStatus, cancellationsOpenOverall, returnsOpenOverall, inrOpenOverall, disputesOpenOverall] = await Promise.all([
       Order.countDocuments(totalOrdersQuery),
       Order.aggregate(cancellationsPipeline),
       Return.aggregate(returnsPipeline),
       Case.aggregate(inrPipeline),
-      PaymentDispute.aggregate(disputesPipeline)
+      PaymentDispute.aggregate(disputesPipeline),
+      Order.countDocuments({
+        cancelState: { $in: cancellationStates },
+        $or: [{ worksheetStatus: 'open' }, { worksheetStatus: { $exists: false } }, { worksheetStatus: null }]
+      }),
+      Return.countDocuments({
+        $or: [{ worksheetStatus: 'open' }, { worksheetStatus: { $exists: false } }, { worksheetStatus: null }]
+      }),
+      Case.countDocuments({ status: { $in: Array.from(caseOpen) } }),
+      PaymentDispute.countDocuments({ paymentDisputeStatus: { $in: Array.from(disputeOpen) } })
     ]);
 
     const toWorksheetBuckets = (rows) => {
@@ -478,10 +498,8 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
 
     const cancellations = toWorksheetBuckets(cancellationsByStatus);
     const returns = toWorksheetBuckets(returnsByStatus);
-
-    const caseOpen = new Set(['OPEN', 'WAITING_SELLER_RESPONSE', 'WAITING_FOR_SELLER']);
-    const caseAttended = new Set(['ON_HOLD', 'WAITING_BUYER_RESPONSE', 'WAITING_FOR_BUYER']);
-    const caseResolved = new Set(['CLOSED', 'RESOLVED']);
+    cancellations.open = cancellationsOpenOverall || 0;
+    returns.open = returnsOpenOverall || 0;
 
     const inr = { open: 0, attended: 0, resolved: 0, total: 0 };
     inrByStatus.forEach((r) => {
@@ -493,10 +511,7 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
       else inr.attended += count;
       inr.total += count;
     });
-
-    const disputeOpen = new Set(['OPEN', 'WAITING_FOR_SELLER_RESPONSE']);
-    const disputeAttended = new Set(['UNDER_REVIEW']);
-    const disputeResolved = new Set(['RESOLVED_BUYER_FAVOUR', 'RESOLVED_SELLER_FAVOUR', 'CLOSED']);
+    inr.open = inrOpenOverall || 0;
 
     const disputes = { open: 0, attended: 0, resolved: 0, total: 0 };
     disputesByStatus.forEach((r) => {
@@ -508,6 +523,7 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
       else disputes.attended += count;
       disputes.total += count;
     });
+    disputes.open = disputesOpenOverall || 0;
 
     res.json({
       totalOrders,
