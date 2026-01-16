@@ -9,6 +9,11 @@ const PaymentDisputeSchema = new mongoose.Schema({
   // Status & Reason
   paymentDisputeStatus: String, // OPEN, WAITING_FOR_SELLER_RESPONSE, UNDER_REVIEW, RESOLVED_BUYER_FAVOUR, RESOLVED_SELLER_FAVOUR, CLOSED
   reason: String, // ITEM_NOT_RECEIVED, UNAUTHORIZED_PAYMENT, ITEM_NOT_AS_DESCRIBED, DUPLICATE_CHARGE, etc.
+  worksheetStatus: { 
+    type: String, 
+    enum: ['open', 'attended', 'resolved'],
+    default: 'open'
+  }, // Manual status for worksheet tracking
   
   // Dates
   openDate: Date,

@@ -6571,5 +6571,86 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
   }
 });
 
+// Update worksheet status for an order (cancellation)
+router.patch('/orders/:orderId/worksheet-status', requireAuth, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { worksheetStatus } = req.body;
+
+    if (!['open', 'attended', 'resolved'].includes(worksheetStatus)) {
+      return res.status(400).json({ error: 'Invalid worksheet status' });
+    }
+
+    const order = await Order.findOneAndUpdate(
+      { orderId },
+      { worksheetStatus },
+      { new: true }
+    );
+
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    res.json({ success: true, order });
+  } catch (err) {
+    console.error('Error updating order worksheet status:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update worksheet status for a return
+router.patch('/returns/:returnId/worksheet-status', requireAuth, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const { worksheetStatus } = req.body;
+
+    if (!['open', 'attended', 'resolved'].includes(worksheetStatus)) {
+      return res.status(400).json({ error: 'Invalid worksheet status' });
+    }
+
+    const returnDoc = await Return.findOneAndUpdate(
+      { returnId },
+      { worksheetStatus },
+      { new: true }
+    );
+
+    if (!returnDoc) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+
+    res.json({ success: true, return: returnDoc });
+  } catch (err) {
+    console.error('Error updating return worksheet status:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update worksheet status for a case (INR)
+router.patch('/cases/:caseId/worksheet-status', requireAuth, async (req, res) => {
+  try {
+    const { caseId } = req.params;
+    const { worksheetStatus } = req.body;
+
+    if (!['open', 'attended', 'resolved'].includes(worksheetStatus)) {
+      return res.status(400).json({ error: 'Invalid worksheet status' });
+    }
+
+    const caseDoc = await Case.findOneAndUpdate(
+      { caseId },
+      { worksheetStatus },
+      { new: true }
+    );
+
+    if (!caseDoc) {
+      return res.status(404).json({ error: 'Case not found' });
+    }
+
+    res.json({ success: true, case: caseDoc });
+  } catch (err) {
+    console.error('Error updating case worksheet status:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
 

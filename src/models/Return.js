@@ -14,6 +14,11 @@ const ReturnSchema = new mongoose.Schema(
     returnReason: String, // e.g., "NOT_AS_DESCRIBED", "DEFECTIVE", etc.
     returnStatus: String, // e.g., "RETURN_OPEN", "RETURN_CLOSED", "SELLER_CLOSED", etc.
     returnType: String, // e.g., "MONEY_BACK"
+    worksheetStatus: { 
+      type: String, 
+      enum: ['open', 'attended', 'resolved'],
+      default: 'open'
+    }, // Manual status for worksheet tracking
     
     // Item details
     itemId: String,

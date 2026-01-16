@@ -56,6 +56,11 @@ const OrderSchema = new mongoose.Schema(
     estimatedTaxUSD: Number, // Amazon estimated tax in USD
     conversionRate: Number, // Stored conversion rate for reference
     cancelState: String, // NONE_REQUESTED, CANCEL_REQUESTED, CANCELED, etc.
+    worksheetStatus: { 
+      type: String, 
+      enum: ['open', 'attended', 'resolved'],
+      default: 'open'
+    }, // Manual status for worksheet tracking
     refunds: Array, // Array of refund objects from paymentSummary.refunds (for display only)
     // Simple earnings field (auto for PAID, $0 for FULLY_REFUNDED, manual for PARTIALLY_REFUNDED)
     orderEarnings: Number,

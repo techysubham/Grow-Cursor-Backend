@@ -7,6 +7,11 @@ const CaseSchema = new mongoose.Schema({
   orderId: String,
   buyerUsername: String,
   status: { type: String, default: 'OPEN' }, // OPEN, CLOSED, WAITING_BUYER_RESPONSE, WAITING_SELLER_RESPONSE, ON_HOLD
+  worksheetStatus: { 
+    type: String, 
+    enum: ['open', 'attended', 'resolved'],
+    default: 'open'
+  }, // Manual status for worksheet tracking
   
   // Dates
   creationDate: Date,
