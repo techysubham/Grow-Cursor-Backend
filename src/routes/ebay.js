@@ -3859,7 +3859,15 @@ router.get('/stored-returns', async (req, res) => {
     let query = {};
     if (sellerId) query.seller = sellerId;
     if (status) query.returnStatus = status;
-    if (reason) query.returnReason = reason;
+    // Support multiple reasons (comma-separated) with OR logic using $in
+    if (reason) {
+      const reasons = reason.split(',').map(r => r.trim()).filter(r => r);
+      if (reasons.length === 1) {
+        query.returnReason = reasons[0];
+      } else if (reasons.length > 1) {
+        query.returnReason = { $in: reasons };
+      }
+    }
 
     // Date range filter on creationDate
     if (startDate || endDate) {
