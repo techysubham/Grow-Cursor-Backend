@@ -13,8 +13,6 @@ const SellerSchema = new mongoose.Schema(
       scope: String,
       fetchedAt: Date
     },
-    // Order Polling Metadata
-    lastPolledAt: { type: Date, default: null }, 
     // Default: Nov 1, 2025 00:00:00 UTC
     initialSyncDate: { type: Date, default: () => new Date(Date.UTC(2025, 10, 1, 0, 0, 0, 0)) },
     

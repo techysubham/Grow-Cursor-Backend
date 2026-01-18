@@ -3,6 +3,7 @@ import axios from 'axios';
 import qs from 'qs';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
+import moment from 'moment-timezone';
 import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
@@ -2743,7 +2744,8 @@ router.post('/poll-new-orders', requireAuth, requireRole('fulfillmentadmin', 'su
         const latestCreationDate = latestOrder ? latestOrder.creationDate : null;
         // Default initial sync date: Nov 1, 2025 00:00:00 UTC
         const initialSyncDate = seller.initialSyncDate || new Date(Date.UTC(2025, 10, 1, 0, 0, 0, 0));
-        const currentTimeUTC = new Date(nowUTC - 5000);
+        // Use current time without buffer - Render's servers have accurate NTP sync
+        const currentTimeUTC = new Date(nowUTC);
 
         const newOrders = [];
         let newOrdersFilter = null;
@@ -3038,6 +3040,34 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
       try {
         console.log(`\n[${sellerName}] Checking for order updates...`);
 
+        // ✅ STEP 1: Find latest lastModifiedDate from DB for THIS SELLER
+        const latestOrder = await Order.findOne({
+          seller: seller._id,
+          lastModifiedDate: { $exists: true, $ne: null }
+        })
+        .sort({ lastModifiedDate: -1 })
+        .select('lastModifiedDate orderId')
+        .lean();
+
+        let sinceDate;
+        
+        if (latestOrder && latestOrder.lastModifiedDate) {
+          // Use latest lastModifiedDate from DB
+          sinceDate = new Date(latestOrder.lastModifiedDate);
+          console.log(`[${sellerName}] Latest order: ${latestOrder.orderId}`);
+          console.log(`[${sellerName}] Latest lastModifiedDate: ${sinceDate.toISOString()}`);
+        } else {
+          // No orders yet - use initialSyncDate or 30 days ago
+          sinceDate = seller.initialSyncDate || thirtyDaysAgo;
+          console.log(`[${sellerName}] No existing orders - using: ${sinceDate.toISOString()}`);
+        }
+
+        // Ensure we don't go beyond 30 days
+        if (sinceDate < thirtyDaysAgo) {
+          sinceDate = thirtyDaysAgo;
+          console.log(`[${sellerName}] Capped to 30-day limit`);
+        }
+
         // Token refresh
         const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
         const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
@@ -3066,8 +3096,11 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
           accessToken = refreshRes.data.access_token;
         }
 
-        const lastPolledAt = seller.lastPolledAt || null;
-        const currentTimeUTC = new Date(nowUTC - 5000);
+        // ✅ STEP 2: Fetch orders from eBay with lastModifiedDate >= sinceDate
+        const toDate = new Date(nowUTC);
+        const modifiedFilter = `lastmodifieddate:[${sinceDate.toISOString()}..${toDate.toISOString()}]`;
+        
+        console.log(`[${sellerName}] Filter: ${modifiedFilter}`);
         const updatedOrders = [];
 
         const recentOrders = await Order.find({
@@ -3078,10 +3111,6 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
         console.log(`[${sellerName}] ${recentOrders.length} orders < 30 days old`);
 
         if (recentOrders.length > 0) {
-          const checkFromDate = lastPolledAt || thirtyDaysAgo;
-          const modifiedFilter = `lastmodifieddate:[${checkFromDate.toISOString()}..${currentTimeUTC.toISOString()}]`;
-
-          console.log(`[${sellerName}] Checking modifications since ${checkFromDate.toISOString()}`);
 
           let offset = 0;
           const batchSize = 100;
@@ -3226,10 +3255,6 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
             }
           }
         }
-
-        // Update lastPolledAt timestamp
-        seller.lastPolledAt = new Date(nowUTC);
-        await seller.save();
 
         console.log(`[${sellerName}] ✅ Complete: ${updatedOrders.length} updated`);
 
