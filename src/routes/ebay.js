@@ -1065,30 +1065,52 @@ router.get('/orders', async (req, res) => {
   }
 });
 
-// New endpoint: Get orders with IN_PROGRESS cancellation status (last 30 days only)
+// New endpoint: Get orders with any cancellation status
 router.get('/cancelled-orders', async (req, res) => {
   try {
-    // Calculate 30 days ago in UTC
-    const nowUTC = Date.now();
-    const thirtyDaysAgoMs = 30 * 24 * 60 * 60 * 1000;
-    const thirtyDaysAgo = new Date(nowUTC - thirtyDaysAgoMs);
+    const { startDate, endDate } = req.query;
 
-    console.log(`[Cancelled Orders] Fetching IN_PROGRESS orders from last 30 days (since ${thirtyDaysAgo.toISOString()})`);
+    console.log(`[Cancelled Orders] Fetching all cancellation orders`);
 
-    // Query for orders with CANCEL_REQUESTED or IN_PROGRESS cancellation AND within 30 days
-    const cancelledOrders = await Order.find({
-      cancelState: { $in: ['CANCEL_REQUESTED', 'IN_PROGRESS'] }, // Filter by cancel state
-      creationDate: { $gte: thirtyDaysAgo } // Only last 30 days
-    })
-      .populate('seller', 'username ebayUserId')
+    // Build query for cancellation states
+    const query = {
+      cancelState: { $in: ['CANCEL_REQUESTED', 'IN_PROGRESS', 'CANCELED', 'CANCELLED'] }
+    };
+
+    // Add date filter if provided (using PST timezone logic like other endpoints)
+    if (startDate || endDate) {
+      query.dateSold = {};
+      const PST_OFFSET_HOURS = 8;
+
+      if (startDate) {
+        const start = new Date(startDate);
+        start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
+        query.dateSold.$gte = start;
+      }
+
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setDate(end.getDate() + 1);
+        end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
+        query.dateSold.$lte = end;
+      }
+    }
+
+    const cancelledOrders = await Order.find(query)
+      .populate({
+        path: 'seller',
+        populate: {
+          path: 'user',
+          select: 'username email'
+        }
+      })
       .sort({ creationDate: -1 }); // Newest first
 
-    console.log(`[Cancelled Orders] Found ${cancelledOrders.length} IN_PROGRESS orders`);
+    console.log(`[Cancelled Orders] Found ${cancelledOrders.length} cancellation orders`);
 
     res.json({
       orders: cancelledOrders,
-      totalOrders: cancelledOrders.length,
-      filterDate: thirtyDaysAgo.toISOString()
+      totalOrders: cancelledOrders.length
     });
   } catch (err) {
     console.error('[Cancelled Orders] Error:', err);
@@ -1097,6 +1119,32 @@ router.get('/cancelled-orders', async (req, res) => {
 });
 
 
+
+
+// Get a single order by orderId
+router.get('/order/:orderId', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+  const { orderId } = req.params;
+
+  try {
+    const order = await Order.findOne({ orderId })
+      .populate({
+        path: 'seller',
+        populate: {
+          path: 'user',
+          select: 'username email'
+        }
+      });
+
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    res.json(order);
+  } catch (err) {
+    console.error('[Get Order] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
 // Get stored orders from database with pagination support
@@ -4027,11 +4075,38 @@ router.post('/fetch-inr-cases', requireAuth, requireRole('fulfillmentadmin', 'su
               caseType = 'OTHER';
             }
 
+            // Try to get orderId from eBay response, or look it up in Order collection
+            let orderId = ebayCase.orderId || ebayCase.orderNumber;
+            
+            // If no orderId from eBay, try to find it using lineItemId or transactionId
+            if (!orderId && (ebayCase.lineItemId || ebayCase.transactionId || ebayCase.itemId)) {
+              try {
+                // Try to find order with matching lineItem
+                const orderQuery = {};
+                if (ebayCase.lineItemId) {
+                  orderQuery['lineItems.lineItemId'] = ebayCase.lineItemId;
+                } else if (ebayCase.transactionId) {
+                  orderQuery['lineItems.legacyItemId'] = ebayCase.itemId;
+                }
+                
+                if (Object.keys(orderQuery).length > 0) {
+                  orderQuery.seller = seller._id;
+                  const matchingOrder = await Order.findOne(orderQuery).select('orderId');
+                  if (matchingOrder) {
+                    orderId = matchingOrder.orderId;
+                    console.log(`[Fetch INR Cases] Found orderId ${orderId} for case ${ebayCase.inquiryId}`);
+                  }
+                }
+              } catch (lookupErr) {
+                console.log(`[Fetch INR Cases] Could not lookup orderId for case ${ebayCase.inquiryId}:`, lookupErr.message);
+              }
+            }
+
             const caseData = {
               seller: seller._id,
               caseId: ebayCase.inquiryId,
               caseType,
-              orderId: ebayCase.orderId || ebayCase.orderNumber,
+              orderId: orderId,
               buyerUsername: ebayCase.buyer || ebayCase.buyerLoginName,
               // FIX: eBay returns 'inquiryStatusEnum' not 'state' or 'status'
               status: ebayCase.inquiryStatusEnum || ebayCase.state || ebayCase.status || 'OPEN',
