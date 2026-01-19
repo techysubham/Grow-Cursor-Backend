@@ -59,10 +59,10 @@ router.put('/me', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/employee-profiles - list all (superadmin only) but [hradmin, operationhead] can be added
+// GET /api/employee-profiles - list all (superadmin, hradmin, operationhead)
 router.get('/', requireAuth, async (req, res) => {
   try {
-    if (!['superadmin'].includes(req.user.role)) {
+    if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Forbidden' });
     }
     const list = await EmployeeProfile.find({}).populate('user', 'username role email department');
