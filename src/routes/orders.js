@@ -132,26 +132,35 @@ router.get('/daily-statistics', requireAuth, requireRole('fulfillmentadmin', 'su
 router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    const PST_OFFSET_HOURS = 8;
 
+    // Use UTC boundaries for filtering (matches frontend local date selection)
     const buildDateRangeMatch = (field) => {
       if (!startDate && !endDate) return {};
       const range = {};
       if (startDate) {
         const start = new Date(startDate);
-        start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
+        start.setUTCHours(0, 0, 0, 0); // Start of day in UTC
         range.$gte = start;
       }
       if (endDate) {
         const end = new Date(endDate);
-        end.setDate(end.getDate() + 1);
-        end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
+        end.setUTCHours(23, 59, 59, 999); // End of day in UTC
         range.$lte = end;
       }
       return { [field]: range };
     };
 
-    const dateStringProjection = (field) => ({
+    // Project date in UTC (for grouping - matches frontend selection)
+    const utcDateProjection = (field) => ({
+      $dateToString: {
+        format: '%Y-%m-%d',
+        date: field,
+        timezone: 'UTC'
+      }
+    });
+
+    // Project date in PST (for database reference)
+    const pstDateProjection = (field) => ({
       $dateToString: {
         format: '%Y-%m-%d',
         date: field,
@@ -170,13 +179,15 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       },
       {
         $project: {
-          worksheetStatus: { $ifNull: ['$worksheetStatus', 'open'] }, // Use manual status, default to 'open'
-          date: dateStringProjection('$worksheetDate')
+          worksheetStatus: { $ifNull: ['$worksheetStatus', 'open'] },
+          date: utcDateProjection('$worksheetDate'),
+          pstDate: pstDateProjection('$worksheetDate')
         }
       },
       {
         $group: {
           _id: { date: '$date', status: '$worksheetStatus' },
+          pstDate: { $first: '$pstDate' },
           count: { $sum: 1 }
         }
       }
@@ -186,13 +197,15 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       { $match: { ...buildDateRangeMatch('creationDate') } },
       {
         $project: {
-          worksheetStatus: { $ifNull: ['$worksheetStatus', 'open'] }, // Use manual status, default to 'open'
-          date: dateStringProjection('$creationDate')
+          worksheetStatus: { $ifNull: ['$worksheetStatus', 'open'] },
+          date: utcDateProjection('$creationDate'),
+          pstDate: pstDateProjection('$creationDate')
         }
       },
       {
         $group: {
           _id: { date: '$date', status: '$worksheetStatus' },
+          pstDate: { $first: '$pstDate' },
           count: { $sum: 1 }
         }
       }
@@ -203,12 +216,14 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       {
         $project: {
           status: '$status',
-          date: dateStringProjection('$creationDate')
+          date: utcDateProjection('$creationDate'),
+          pstDate: pstDateProjection('$creationDate')
         }
       },
       {
         $group: {
           _id: { date: '$date', status: '$status' },
+          pstDate: { $first: '$pstDate' },
           count: { $sum: 1 }
         }
       }
@@ -220,12 +235,14 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       {
         $project: {
           status: '$paymentDisputeStatus',
-          date: dateStringProjection('$worksheetDate')
+          date: utcDateProjection('$worksheetDate'),
+          pstDate: pstDateProjection('$worksheetDate')
         }
       },
       {
         $group: {
           _id: { date: '$date', status: '$status' },
+          pstDate: { $first: '$pstDate' },
           count: { $sum: 1 }
         }
       }
@@ -244,12 +261,14 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       },
       {
         $project: {
-          date: dateStringProjection('$messageDate')
+          date: utcDateProjection('$messageDate'),
+          pstDate: pstDateProjection('$messageDate')
         }
       },
       {
         $group: {
           _id: { date: '$date' },
+          pstDate: { $first: '$pstDate' },
           count: { $sum: 1 }
         }
       }
@@ -270,21 +289,27 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
     ]);
 
     const dateMap = new Map();
-    const ensureDate = (date) => {
+    const pstDateMap = new Map(); // Track PST dates for each UTC date
+    
+    const ensureDate = (date, pstDate) => {
       if (!dateMap.has(date)) {
         dateMap.set(date, {
           date,
+          pstDate: pstDate || date, // PST date for database reference
           cancellations: { open: 0, attended: 0, resolved: 0 },
           returns: { open: 0, attended: 0, resolved: 0 },
           inrDisputes: { open: 0, attended: 0, resolved: 0 },
           inquiries: { total: 0 }
         });
+      } else if (pstDate && !dateMap.get(date).pstDate) {
+        // Update PST date if we have one
+        dateMap.get(date).pstDate = pstDate;
       }
       return dateMap.get(date);
     };
 
-    const addCount = (date, category, bucket, count) => {
-      const entry = ensureDate(date);
+    const addCount = (date, pstDate, category, bucket, count) => {
+      const entry = ensureDate(date, pstDate);
       entry[category][bucket] += count;
     };
 
@@ -299,26 +324,26 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
     // Cancellations use manual worksheetStatus
     cancellationStats.forEach((stat) => {
       const { date, status } = stat._id;
-      addCount(date, 'cancellations', status, stat.count);
+      addCount(date, stat.pstDate, 'cancellations', status, stat.count);
     });
 
     // Returns use manual worksheetStatus
     returnStats.forEach((stat) => {
       const { date, status } = stat._id;
-      addCount(date, 'returns', status, stat.count);
+      addCount(date, stat.pstDate, 'returns', status, stat.count);
     });
 
     // Cases use automatic status logic
     caseStats.forEach((stat) => {
       const { date, status } = stat._id;
       if (caseOpen.has(status)) {
-        addCount(date, 'inrDisputes', 'open', stat.count);
+        addCount(date, stat.pstDate, 'inrDisputes', 'open', stat.count);
       } else if (caseAttended.has(status)) {
-        addCount(date, 'inrDisputes', 'attended', stat.count);
+        addCount(date, stat.pstDate, 'inrDisputes', 'attended', stat.count);
       } else if (caseResolved.has(status)) {
-        addCount(date, 'inrDisputes', 'resolved', stat.count);
+        addCount(date, stat.pstDate, 'inrDisputes', 'resolved', stat.count);
       } else {
-        addCount(date, 'inrDisputes', 'attended', stat.count);
+        addCount(date, stat.pstDate, 'inrDisputes', 'attended', stat.count);
       }
     });
 
@@ -326,19 +351,19 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
     disputeStats.forEach((stat) => {
       const { date, status } = stat._id;
       if (disputeOpen.has(status)) {
-        addCount(date, 'inrDisputes', 'open', stat.count);
+        addCount(date, stat.pstDate, 'inrDisputes', 'open', stat.count);
       } else if (disputeAttended.has(status)) {
-        addCount(date, 'inrDisputes', 'attended', stat.count);
+        addCount(date, stat.pstDate, 'inrDisputes', 'attended', stat.count);
       } else if (disputeResolved.has(status)) {
-        addCount(date, 'inrDisputes', 'resolved', stat.count);
+        addCount(date, stat.pstDate, 'inrDisputes', 'resolved', stat.count);
       } else {
-        addCount(date, 'inrDisputes', 'attended', stat.count);
+        addCount(date, stat.pstDate, 'inrDisputes', 'attended', stat.count);
       }
     });
 
     inquiryStats.forEach((stat) => {
       const date = stat._id.date;
-      const entry = ensureDate(date);
+      const entry = ensureDate(date, stat.pstDate);
       entry.inquiries.total += stat.count;
     });
 
@@ -357,20 +382,19 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
 router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    const PST_OFFSET_HOURS = 8;
 
+    // Use UTC boundaries for filtering (matches frontend local date selection)
     const buildDateRangeMatch = (field) => {
       if (!startDate && !endDate) return {};
       const range = {};
       if (startDate) {
         const start = new Date(startDate);
-        start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
+        start.setUTCHours(0, 0, 0, 0); // Start of day in UTC
         range.$gte = start;
       }
       if (endDate) {
         const end = new Date(endDate);
-        end.setDate(end.getDate() + 1);
-        end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
+        end.setUTCHours(23, 59, 59, 999); // End of day in UTC
         range.$lte = end;
       }
       return { [field]: range };
