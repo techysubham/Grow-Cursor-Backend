@@ -59,7 +59,7 @@ router.put('/me', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/employee-profiles - list all (superadmin, hradmin, operationhead only)
+// GET /api/employee-profiles - list all (superadmin, hradmin, operationhead)
 router.get('/', requireAuth, async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
@@ -72,27 +72,40 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-// PUT /api/employee-profiles/:id - update user role and department (superadmin only)
+// PUT /api/employee-profiles/:id - update user and profile fields (superadmin, hradmin, operationhead)
 router.put('/:id', requireAuth, async (req, res) => {
   try {
-    if (req.user.role !== 'superadmin') {
+    if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Forbidden' });
     }
-    const { role, department } = req.body;
+
     const profile = await EmployeeProfile.findById(req.params.id).populate('user');
     if (!profile) {
       return res.status(404).json({ error: 'Profile not found' });
     }
-    
-    // Import User model
-    const User = profile.user.constructor;
-    
-    // Update user role and department
+
+    // Extract profile fields using the helper
+    const profileData = pickProfile(req.body);
+
+    // Remove empty string values for enum fields to avoid validation errors
+    if (profileData.gender === '') delete profileData.gender;
+
+    // Extract admin fields (only if non-empty)
+    const { workingMode, workingHours } = req.body;
+    if (workingMode && workingMode !== '') profileData.workingMode = workingMode;
+    if (workingHours && workingHours !== '') profileData.workingHours = workingHours;
+
+    // Update EmployeeProfile
+    Object.assign(profile, profileData);
+    await profile.save();
+
+    // Update User fields (role, department)
+    const { role, department } = req.body;
     if (role !== undefined) profile.user.role = role;
     if (department !== undefined) profile.user.department = department;
-    
+
     await profile.user.save();
-    
+
     // Re-populate and return
     await profile.populate('user', 'username role email department');
     res.json(profile);
@@ -111,13 +124,13 @@ router.put('/:id/admin-fields', requireAuth, async (req, res) => {
     const update = {};
     if (workingMode !== undefined) update.workingMode = workingMode;
     if (workingHours !== undefined) update.workingHours = workingHours;
-    
+
     const profile = await EmployeeProfile.findByIdAndUpdate(
       req.params.id,
       { $set: update },
       { new: true }
     ).populate('user', 'username role email department');
-    
+
     if (!profile) {
       return res.status(404).json({ error: 'Profile not found' });
     }

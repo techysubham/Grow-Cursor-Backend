@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import User from '../models/User.js';
 import Seller from '../models/Seller.js';
+import EmployeeProfile from '../models/EmployeeProfile.js';
 
 const router = Router();
 
@@ -16,22 +17,22 @@ router.post('/', requireAuth, async (req, res) => {
 
   // --- FIX IS HERE: Added 'hoc' and 'compliancemanager' ---
   const allowedRoles = [
-    'productadmin', 
-    'listingadmin', 
-    'lister', 
-    'advancelister', 
-    'compatibilityadmin', 
-    'compatibilityeditor', 
-    'seller', 
-    'fulfillmentadmin', 
-    'hradmin', 
-    'hr', 
-    'operationhead', 
+    'productadmin',
+    'listingadmin',
+    'lister',
+    'advancelister',
+    'compatibilityadmin',
+    'compatibilityeditor',
+    'seller',
+    'fulfillmentadmin',
+    'hradmin',
+    'hr',
+    'operationhead',
     'trainee',
-    'hoc', 
+    'hoc',
     'compliancemanager'
   ];
-  
+
   if (!allowedRoles.includes(newUserRole)) return res.status(400).json({ error: 'Invalid newUserRole' });
 
   // Forbidden base roles (cannot create users)
@@ -41,7 +42,7 @@ router.post('/', requireAuth, async (req, res) => {
 
   // Only superadmin can create high-level admins (productadmin, listingadmin, compatibilityadmin, fulfillmentadmin)
   // Added 'hoc' and 'compliancemanager' to the list of roles that require high privileges
-  if (['productadmin', 'listingadmin', 'compatibilityadmin', 'seller', 'fulfillmentadmin', 'hradmin', 'operationhead', 'hoc', 'compliancemanager'].includes(newUserRole) && !['superadmin','hradmin','operationhead'].includes(role)) {
+  if (['productadmin', 'listingadmin', 'compatibilityadmin', 'seller', 'fulfillmentadmin', 'hradmin', 'operationhead', 'hoc', 'compliancemanager'].includes(newUserRole) && !['superadmin', 'hradmin', 'operationhead'].includes(role)) {
     return res.status(403).json({ error: 'Only superadmin, hradmin or operationhead can create admin roles or sellers' });
   }
 
@@ -74,12 +75,15 @@ router.post('/', requireAuth, async (req, res) => {
 
   const user = await User.create({ email, username, passwordHash, role: newUserRole, department: finalDepartment });
 
+  // Create an EmployeeProfile for the new user so they appear on admin pages immediately
+  await EmployeeProfile.create({ user: user._id, email: user.email });
+
   // If creating a seller, also create a Seller document
   if (newUserRole === 'seller') {
     await Seller.create({ user: user._id, ebayMarketplaces: [] });
   }
 
-  if (['superadmin','hradmin','operationhead'].includes(role)) {
+  if (['superadmin', 'hradmin', 'operationhead'].includes(role)) {
     // Return credentials for superadmin record-keeping
     res.json({
       id: user._id,
