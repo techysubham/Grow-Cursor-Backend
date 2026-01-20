@@ -124,6 +124,21 @@ const templateListingSchema = new mongoose.Schema({
     default: null
   },
   
+  // Download batch tracking
+  downloadBatchId: {
+    type: String,
+    default: null,
+    index: true
+  },
+  downloadedAt: {
+    type: Date,
+    default: null
+  },
+  downloadBatchNumber: {
+    type: Number,
+    default: null
+  },
+  
   // CUSTOM COLUMNS (flexible Map structure)
   customFields: {
     type: Map,
@@ -155,6 +170,7 @@ templateListingSchema.index({ templateId: 1, sellerId: 1 });
 templateListingSchema.index({ sellerId: 1, templateId: 1, createdAt: -1 });
 templateListingSchema.index({ customLabel: 1 });
 templateListingSchema.index({ deletedAt: 1 });
+templateListingSchema.index({ templateId: 1, sellerId: 1, downloadBatchId: 1 });
 
 // Pre-save hook to auto-generate Amazon link and update timestamp
 templateListingSchema.pre('save', function(next) {
