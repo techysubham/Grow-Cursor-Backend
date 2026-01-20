@@ -11,7 +11,7 @@ const router = express.Router();
 // Get all listings for a template
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, page = 1, limit = 50 } = req.query;
+    const { templateId, sellerId, page = 1, limit = 50, batchFilter = 'active', batchId } = req.query;
     
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
@@ -23,6 +23,17 @@ router.get('/', requireAuth, async (req, res) => {
     const filter = { templateId };
     if (sellerId) {
       filter.sellerId = sellerId;
+    }
+    
+    // Apply batch filtering
+    if (batchId) {
+      // Specific batch
+      filter.downloadBatchId = batchId;
+    } else if (batchFilter === 'active') {
+      // Active batch only (not downloaded)
+      filter.downloadBatchId = null;
+    } else if (batchFilter === 'all') {
+      // All batches (no filter on downloadBatchId)
     }
     
     const [listings, total] = await Promise.all([
@@ -790,21 +801,60 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     const { templateId } = req.params;
     const { sellerId } = req.query;
     
-    // Build filter with optional seller filtering
-    const filter = { templateId };
+    // Build filter for ACTIVE listings only
+    const filter = { 
+      templateId,
+      downloadBatchId: null // Only active batch
+    };
     if (sellerId) {
       filter.sellerId = sellerId;
     }
     
-    // Fetch template and filtered listings
-    const [template, listings] = await Promise.all([
+    // Fetch template, seller, and filtered listings
+    const [template, seller, listings] = await Promise.all([
       ListingTemplate.findById(templateId),
+      sellerId ? Seller.findById(sellerId).populate('user', 'username email') : null,
       TemplateListing.find(filter).sort({ createdAt: -1 })
     ]);
+    
+    console.log('📊 Export CSV - Seller info:', seller?.user?.username || seller?.user?.email || 'No seller');
+    console.log('📊 Export CSV - Listings count:', listings.length);
     
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
+    
+    if (listings.length === 0) {
+      return res.status(400).json({ error: 'No active listings to download' });
+    }
+    
+    // Generate batch ID and get next batch number
+    const crypto = await import('crypto');
+    const batchId = crypto.randomUUID();
+    
+    // Get next batch number for this template + seller combination
+    const latestBatch = await TemplateListing.findOne({
+      templateId,
+      sellerId: sellerId || { $exists: true },
+      downloadBatchNumber: { $ne: null }
+    }).sort({ downloadBatchNumber: -1 });
+    
+    const batchNumber = (latestBatch?.downloadBatchNumber || 0) + 1;
+    
+    console.log('🔢 Batch number:', batchNumber);
+    console.log('🆔 Batch ID:', batchId);
+    
+    // Mark listings as downloaded
+    const updateResult = await TemplateListing.updateMany(
+      filter,
+      {
+        downloadBatchId: batchId,
+        downloadedAt: new Date(),
+        downloadBatchNumber: batchNumber
+      }
+    );
+    
+    console.log('✅ Updated listings:', updateResult.modifiedCount);
     
     // Build core headers (38 columns)
     const coreHeaders = [
@@ -948,14 +998,276 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
       }).join(',')
     ).join('\n');
     
-    // Send as downloadable file
-    const filename = `${template.name.replace(/\s+/g, '_')}_${Date.now()}.csv`;
+    // Send as downloadable file with template, seller, batch number and date
+    const dateStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const sellerName = seller?.user?.username || seller?.user?.email || 'seller';
+    const templateName = template.name.replace(/\s+/g, '_');
+    const filename = `${templateName}_${sellerName}_batch_${batchNumber}_${dateStr}.csv`;
+    
+    console.log('📁 Generated filename:', filename);
+    
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(csvContent);
     
   } catch (error) {
     console.error('Error exporting CSV:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get download history for a template/seller
+router.get('/download-history/:templateId', requireAuth, async (req, res) => {
+  try {
+    const { templateId } = req.params;
+    const { sellerId } = req.query;
+    
+    console.log('📜 Download history request - Template:', templateId, 'Seller:', sellerId);
+    
+    // Convert string IDs to ObjectIds for aggregation
+    const mongoose = await import('mongoose');
+    const filter = {
+      templateId: new mongoose.default.Types.ObjectId(templateId),
+      downloadBatchId: { $ne: null }
+    };
+    
+    if (sellerId) {
+      filter.sellerId = new mongoose.default.Types.ObjectId(sellerId);
+    }
+    
+    console.log('🔍 Filter:', JSON.stringify(filter));
+    
+    // First, let's check ALL listings for this template/seller
+    const allListings = await TemplateListing.find({
+      templateId,
+      sellerId: sellerId || { $exists: true }
+    }).select('downloadBatchId downloadBatchNumber downloadedAt customLabel');
+    
+    console.log('📋 Total listings found:', allListings.length);
+    console.log('📊 All listings batch info:', allListings.map(l => ({
+      sku: l.customLabel,
+      batchId: l.downloadBatchId,
+      batchNumber: l.downloadBatchNumber,
+      downloadedAt: l.downloadedAt
+    })));
+    
+    // Get unique batches with their metadata
+    const batches = await TemplateListing.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: '$downloadBatchId',
+          batchNumber: { $first: '$downloadBatchNumber' },
+          downloadedAt: { $first: '$downloadedAt' },
+          listingCount: { $sum: 1 }
+        }
+      },
+      { $sort: { batchNumber: 1 } }
+    ]);
+    
+    console.log('📊 Aggregation result:', batches);
+    
+    // Format response
+    const history = batches.map(batch => ({
+      batchId: batch._id,
+      batchNumber: batch.batchNumber,
+      downloadedAt: batch.downloadedAt,
+      listingCount: batch.listingCount
+    }));
+    
+    console.log('✅ Sending history:', history);
+    
+    res.json(history);
+  } catch (error) {
+    console.error('Error fetching download history:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Re-download a specific batch
+router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, res) => {
+  try {
+    const { templateId, batchId } = req.params;
+    const { sellerId } = req.query;
+    
+    // Build filter for specific batch
+    const filter = { 
+      templateId,
+      downloadBatchId: batchId
+    };
+    if (sellerId) {
+      filter.sellerId = sellerId;
+    }
+    
+    // Fetch template, seller, and batch listings
+    const [template, seller, listings] = await Promise.all([
+      ListingTemplate.findById(templateId),
+      sellerId ? Seller.findById(sellerId).populate('user', 'username email') : null,
+      TemplateListing.find(filter).sort({ createdAt: -1 })
+    ]);
+    
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    
+    if (listings.length === 0) {
+      return res.status(404).json({ error: 'Batch not found' });
+    }
+    
+    const batchNumber = listings[0].downloadBatchNumber;
+    
+    // Build core headers (38 columns)
+    const coreHeaders = [
+      '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
+      'Custom label (SKU)',
+      'Category ID',
+      'Category name',
+      'Title',
+      'Relationship',
+      'Relationship details',
+      'Schedule Time',
+      'P:UPC',
+      'P:EPID',
+      'Start price',
+      'Quantity',
+      'Item photo URL',
+      'VideoID',
+      'Condition ID',
+      'Description',
+      'Format',
+      'Duration',
+      'Buy It Now price',
+      'Best offer enabled',
+      'Best offer: Auto accept price',
+      'Minimum best offer price',
+      'Immediate pay required',
+      'Location',
+      'Shipping service 1: option',
+      'Shipping service 1: cost',
+      'Shipping service 1: priority',
+      'Shipping service 2: option',
+      'Shipping service 2: cost',
+      'Shipping service 2: priority',
+      'Max dispatch time',
+      'Returns accepted option',
+      'Returns within option',
+      'Refund option',
+      'Return shipping cost paid by',
+      'Shipping profile name',
+      'Return profile name',
+      'Payment profile name'
+    ];
+    
+    // Add custom column headers
+    const customHeaders = template.customColumns
+      .sort((a, b) => a.order - b.order)
+      .map(col => col.name);
+    
+    const allHeaders = [...coreHeaders, ...customHeaders];
+    const columnCount = allHeaders.length;
+    
+    // Generate #INFO lines (must match column count exactly)
+    const emptyRow = new Array(columnCount).fill('');
+    
+    // INFO Line 1: Created timestamp + required field indicator
+    const infoLine1 = ['#INFO', `Created=${Date.now()}`, '', '', '', '', 
+                       ' Indicates missing required fields', '', '', '', '',
+                       ' Indicates missing field that will be required soon',
+                       ...new Array(columnCount - 12).fill('')];
+    
+    // INFO Line 2: Version + recommended field indicator  
+    const infoLine2 = ['#INFO', 'Version=1.0', '', 
+                       'Template=fx_category_template_EBAY_US', '', '',
+                       ' Indicates missing recommended field', '', '', '', '',
+                       ' Indicates field does not apply to this item/category',
+                       ...new Array(columnCount - 12).fill('')];
+    
+    // INFO Line 3: All empty commas
+    const infoLine3 = new Array(columnCount).fill('')
+    infoLine3[0] = '#INFO';
+    
+    // Map listings to CSV rows
+    const dataRows = listings.map(listing => {
+      // Add leading slash to category name if not present
+      let categoryName = listing.categoryName || '';
+      if (categoryName && !categoryName.startsWith('/')) {
+        categoryName = '/' + categoryName;
+      }
+      
+      const coreValues = [
+        listing.action || 'Add',
+        listing.customLabel || '',
+        listing.categoryId || '',
+        categoryName,
+        listing.title || '',
+        listing.relationship || '',
+        listing.relationshipDetails || '',
+        listing.scheduleTime || '',
+        listing.upc || '',
+        listing.epid || '',
+        listing.startPrice || '',
+        listing.quantity || '',
+        listing.itemPhotoUrl || '',
+        listing.videoId || '',
+        listing.conditionId || '1000-New',
+        listing.description || '',
+        listing.format || 'FixedPrice',
+        listing.duration || 'GTC',
+        listing.buyItNowPrice || '',
+        listing.bestOfferEnabled || '',
+        listing.bestOfferAutoAcceptPrice || '',
+        listing.minimumBestOfferPrice || '',
+        listing.immediatePayRequired || '',
+        listing.location || 'UnitedStates',
+        listing.shippingService1Option || '',
+        listing.shippingService1Cost || '',
+        listing.shippingService1Priority || '',
+        listing.shippingService2Option || '',
+        listing.shippingService2Cost || '',
+        listing.shippingService2Priority || '',
+        listing.maxDispatchTime || '',
+        listing.returnsAcceptedOption || '',
+        listing.returnsWithinOption || '',
+        listing.refundOption || '',
+        listing.returnShippingCostPaidBy || '',
+        listing.shippingProfileName || '',
+        listing.returnProfileName || '',
+        listing.paymentProfileName || ''
+      ];
+      
+      // Get custom field values in order
+      const customValues = template.customColumns
+        .sort((a, b) => a.order - b.order)
+        .map(col => listing.customFields.get(col.name) || '');
+      
+      return [...coreValues, ...customValues];
+    });
+    
+    // Combine all rows
+    const allRows = [infoLine1, infoLine2, infoLine3, allHeaders, ...dataRows];
+    
+    // Convert to CSV string with proper escaping
+    const csvContent = allRows.map(row => 
+      row.map(cell => {
+        const value = String(cell || '');
+        if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+          return `"${value.replace(/"/g, '""')}"`;
+        }
+        return value;
+      }).join(',')
+    ).join('\n');
+    
+    // Send as downloadable file with template, seller, batch number and date
+    const dateStr = new Date().toISOString().split('T')[0];
+    const sellerName = seller?.user?.username || seller?.user?.email || 'seller';
+    const templateName = template.name.replace(/\s+/g, '_');
+    const filename = `${templateName}_${sellerName}_batch_${batchNumber}_${dateStr}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csvContent);
+    
+  } catch (error) {
+    console.error('Error re-downloading batch:', error);
     res.status(500).json({ error: error.message });
   }
 });
