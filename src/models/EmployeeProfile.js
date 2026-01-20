@@ -17,7 +17,28 @@ const EmployeeProfileSchema = new mongoose.Schema(
     workingHours: { type: String, trim: true },
     aadharNumber: { type: String, trim: true },
     panNumber: { type: String, trim: true },
-    // File URLs for profile photo and documents (all images now)
+
+    // NEW: BLOB storage for files (images and PDFs)
+    profilePic: {
+      data: Buffer,
+      contentType: String,
+      fileName: String,
+      uploadedAt: Date
+    },
+    aadharDocument: {
+      data: Buffer,
+      contentType: String,
+      fileName: String,
+      uploadedAt: Date
+    },
+    panDocument: {
+      data: Buffer,
+      contentType: String,
+      fileName: String,
+      uploadedAt: Date
+    },
+
+    // OLD: Keep for backward compatibility during migration (will be removed later)
     profilePicUrl: { type: String },
     aadharImageUrl: { type: String },
     panImageUrl: { type: String }
