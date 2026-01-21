@@ -225,6 +225,7 @@ router.post('/', requireAuth, async (req, res) => {
     
     const listing = new TemplateListing({
       ...listingData,
+      status: 'active',
       createdBy: req.user.userId
     });
     
@@ -694,6 +695,7 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           customFields: customFieldsMap,
           templateId,
           sellerId,
+          status: 'active',
           createdBy: req.user.userId
         });
         
