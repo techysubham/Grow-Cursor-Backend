@@ -5,6 +5,7 @@ import ListingTemplate from '../models/ListingTemplate.js';
 import Seller from '../models/Seller.js';
 import SellerPricingConfig from '../models/SellerPricingConfig.js';
 import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
+import { generateSKUFromASIN } from '../utils/skuGenerator.js';
 
 const router = express.Router();
 
@@ -640,12 +641,18 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
         // Generate SKU if not provided
         let sku = listingData.customLabel;
         if (!sku && autoGenerateSKU) {
-          // Generate unique SKU
-          do {
-            sku = listingData._asinReference 
-              ? `${listingData._asinReference}-${skuCounter++}`
-              : `SKU-${skuCounter++}`;
-          } while (skuSet.has(sku));
+          // Generate SKU using GRW25 + last 5 chars of ASIN
+          if (listingData._asinReference) {
+            sku = generateSKUFromASIN(listingData._asinReference);
+          } else {
+            sku = `SKU-${skuCounter++}`;
+          }
+          
+          // Ensure uniqueness
+          while (skuSet.has(sku)) {
+            // If collision, append timestamp suffix
+            sku = `${generateSKUFromASIN(listingData._asinReference)}-${skuCounter++}`;
+          }
         }
         
         if (!sku) {
@@ -745,6 +752,200 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
     console.error('Bulk create error:', error);
     res.status(500).json({ 
       error: error.message || 'Failed to bulk create listings' 
+    });
+  }
+});
+
+// Bulk import ASINs (quick import without fetching Amazon data)
+router.post('/bulk-import-asins', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, asins } = req.body;
+    
+    // Validate required fields
+    if (!templateId) {
+      return res.status(400).json({ error: 'Template ID is required' });
+    }
+    
+    if (!sellerId) {
+      return res.status(400).json({ error: 'Seller ID is required' });
+    }
+    
+    if (!asins || !Array.isArray(asins) || asins.length === 0) {
+      return res.status(400).json({ error: 'ASINs array is required and must not be empty' });
+    }
+    
+    console.log('📦 Bulk import request:', { templateId, sellerId, asinCount: asins.length });
+    
+    // Validate template and seller exist
+    const [template, seller] = await Promise.all([
+      ListingTemplate.findById(templateId),
+      Seller.findById(sellerId)
+    ]);
+    
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+    
+    // Get existing SKUs for this seller to avoid duplicates
+    const existingSKUs = await TemplateListing.find({ 
+      templateId,
+      sellerId
+    }).distinct('customLabel');
+    
+    const skuSet = new Set(existingSKUs);
+    let skuCounter = Date.now();
+    
+    // Process ASINs and generate SKUs
+    const listingsToCreate = [];
+    const skippedASINs = [];
+    
+    for (const asin of asins) {
+      const cleanASIN = asin.trim().toUpperCase();
+      
+      // Basic ASIN validation (should start with B0 and be 10 chars)
+      if (!cleanASIN || cleanASIN.length !== 10 || !cleanASIN.startsWith('B0')) {
+        skippedASINs.push({
+          asin: cleanASIN,
+          reason: 'Invalid ASIN format'
+        });
+        continue;
+      }
+      
+      // Generate SKU using GRW25 + last 5 chars
+      let sku = generateSKUFromASIN(cleanASIN);
+      
+      // Check for duplicates and make unique
+      if (skuSet.has(sku)) {
+        // If collision, append timestamp suffix
+        const baseSKU = sku;
+        let suffix = 1;
+        
+        do {
+          sku = `${baseSKU}-${suffix++}`;
+        } while (skuSet.has(sku));
+        
+        console.log(`SKU collision detected: ${baseSKU} → ${sku}`);
+      }
+      
+      skuSet.add(sku);
+      
+      // Create minimal listing object
+      listingsToCreate.push({
+        templateId,
+        sellerId,
+        _asinReference: cleanASIN,
+        customLabel: sku,
+        amazonLink: `https://www.amazon.com/dp/${cleanASIN}`,
+        title: `Imported Product - ${cleanASIN}`,
+        startPrice: 0.01, // Minimum placeholder
+        quantity: 1,
+        status: 'draft',
+        conditionId: '1000-New',
+        format: 'FixedPrice',
+        duration: 'GTC',
+        location: 'UnitedStates',
+        createdBy: req.user.userId
+      });
+    }
+    
+    console.log(`📊 Prepared ${listingsToCreate.length} listings, ${skippedASINs.length} skipped (validation)`);
+    
+    // Check for existing listings with same ASINs (database duplicates)
+    const existingByASIN = await TemplateListing.find({
+      templateId,
+      sellerId,
+      _asinReference: { $in: listingsToCreate.map(l => l._asinReference) }
+    }).select('customLabel _asinReference');
+    
+    const existingASINs = new Set(existingByASIN.map(l => l._asinReference));
+    
+    console.log(`🔍 Found ${existingASINs.size} existing ASINs in database`);
+    
+    // Filter out existing listings
+    const newListings = listingsToCreate.filter(listing => {
+      if (existingASINs.has(listing._asinReference)) {
+        const existing = existingByASIN.find(e => e._asinReference === listing._asinReference);
+        skippedASINs.push({
+          asin: listing._asinReference,
+          sku: listing.customLabel,
+          reason: `Already exists in database (SKU: ${existing.customLabel})`
+        });
+        return false;
+      }
+      return true;
+    });
+    
+    console.log(`✅ ${newListings.length} new listings to insert`);
+    
+    // Bulk insert new listings
+    let importedCount = 0;
+    let insertErrors = [];
+    
+    if (newListings.length > 0) {
+      try {
+        const result = await TemplateListing.insertMany(newListings, {
+          ordered: false, // Continue on error
+          rawResult: true
+        });
+        
+        importedCount = result.insertedCount || newListings.length;
+        
+        // Handle any write errors
+        if (result.writeErrors && result.writeErrors.length > 0) {
+          result.writeErrors.forEach(err => {
+            const listing = newListings[err.index];
+            if (err.code === 11000) {
+              skippedASINs.push({
+                asin: listing._asinReference,
+                sku: listing.customLabel,
+                reason: 'Duplicate key error'
+              });
+            } else {
+              insertErrors.push({
+                asin: listing._asinReference,
+                sku: listing.customLabel,
+                error: err.errmsg
+              });
+            }
+          });
+        }
+      } catch (error) {
+        // Handle bulk insert errors
+        if (error.code === 11000 && error.writeErrors) {
+          importedCount = error.insertedDocs ? error.insertedDocs.length : 0;
+          
+          error.writeErrors.forEach(err => {
+            const listing = newListings[err.index];
+            skippedASINs.push({
+              asin: listing._asinReference,
+              sku: listing.customLabel,
+              reason: 'Duplicate key error'
+            });
+          });
+        } else {
+          throw error;
+        }
+      }
+    }
+    
+    console.log(`🎉 Import complete: ${importedCount} imported, ${skippedASINs.length} skipped`);
+    
+    res.json({
+      total: asins.length,
+      imported: importedCount,
+      skipped: skippedASINs.length,
+      skippedDetails: skippedASINs,
+      errors: insertErrors.length > 0 ? insertErrors : undefined
+    });
+    
+  } catch (error) {
+    console.error('❌ Bulk import error:', error);
+    res.status(500).json({ 
+      error: error.message || 'Failed to bulk import ASINs' 
     });
   }
 });
