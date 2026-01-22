@@ -671,6 +671,9 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
     const skuSet = new Set(existingActiveSKUs);
     let skuCounter = Date.now();
     
+    console.log(`📊 Pre-check: ${existingActiveSKUs.length} active SKUs, ${inactiveListings.length} inactive listings`);
+    console.log(`📋 Inactive SKUs: ${Array.from(inactiveMap.keys()).join(', ')}`);
+    
     // Process each listing
     for (const listingData of listings) {
       try {
@@ -734,31 +737,18 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           continue;
         }
         
-        // Check for duplicate SKU and make it unique by appending suffix
-        if (skuSet.has(sku)) {
-          const baseSKU = sku;
-          let suffix = 1;
-          
-          // Try appending -1, -2, -3, etc. until we find a unique SKU
-          do {
-            sku = `${baseSKU}-${suffix++}`;
-          } while (skuSet.has(sku));
-          
-          console.log(`SKU collision detected: ${baseSKU} → ${sku}`);
-        }
-        
-        // Convert customFields object to Map
-        const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
-          ? new Map(Object.entries(listingData.customFields))
-          : new Map();
+        console.log(`🔍 Processing SKU: ${sku}, inInactiveMap: ${inactiveMap.has(sku)}, inActiveSet: ${skuSet.has(sku)}`);
         
         // Check if SKU exists as inactive - reactivate instead of create
         const inactiveListing = inactiveMap.get(sku);
         
-        let listing;
-        let wasReactivated = false;
-        
         if (inactiveListing) {
+          // Found an inactive listing with this SKU - reactivate it
+          // Convert customFields object to Map
+          const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
+            ? new Map(Object.entries(listingData.customFields))
+            : new Map();
+          
           // Update existing inactive listing
           Object.assign(inactiveListing, {
             ...listingData,
@@ -771,40 +761,69 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           });
           
           await inactiveListing.save();
-          listing = inactiveListing;
-          wasReactivated = true;
           skuSet.add(sku);
           
           results.push({
             status: 'reactivated',
-            listing: listing.toObject(),
+            listing: inactiveListing.toObject(),
             asin: listingData._asinReference,
             sku
           });
           
           console.log(`✅ Reactivated: ${sku}`);
-        } else {
-          // Create new listing
-          listing = new TemplateListing({
-            ...listingData,
-            customLabel: sku,
-            customFields: customFieldsMap,
-            templateId,
-            sellerId,
-            status: 'active',
-            createdBy: req.user.userId
-          });
-          
-          await listing.save();
-          skuSet.add(sku);
-          
-          results.push({
-            status: 'created',
-            listing: listing.toObject(),
-            asin: listingData._asinReference,
-            sku
-          });
+          continue;
         }
+        
+        // Check for duplicate SKU in active listings (within this batch or existing)
+        if (skuSet.has(sku)) {
+          if (skipDuplicates) {
+            skippedCount++;
+            results.push({
+              status: 'skipped',
+              asin: listingData._asinReference,
+              sku,
+              error: 'Duplicate SKU (active listing exists)'
+            });
+            console.log(`⏭️ Skipped duplicate: ${sku}`);
+            continue;
+          } else {
+            // Make SKU unique by appending suffix
+            const baseSKU = sku;
+            let suffix = 1;
+            
+            do {
+              sku = `${baseSKU}-${suffix++}`;
+            } while (skuSet.has(sku) || inactiveMap.has(sku));
+            
+            console.log(`SKU collision detected: ${baseSKU} → ${sku}`);
+          }
+        }
+        
+        // Convert customFields object to Map
+        const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
+          ? new Map(Object.entries(listingData.customFields))
+          : new Map();
+        
+        // Create new listing
+        const listing = new TemplateListing({
+          ...listingData,
+          customLabel: sku,
+          customFields: customFieldsMap,
+          templateId,
+          sellerId,
+          status: 'active',
+          createdBy: req.user.userId
+        });
+        
+        await listing.save();
+        skuSet.add(sku);
+        
+        results.push({
+          status: 'created',
+          listing: listing.toObject(),
+          asin: listingData._asinReference,
+          sku
+        });
         
       } catch (error) {
         console.error('Error creating listing:', error);
