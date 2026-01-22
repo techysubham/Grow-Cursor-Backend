@@ -12,7 +12,7 @@ const router = express.Router();
 // Get all listings for a template
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, page = 1, limit = 50, batchFilter = 'active', batchId } = req.query;
+    const { templateId, sellerId, page = 1, limit = 50, batchFilter = 'active', batchId, status = 'active' } = req.query;
     
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
@@ -24,6 +24,11 @@ router.get('/', requireAuth, async (req, res) => {
     const filter = { templateId };
     if (sellerId) {
       filter.sellerId = sellerId;
+    }
+    
+    // Filter by status (default to 'active' to only show active listings)
+    if (status && status !== 'all') {
+      filter.status = status;
     }
     
     // Apply batch filtering
@@ -223,13 +228,56 @@ router.post('/', requireAuth, async (req, res) => {
       listingData.customFields = new Map(Object.entries(listingData.customFields));
     }
     
-    const listing = new TemplateListing({
-      ...listingData,
-      status: 'active',
-      createdBy: req.user.userId
+    // Check if SKU exists as active (block duplicate)
+    const activeExists = await TemplateListing.findOne({
+      templateId: listingData.templateId,
+      sellerId: listingData.sellerId,
+      customLabel: listingData.customLabel,
+      status: 'active'
     });
     
-    await listing.save();
+    if (activeExists) {
+      return res.status(409).json({ 
+        error: 'An active listing with this SKU already exists' 
+      });
+    }
+    
+    // Check if SKU exists as inactive (reactivate instead of creating new)
+    const inactiveExists = await TemplateListing.findOne({
+      templateId: listingData.templateId,
+      sellerId: listingData.sellerId,
+      customLabel: listingData.customLabel,
+      status: 'inactive'
+    });
+    
+    let listing;
+    let wasReactivated = false;
+    
+    if (inactiveExists) {
+      // Reactivate existing inactive listing and update with new data
+      Object.assign(inactiveExists, {
+        ...listingData,
+        customFields: listingData.customFields,
+        status: 'active',
+        updatedAt: Date.now()
+      });
+      
+      await inactiveExists.save();
+      listing = inactiveExists;
+      wasReactivated = true;
+      
+      console.log(`✅ Reactivated inactive listing: ${listingData.customLabel}`);
+    } else {
+      // Create new listing
+      listing = new TemplateListing({
+        ...listingData,
+        status: 'active',
+        createdBy: req.user.userId
+      });
+      
+      await listing.save();
+    }
+    
     await listing.populate([
       { path: 'createdBy', select: 'name email' },
       { 
@@ -241,7 +289,10 @@ router.post('/', requireAuth, async (req, res) => {
       }
     ]);
     
-    res.status(201).json(listing);
+    res.status(201).json({
+      listing,
+      wasReactivated
+    });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ error: 'A listing with this SKU already exists in this template' });
@@ -430,11 +481,12 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
     
     console.log(`Processing ${cleanedAsins.length} ASINs in batch`);
     
-    // Check for existing listings with these ASINs (filter by seller)
+    // Check for existing ACTIVE listings with these ASINs (filter by seller and status)
     const existingListings = await TemplateListing.find({
       templateId,
       sellerId,
-      _asinReference: { $in: cleanedAsins }
+      _asinReference: { $in: cleanedAsins },
+      status: 'active'
     }).select('_asinReference _id');
     
     const existingAsinMap = new Map(
@@ -598,14 +650,29 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
     const errors = [];
     let skippedCount = 0;
     
-    // Get existing SKUs for this seller to avoid duplicates
-    const existingSKUs = await TemplateListing.find({ 
+    // Get existing ACTIVE SKUs to avoid duplicates
+    const existingActiveSKUs = await TemplateListing.find({ 
       templateId,
-      sellerId
+      sellerId,
+      status: 'active'
     }).distinct('customLabel');
     
-    const skuSet = new Set(existingSKUs);
+    // Get existing INACTIVE listings for potential reactivation
+    const inactiveListings = await TemplateListing.find({
+      templateId,
+      sellerId,
+      status: 'inactive'
+    }).select('+_asinReference');
+    
+    const inactiveMap = new Map(
+      inactiveListings.map(l => [l.customLabel, l])
+    );
+    
+    const skuSet = new Set(existingActiveSKUs);
     let skuCounter = Date.now();
+    
+    console.log(`📊 Pre-check: ${existingActiveSKUs.length} active SKUs, ${inactiveListings.length} inactive listings`);
+    console.log(`📋 Inactive SKUs: ${Array.from(inactiveMap.keys()).join(', ')}`);
     
     // Process each listing
     for (const listingData of listings) {
@@ -670,17 +737,66 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           continue;
         }
         
-        // Check for duplicate SKU and make it unique by appending suffix
+        console.log(`🔍 Processing SKU: ${sku}, inInactiveMap: ${inactiveMap.has(sku)}, inActiveSet: ${skuSet.has(sku)}`);
+        
+        // Check if SKU exists as inactive - reactivate instead of create
+        const inactiveListing = inactiveMap.get(sku);
+        
+        if (inactiveListing) {
+          // Found an inactive listing with this SKU - reactivate it
+          // Convert customFields object to Map
+          const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
+            ? new Map(Object.entries(listingData.customFields))
+            : new Map();
+          
+          // Update existing inactive listing
+          Object.assign(inactiveListing, {
+            ...listingData,
+            customLabel: sku,
+            customFields: customFieldsMap,
+            templateId,
+            sellerId,
+            status: 'active',
+            updatedAt: Date.now()
+          });
+          
+          await inactiveListing.save();
+          skuSet.add(sku);
+          
+          results.push({
+            status: 'reactivated',
+            listing: inactiveListing.toObject(),
+            asin: listingData._asinReference,
+            sku
+          });
+          
+          console.log(`✅ Reactivated: ${sku}`);
+          continue;
+        }
+        
+        // Check for duplicate SKU in active listings (within this batch or existing)
         if (skuSet.has(sku)) {
-          const baseSKU = sku;
-          let suffix = 1;
-          
-          // Try appending -1, -2, -3, etc. until we find a unique SKU
-          do {
-            sku = `${baseSKU}-${suffix++}`;
-          } while (skuSet.has(sku));
-          
-          console.log(`SKU collision detected: ${baseSKU} → ${sku}`);
+          if (skipDuplicates) {
+            skippedCount++;
+            results.push({
+              status: 'skipped',
+              asin: listingData._asinReference,
+              sku,
+              error: 'Duplicate SKU (active listing exists)'
+            });
+            console.log(`⏭️ Skipped duplicate: ${sku}`);
+            continue;
+          } else {
+            // Make SKU unique by appending suffix
+            const baseSKU = sku;
+            let suffix = 1;
+            
+            do {
+              sku = `${baseSKU}-${suffix++}`;
+            } while (skuSet.has(sku) || inactiveMap.has(sku));
+            
+            console.log(`SKU collision detected: ${baseSKU} → ${sku}`);
+          }
         }
         
         // Convert customFields object to Map
@@ -688,7 +804,7 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           ? new Map(Object.entries(listingData.customFields))
           : new Map();
         
-        // Create listing with sellerId
+        // Create new listing
         const listing = new TemplateListing({
           ...listingData,
           customLabel: sku,
@@ -736,14 +852,16 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
     }
     
     const created = results.filter(r => r.status === 'created').length;
+    const reactivated = results.filter(r => r.status === 'reactivated').length;
     const failed = results.filter(r => r.status === 'failed').length;
     
-    console.log(`Bulk create completed: ${created} created, ${failed} failed, ${skippedCount} skipped`);
+    console.log(`Bulk create completed: ${created} created, ${reactivated} reactivated, ${failed} failed, ${skippedCount} skipped`);
     
     res.json({
       success: true,
       total: listings.length,
       created,
+      reactivated,
       failed,
       skipped: skippedCount,
       results,
@@ -1471,6 +1589,175 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
     
   } catch (error) {
     console.error('Error re-downloading batch:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Search for inactive listings by SKU
+router.post('/search-inactive-skus', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, skus } = req.body;
+    
+    if (!templateId) {
+      return res.status(400).json({ error: 'Template ID is required' });
+    }
+    
+    if (!sellerId) {
+      return res.status(400).json({ error: 'Seller ID is required' });
+    }
+    
+    if (!skus || !Array.isArray(skus) || skus.length === 0) {
+      return res.status(400).json({ error: 'SKUs array is required' });
+    }
+    
+    // Find inactive listings
+    const inactiveListings = await TemplateListing.find({
+      templateId,
+      sellerId,
+      customLabel: { $in: skus },
+      status: 'inactive'
+    }).select('+_asinReference');
+    
+    // Find already active listings
+    const activeListings = await TemplateListing.find({
+      templateId,
+      sellerId,
+      customLabel: { $in: skus },
+      status: 'active'
+    }).select('customLabel');
+    
+    const foundSKUs = new Set(inactiveListings.map(l => l.customLabel));
+    const activeSKUs = activeListings.map(l => l.customLabel);
+    const notFoundSKUs = skus.filter(sku => !foundSKUs.has(sku) && !activeSKUs.includes(sku));
+    
+    console.log(`🔍 Search inactive SKUs: ${inactiveListings.length} found, ${activeSKUs.length} already active, ${notFoundSKUs.length} not found`);
+    
+    res.json({
+      found: inactiveListings,
+      notFound: notFoundSKUs,
+      alreadyActive: activeSKUs
+    });
+  } catch (error) {
+    console.error('Error searching inactive SKUs:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Bulk reactivate inactive listings
+router.post('/bulk-reactivate', requireAuth, async (req, res) => {
+  try {
+    const { listingIds } = req.body;
+    
+    if (!listingIds || !Array.isArray(listingIds) || listingIds.length === 0) {
+      return res.status(400).json({ error: 'listingIds array is required' });
+    }
+    
+    // Update status to active
+    const result = await TemplateListing.updateMany(
+      {
+        _id: { $in: listingIds },
+        status: 'inactive'
+      },
+      {
+        $set: {
+          status: 'active',
+          updatedAt: Date.now()
+        }
+      }
+    );
+    
+    // Get updated listings for response
+    const reactivatedListings = await TemplateListing.find({
+      _id: { $in: listingIds },
+      status: 'active'
+    }).select('customLabel title _asinReference');
+    
+    console.log(`✅ Reactivated ${result.modifiedCount} listings`);
+    
+    res.json({
+      success: true,
+      reactivated: result.modifiedCount,
+      details: reactivatedListings
+    });
+  } catch (error) {
+    console.error('Error reactivating listings:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Bulk deactivate active listings
+router.post('/bulk-deactivate', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, skus } = req.body;
+    
+    if (!templateId) {
+      return res.status(400).json({ error: 'Template ID is required' });
+    }
+    
+    if (!sellerId) {
+      return res.status(400).json({ error: 'Seller ID is required' });
+    }
+    
+    if (!skus || !Array.isArray(skus) || skus.length === 0) {
+      return res.status(400).json({ error: 'SKUs array is required' });
+    }
+    
+    // Find active listings
+    const activeListings = await TemplateListing.find({
+      templateId,
+      sellerId,
+      customLabel: { $in: skus },
+      status: 'active'
+    }).select('customLabel title _asinReference');
+    
+    // Find already inactive
+    const inactiveListings = await TemplateListing.find({
+      templateId,
+      sellerId,
+      customLabel: { $in: skus },
+      status: 'inactive'
+    }).select('customLabel');
+    
+    const foundSKUs = new Set(activeListings.map(l => l.customLabel));
+    const alreadyInactiveSKUs = inactiveListings.map(l => l.customLabel);
+    const notFoundSKUs = skus.filter(sku => 
+      !foundSKUs.has(sku) && !alreadyInactiveSKUs.includes(sku)
+    );
+    
+    // Deactivate
+    const result = await TemplateListing.updateMany(
+      {
+        templateId,
+        sellerId,
+        customLabel: { $in: Array.from(foundSKUs) },
+        status: 'active'
+      },
+      {
+        $set: {
+          status: 'inactive',
+          updatedAt: Date.now()
+        }
+      }
+    );
+    
+    console.log(`⏸️ Deactivated ${result.modifiedCount} listings`);
+    
+    res.json({
+      success: true,
+      summary: {
+        total: skus.length,
+        deactivated: result.modifiedCount,
+        notFound: notFoundSKUs.length,
+        alreadyInactive: alreadyInactiveSKUs.length
+      },
+      details: {
+        deactivated: activeListings,
+        notFound: notFoundSKUs,
+        alreadyInactive: alreadyInactiveSKUs
+      }
+    });
+  } catch (error) {
+    console.error('Error deactivating listings:', error);
     res.status(500).json({ error: error.message });
   }
 });
