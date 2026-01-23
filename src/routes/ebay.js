@@ -3204,6 +3204,7 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
                 // Define fields that should trigger notifications
                 const notifiableFields = [
                   'cancelState',
+                  'cancelStatus',
                   'orderPaymentStatus',
                   'refunds',
                   'orderFulfillmentStatus',
@@ -3477,11 +3478,21 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
     shipping: parseFloat(ebayOrder.pricingSummary?.deliveryCost?.value || 0),
     transactionFees: parseFloat(ebayOrder.totalMarketplaceFee?.value || 0),
     adFee: parseFloat(lineItem.appliedPromotions?.[0]?.discountAmount?.value || 0),
-    cancelState: ebayOrder.cancelStatus?.cancelState || 'NONE_REQUESTED',
     refunds: ebayOrder.paymentSummary?.refunds || [],
     trackingNumber,
     purchaseMarketplaceId
   };
+
+  // Enhanced cancel state extraction with multiple fallbacks
+  let cancelState = 'NONE_REQUESTED';
+  if (ebayOrder.cancelStatus) {
+    // Try different possible property names from eBay API
+    cancelState = ebayOrder.cancelStatus.cancelState || 
+                  ebayOrder.cancelStatus.state ||
+                  ebayOrder.cancelStatus.status ||
+                  (ebayOrder.cancelStatus.cancelled ? 'CANCELED' : 'NONE_REQUESTED');
+  }
+  orderData.cancelState = cancelState;
 
   // Calculate total refunds
   let refundTotal = 0;

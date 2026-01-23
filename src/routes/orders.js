@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import mongoose from 'mongoose';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import Order from '../models/Order.js';
 import Seller from '../models/Seller.js';
@@ -131,7 +132,10 @@ router.get('/daily-statistics', requireAuth, requireRole('fulfillmentadmin', 'su
 // Get worksheet statistics for cancellations, returns, INR/disputes, and inquiries
 router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, sellerId } = req.query;
+
+    // Build seller filter if sellerId is provided
+    const sellerMatch = sellerId ? { seller: new mongoose.Types.ObjectId(sellerId) } : {};
 
     // Use UTC boundaries for filtering (matches frontend local date selection)
     const buildDateRangeMatch = (field) => {
@@ -173,6 +177,7 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       { $addFields: { worksheetDate: { $ifNull: ['$dateSold', '$creationDate'] } } },
       {
         $match: {
+          ...sellerMatch,
           cancelState: { $in: cancellationStates },
           ...buildDateRangeMatch('worksheetDate')
         }
@@ -194,7 +199,7 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
     ];
 
     const returnsPipeline = [
-      { $match: { ...buildDateRangeMatch('creationDate') } },
+      { $match: { ...sellerMatch, ...buildDateRangeMatch('creationDate') } },
       {
         $project: {
           worksheetStatus: { $ifNull: ['$worksheetStatus', 'open'] },
@@ -212,7 +217,7 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
     ];
 
     const casesPipeline = [
-      { $match: { ...buildDateRangeMatch('creationDate') } },
+      { $match: { ...sellerMatch, ...buildDateRangeMatch('creationDate') } },
       {
         $project: {
           status: '$status',
@@ -231,7 +236,7 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
 
     const disputesPipeline = [
       { $addFields: { worksheetDate: { $ifNull: ['$openDate', '$createdAt'] } } },
-      { $match: { ...buildDateRangeMatch('worksheetDate') } },
+      { $match: { ...sellerMatch, ...buildDateRangeMatch('worksheetDate') } },
       {
         $project: {
           status: '$paymentDisputeStatus',
@@ -253,6 +258,7 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
     const inquiriesPipeline = [
       {
         $match: {
+          ...sellerMatch,
           sender: 'BUYER',
           messageType: { $ne: 'ORDER' },
           $or: [{ orderId: null }, { orderId: { $exists: false } }, { orderId: '' }],
