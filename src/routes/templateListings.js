@@ -174,6 +174,211 @@ router.get('/database-stats', requireAuth, async (req, res) => {
   }
 });
 
+// Get statistics for template listings (today, week, month, total)
+router.get('/stats', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId } = req.query;
+    
+    if (!templateId) {
+      return res.status(400).json({ error: 'Template ID is required' });
+    }
+    
+    const filter = { templateId };
+    if (sellerId) {
+      filter.sellerId = sellerId;
+    }
+    
+    // Calculate date ranges
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    
+    const weekStart = new Date(now);
+    weekStart.setDate(weekStart.getDate() - 7);
+    
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    
+    // Run queries in parallel
+    const [todayCount, weekCount, monthCount, totalCount] = await Promise.all([
+      TemplateListing.countDocuments({
+        ...filter,
+        status: 'active',
+        createdAt: { $gte: todayStart, $lte: todayEnd }
+      }),
+      TemplateListing.countDocuments({
+        ...filter,
+        status: 'active',
+        createdAt: { $gte: weekStart }
+      }),
+      TemplateListing.countDocuments({
+        ...filter,
+        status: 'active',
+        createdAt: { $gte: monthStart }
+      }),
+      TemplateListing.countDocuments({
+        ...filter,
+        status: 'active'
+      })
+    ]);
+    
+    res.json({
+      today: todayCount,
+      thisWeek: weekCount,
+      thisMonth: monthCount,
+      total: totalCount
+    });
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get detailed analytics for template listings
+router.get('/analytics', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, startDate, endDate, userId, page = 1, limit = 100 } = req.query;
+    
+    if (!templateId) {
+      return res.status(400).json({ error: 'Template ID is required' });
+    }
+    
+    const filter = { templateId };
+    if (sellerId) {
+      filter.sellerId = sellerId;
+    }
+    
+    // Apply date range filter
+    if (startDate || endDate) {
+      filter.createdAt = {};
+      if (startDate) {
+        filter.createdAt.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        filter.createdAt.$lte = new Date(endDate);
+      }
+    }
+    
+    // Apply user filter
+    if (userId && userId !== 'all') {
+      filter.createdBy = userId;
+    }
+    
+    // Get paginated listings
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const [listings, total] = await Promise.all([
+      TemplateListing.find(filter)
+        .populate('createdBy', 'username email role')
+        .select('customLabel title _asinReference createdBy createdAt status')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      TemplateListing.countDocuments(filter)
+    ]);
+    
+    // Get daily breakdown using aggregation
+    const dailyBreakdown = await TemplateListing.aggregate([
+      {
+        $match: filter
+      },
+      {
+        $group: {
+          _id: {
+            date: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            userId: "$createdBy"
+          },
+          count: { $sum: 1 }
+        }
+      },
+      {
+        $group: {
+          _id: "$_id.date",
+          total: { $sum: "$count" },
+          users: {
+            $push: {
+              userId: "$_id.userId",
+              count: "$count"
+            }
+          }
+        }
+      },
+      {
+        $sort: { _id: -1 }
+      },
+      {
+        $limit: 30 // Last 30 days
+      }
+    ]);
+    
+    // Populate user details in daily breakdown
+    const userIds = [...new Set(dailyBreakdown.flatMap(d => d.users.map(u => u.userId)))].filter(Boolean);
+    const users = await TemplateListing.model('User').find({ _id: { $in: userIds } }).select('username email role');
+    const userMap = new Map(users.map(u => [u._id.toString(), u]));
+    
+    // Enrich daily breakdown with user details
+    const enrichedDailyBreakdown = dailyBreakdown.map(day => ({
+      date: day._id,
+      total: day.total,
+      users: day.users
+        .filter(u => u.userId)
+        .map(u => ({
+          userId: u.userId,
+          username: userMap.get(u.userId.toString())?.username || 'Unknown',
+          count: u.count
+        }))
+    }));
+    
+    // Get user breakdown
+    const userBreakdown = await TemplateListing.aggregate([
+      {
+        $match: filter
+      },
+      {
+        $group: {
+          _id: "$createdBy",
+          count: { $sum: 1 }
+        }
+      },
+      {
+        $sort: { count: -1 }
+      }
+    ]);
+    
+    // Populate user details in user breakdown
+    const enrichedUserBreakdown = await Promise.all(
+      userBreakdown
+        .filter(u => u._id)
+        .map(async (u) => {
+          const user = userMap.get(u._id.toString());
+          return {
+            userId: u._id,
+            username: user?.username || 'Unknown',
+            role: user?.role || 'N/A',
+            count: u.count
+          };
+        })
+    );
+    
+    res.json({
+      listings,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit))
+      },
+      dailyBreakdown: enrichedDailyBreakdown,
+      userBreakdown: enrichedUserBreakdown,
+      summary: {
+        totalInPeriod: total,
+        uniqueUsers: enrichedUserBreakdown.length
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching analytics:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get single listing by ID
 router.get('/:id', requireAuth, async (req, res) => {
   try {
