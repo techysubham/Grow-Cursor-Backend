@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import EmployeeProfile from '../models/EmployeeProfile.js';
+import User from '../models/User.js';
 import multer from 'multer';
 
 const router = Router();
@@ -438,6 +439,42 @@ router.get('/:id/file/pan', requireAuth, async (req, res) => {
     res.send(profile.panDocument.data);
   } catch (err) {
     res.status(500).json({ error: 'Failed to retrieve PAN document', details: err.message });
+  }
+});
+
+// DELETE /api/employee-profiles/:id - Hard delete employee profile and user account (admin only)
+router.delete('/:id', requireAuth, async (req, res) => {
+  try {
+    if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const profile = await EmployeeProfile.findById(req.params.id).populate('user');
+
+    if (!profile) {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
+
+    // Store user info before deletion
+    const userId = profile.user?._id;
+    const username = profile.user?.username || 'Unknown';
+
+    // Delete the employee profile
+    await EmployeeProfile.findByIdAndDelete(req.params.id);
+
+    // Delete the associated user account if it exists
+    if (userId) {
+      await User.findByIdAndDelete(userId);
+    }
+
+    res.json({
+      message: 'Employee and user account permanently deleted',
+      deletedProfile: req.params.id,
+      deletedUser: userId,
+      username
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete employee', details: err.message });
   }
 });
 
