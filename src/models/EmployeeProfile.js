@@ -20,7 +20,7 @@ const EmployeeProfileSchema = new mongoose.Schema(
 
     // Task Management Fields
     myTaskList: { type: String, trim: true },
-    primaryTask: { type: String, trim: true },
+    primaryTask: { type: String, trim: true, default: 'Number of listings per day : ?' },
     secondaryTask: { type: String, trim: true },
 
     // NEW: BLOB storage for files (images and PDFs)
