@@ -127,6 +127,9 @@ app.use('/api/account-health', accountHealthRoutes);
 
 const port = process.env.PORT || 5000;
 
+// Auto-message start date: Jan 27, 2026
+const AUTO_MESSAGE_START_DATE = new Date('2026-01-27T00:00:00Z');
+
 // Auto-message cron job function
 async function runAutoMessageJob() {
   console.log('[AutoMessage Cron] Starting hourly auto-message job...');
@@ -135,7 +138,10 @@ async function runAutoMessageJob() {
 
     // Find all eligible orders
     const orders = await Order.find({
-      creationDate: { $lte: twentyFourHoursAgo },
+      creationDate: { 
+        $lte: twentyFourHoursAgo,
+        $gte: AUTO_MESSAGE_START_DATE 
+      },
       autoMessageSent: { $ne: true },
       autoMessageDisabled: { $ne: true },
       orderFulfillmentStatus: { $ne: 'FULFILLED' }, // Skip if already shipped

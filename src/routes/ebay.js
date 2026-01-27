@@ -6853,6 +6853,9 @@ Also, we are actively monitoring your order to ensure it reaches you smoothly an
 
 We truly appreciate your patience and understanding.`;
 
+// Start date for auto-message feature
+const AUTO_MESSAGE_START_DATE = new Date('2026-01-27T00:00:00Z');
+
 // Toggle auto-message for specific order
 router.patch('/orders/:orderId/auto-message-toggle', requireAuth, async (req, res) => {
   try {
@@ -6884,7 +6887,10 @@ router.get('/orders/auto-message-stats', requireAuth, async (req, res) => {
     // Count orders eligible for auto-message (24+ hours old, not sent, not disabled, not cancelled)
     // Count orders eligible for auto-message (24+ hours old, not sent, not disabled, not cancelled, AND NOT FULFILLED)
     const pending = await Order.countDocuments({
-      creationDate: { $lte: twentyFourHoursAgo },
+      creationDate: { 
+        $lte: twentyFourHoursAgo,
+        $gte: AUTO_MESSAGE_START_DATE 
+      },
       autoMessageSent: { $ne: true },
       autoMessageDisabled: { $ne: true },
       orderFulfillmentStatus: { $ne: 'FULFILLED' }, // Skip if already shipped
@@ -6974,7 +6980,10 @@ router.post('/orders/send-auto-messages', requireAuth, requireRole('fulfillmenta
 
     // Find all eligible orders (not sent, not disabled, not cancelled, NOT FULFILLED)
     const orders = await Order.find({
-      creationDate: { $lte: twentyFourHoursAgo },
+      creationDate: { 
+        $lte: twentyFourHoursAgo,
+        $gte: AUTO_MESSAGE_START_DATE 
+      },
       autoMessageSent: { $ne: true },
       autoMessageDisabled: { $ne: true },
       orderFulfillmentStatus: { $ne: 'FULFILLED' }, // Skip if already shipped
