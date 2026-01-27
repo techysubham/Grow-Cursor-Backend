@@ -6,6 +6,7 @@ const EmployeeProfileSchema = new mongoose.Schema(
     name: { type: String, trim: true },
     phoneNumber: { type: String, trim: true },
     dateOfBirth: { type: Date },
+    bloodGroup: { type: String, enum: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'], trim: true },
     dateOfJoining: { type: Date },
     gender: { type: String, enum: ['male', 'female', 'other', 'prefer_not_to_say'], trim: true },
     address: { type: String, trim: true },

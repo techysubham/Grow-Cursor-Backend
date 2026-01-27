@@ -29,6 +29,7 @@ function pickProfile(body) {
     'name',
     'phoneNumber',
     'dateOfBirth',
+    'bloodGroup',
     'dateOfJoining',
     'gender',
     'address',
