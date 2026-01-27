@@ -78,6 +78,11 @@ const OrderSchema = new mongoose.Schema(
       default: 'None'
     },
     resolvedFrom: String, // Track which page it was resolved from: 'Return', 'Replace', or 'INR'
+    sellerFault: { 
+      type: String, 
+      enum: ['Yes', 'No'],
+      default: 'No'
+    }, // For Account Health Report - track if seller is at fault for SNAD
     notes: String, // Notes field for internal use
     fulfillmentNotes: String,
     amazonAccount: String,
