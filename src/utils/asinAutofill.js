@@ -1,5 +1,6 @@
 import { generateWithGemini, replacePlaceholders } from './gemini.js';
 import { calculateStartPrice } from './pricingCalculator.js';
+import { processImagePlaceholders } from './imageReplacer.js';
 
 /**
  * Fetch Amazon product data by ASIN
@@ -109,6 +110,11 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
         // Apply transformations
         value = applyTransform(value, config.transform);
         
+        // Apply image placeholder replacement for description field
+        if (config.ebayField === 'description' && typeof value === 'string') {
+          value = processImagePlaceholders(value, amazonData.images);
+        }
+        
         targetObject[config.ebayField] = value;
         
       } else if (config.source === 'ai') {
@@ -118,11 +124,19 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
           placeholderData
         );
         
-        let generatedValue = await generateWithGemini(processedPrompt);
+        // Use higher token limit for description field to avoid truncation
+        const maxTokens = config.ebayField === 'description' ? 1000 : 150;
+        
+        let generatedValue = await generateWithGemini(processedPrompt, { maxTokens });
         
         // Auto-truncate titles to 80 chars (only for core title field)
         if (config.fieldType === 'core' && config.ebayField === 'title' && generatedValue.length > 80) {
           generatedValue = generatedValue.substring(0, 80);
+        }
+        
+        // Apply image placeholder replacement for description field and description-like custom fields
+        if ((config.ebayField === 'description' || config.ebayField.toLowerCase().includes('description')) && typeof generatedValue === 'string') {
+          generatedValue = processImagePlaceholders(generatedValue, amazonData.images);
         }
         
         targetObject[config.ebayField] = generatedValue;

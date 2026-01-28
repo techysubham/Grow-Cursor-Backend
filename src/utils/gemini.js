@@ -12,10 +12,14 @@ function getOpenAIClient() {
 /**
  * Generate content using OpenAI API with GPT-4o-mini
  * @param {string} prompt - The prompt to send to OpenAI
+ * @param {Object} options - Generation options
+ * @param {number} options.maxTokens - Maximum tokens to generate (default: 150)
  * @returns {Promise<string>} - Generated text
  */
-export async function generateWithGemini(prompt) {
+export async function generateWithGemini(prompt, options = {}) {
   try {
+    const { maxTokens = 150 } = options;
+    
     const openai = getOpenAIClient();
     const completion = await openai.chat.completions.create({
       messages: [
@@ -26,7 +30,7 @@ export async function generateWithGemini(prompt) {
       ],
       model: 'gpt-4o-mini',
       temperature: 0.3,
-      max_tokens: 150,
+      max_tokens: maxTokens,
     });
     
     return completion.choices[0]?.message?.content?.trim() || '';
