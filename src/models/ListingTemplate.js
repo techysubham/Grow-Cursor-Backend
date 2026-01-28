@@ -195,6 +195,10 @@ const listingTemplateSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.Mixed,
     default: {}
   },
+  customActionField: {
+    type: String,
+    default: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)'
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

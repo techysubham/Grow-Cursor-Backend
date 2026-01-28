@@ -1386,9 +1386,13 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     
     console.log('✅ Updated listings:', updateResult.modifiedCount);
     
+    // Get custom Action field from template
+    const actionField = template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
+    console.log('📝 Using Action field:', actionField);
+    
     // Build core headers (38 columns)
     const coreHeaders = [
-      '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
+      actionField,
       'Custom label (SKU)',
       'Category ID',
       'Category name',
@@ -1646,9 +1650,13 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
     
     const batchNumber = listings[0].downloadBatchNumber;
     
+    // Get custom Action field from template
+    const actionField = template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
+    console.log('📝 Using Action field:', actionField);
+    
     // Build core headers (38 columns)
     const coreHeaders = [
-      '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
+      actionField,
       'Custom label (SKU)',
       'Category ID',
       'Category name',

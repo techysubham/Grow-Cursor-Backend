@@ -4,6 +4,60 @@ import ListingTemplate from '../models/ListingTemplate.js';
 
 const router = express.Router();
 
+// Get custom Action field for template
+router.get('/action-field/:templateId', requireAuth, async (req, res) => {
+  try {
+    const { templateId } = req.params;
+    
+    const template = await ListingTemplate.findById(templateId);
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    
+    res.json({ 
+      actionField: template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
+      source: 'template'
+    });
+  } catch (error) {
+    console.error('Error fetching action field:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update custom Action field for template
+router.put('/action-field/:templateId', requireAuth, async (req, res) => {
+  try {
+    const { templateId } = req.params;
+    const { actionField } = req.body;
+    
+    // Basic validation - just check it's not empty
+    if (!actionField || !actionField.trim()) {
+      return res.status(400).json({ error: 'Action field cannot be empty' });
+    }
+    
+    const template = await ListingTemplate.findByIdAndUpdate(
+      templateId,
+      { 
+        customActionField: actionField.trim(),
+        updatedAt: Date.now()
+      },
+      { new: true }
+    );
+    
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    
+    res.json({ 
+      message: 'Action field updated successfully',
+      actionField: template.customActionField
+    });
+  } catch (error) {
+    console.error('Error updating action field:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get all templates
 router.get('/', requireAuth, async (req, res) => {
   try {
