@@ -1,6 +1,7 @@
 import express from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import ListingTemplate from '../models/ListingTemplate.js';
+import TemplateOverride from '../models/TemplateOverride.js';
 
 const router = express.Router();
 
@@ -8,7 +9,24 @@ const router = express.Router();
 router.get('/action-field/:templateId', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params;
+    const { sellerId } = req.query;
     
+    // Check for seller override first
+    if (sellerId) {
+      const override = await TemplateOverride.findOne({
+        baseTemplateId: templateId,
+        sellerId: sellerId
+      });
+      
+      if (override?.overrides.customActionField && override.customActionField) {
+        return res.json({
+          actionField: override.customActionField,
+          source: 'seller-override'
+        });
+      }
+    }
+    
+    // Fallback to base template
     const template = await ListingTemplate.findById(templateId);
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
@@ -28,29 +46,50 @@ router.get('/action-field/:templateId', requireAuth, async (req, res) => {
 router.put('/action-field/:templateId', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params;
-    const { actionField } = req.body;
+    const { actionField, sellerId } = req.body;
     
     // Basic validation - just check it's not empty
     if (!actionField || !actionField.trim()) {
       return res.status(400).json({ error: 'Action field cannot be empty' });
     }
     
-    const template = await ListingTemplate.findByIdAndUpdate(
-      templateId,
-      { 
-        customActionField: actionField.trim(),
-        updatedAt: Date.now()
-      },
-      { new: true }
-    );
-    
-    if (!template) {
-      return res.status(404).json({ error: 'Template not found' });
+    // If no sellerId provided, update base template (admin action)
+    if (!sellerId) {
+      const template = await ListingTemplate.findByIdAndUpdate(
+        templateId,
+        { 
+          customActionField: actionField.trim(),
+          updatedAt: Date.now()
+        },
+        { new: true }
+      );
+      
+      if (!template) {
+        return res.status(404).json({ error: 'Template not found' });
+      }
+      
+      return res.json({ 
+        actionField: template.customActionField,
+        source: 'template'
+      });
     }
     
-    res.json({ 
-      message: 'Action field updated successfully',
-      actionField: template.customActionField
+    // Create/update seller override
+    const override = await TemplateOverride.findOneAndUpdate(
+      { baseTemplateId: templateId, sellerId: sellerId },
+      {
+        $set: {
+          'overrides.customActionField': true,
+          customActionField: actionField.trim(),
+          updatedAt: Date.now()
+        }
+      },
+      { new: true, upsert: true }
+    );
+    
+    res.json({
+      actionField: override.customActionField,
+      source: 'seller-override'
     });
   } catch (error) {
     console.error('Error updating action field:', error);

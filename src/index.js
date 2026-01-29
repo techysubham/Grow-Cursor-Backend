@@ -48,6 +48,7 @@ import productUmbrellaRoutes from './routes/productUmbrellas.js';
 import customColumnsRoutes from './routes/customColumns.js';
 import listingTemplateRoutes from './routes/listingTemplates.js';
 import templateListingsRoutes from './routes/templateListings.js';
+import templateOverridesRoutes from './routes/templateOverrides.js';
 import sellerPricingConfigRoutes from './routes/sellerPricingConfig.js';
 import accountHealthRoutes from './routes/accountHealth.js';
 
@@ -121,6 +122,7 @@ app.use('/api/product-umbrellas', productUmbrellaRoutes);
 app.use('/api/custom-columns', customColumnsRoutes);
 app.use('/api/listing-templates', listingTemplateRoutes);
 app.use('/api/template-listings', templateListingsRoutes);
+app.use('/api/template-overrides', templateOverridesRoutes);
 app.use('/api/seller-pricing-config', sellerPricingConfigRoutes);
 app.use('/api/account-health', accountHealthRoutes);
 

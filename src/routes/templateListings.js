@@ -6,6 +6,7 @@ import Seller from '../models/Seller.js';
 import SellerPricingConfig from '../models/SellerPricingConfig.js';
 import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
 import { generateSKUFromASIN } from '../utils/skuGenerator.js';
+import { getEffectiveTemplate } from '../utils/templateMerger.js';
 
 const router = express.Router();
 
@@ -568,8 +569,8 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
       });
     }
     
-    // 1. Fetch template with automation config
-    const template = await ListingTemplate.findById(templateId);
+    // 1. Fetch effective template with automation config (includes seller overrides)
+    const template = await getEffectiveTemplate(templateId, sellerId);
     
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
@@ -656,8 +657,8 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
       });
     }
     
-    // Fetch template with automation config
-    const template = await ListingTemplate.findById(templateId);
+    // Fetch effective template with automation config (includes seller overrides)
+    const template = await getEffectiveTemplate(templateId, sellerId);
     
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
@@ -845,8 +846,8 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
       skipDuplicates = true
     } = options;
     
-    // Fetch template to get next SKU counter
-    const template = await ListingTemplate.findById(templateId);
+    // Fetch effective template to get next SKU counter (includes seller overrides)
+    const template = await getEffectiveTemplate(templateId, sellerId);
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
@@ -1101,9 +1102,9 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
     
     console.log('📦 Bulk import request:', { templateId, sellerId, asinCount: asins.length });
     
-    // Validate template and seller exist
+    // Validate template (with seller overrides) and seller exist
     const [template, seller] = await Promise.all([
-      ListingTemplate.findById(templateId),
+      getEffectiveTemplate(templateId, sellerId),
       Seller.findById(sellerId)
     ]);
     
@@ -1339,9 +1340,9 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
       filter.sellerId = sellerId;
     }
     
-    // Fetch template, seller, and filtered listings
+    // Fetch effective template (includes seller overrides), seller, and filtered listings
     const [template, seller, listings] = await Promise.all([
-      ListingTemplate.findById(templateId),
+      getEffectiveTemplate(templateId, sellerId),
       sellerId ? Seller.findById(sellerId).populate('user', 'username email') : null,
       TemplateListing.find(filter).sort({ createdAt: -1 })
     ]);
@@ -1633,9 +1634,9 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
       filter.sellerId = sellerId;
     }
     
-    // Fetch template, seller, and batch listings
+    // Fetch effective template (includes seller overrides), seller, and batch listings
     const [template, seller, listings] = await Promise.all([
-      ListingTemplate.findById(templateId),
+      getEffectiveTemplate(templateId, sellerId),
       sellerId ? Seller.findById(sellerId).populate('user', 'username email') : null,
       TemplateListing.find(filter).sort({ createdAt: -1 })
     ]);
