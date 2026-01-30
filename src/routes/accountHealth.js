@@ -4,6 +4,8 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import Order from '../models/Order.js';
 import Case from '../models/Case.js';
 import Return from '../models/Return.js';
+import MarketMetric from '../models/MarketMetric.js';
+import Seller from '../models/Seller.js';
 
 const router = Router();
 
@@ -169,16 +171,16 @@ router.get('/details', requireAuth, requireRole('fulfillmentadmin', 'superadmin'
 
 /**
  * GET /account-health/evaluation-windows
- * Returns evaluation window metrics (3-month rolling windows, calculated weekly)
- * Each window covers a 3-month period, and we generate a new window every week
- * BBE Rate = (SNAD count / Total Sales in that 3-month period) × 100
+ * Returns evaluation window metrics (84-day rolling windows, calculated weekly)
+ * Each window covers an 84-day period, and we generate a new window every week
+ * BBE Rate = (SNAD count / Total Sales in that 84-day period) × 100
  */
 router.get('/evaluation-windows', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
   try {
     const { sellerId } = req.query;
     const sellerMatch = sellerId ? { seller: new mongoose.Types.ObjectId(sellerId) } : {};
 
-    // We'll generate weekly windows, each spanning 3 months
+    // We'll generate weekly windows, each spanning 84 days
     const windows = [];
     const today = new Date();
     
@@ -191,45 +193,77 @@ router.get('/evaluation-windows', requireAuth, requireRole('fulfillmentadmin', '
     currentWindowEnd.setHours(23, 59, 59, 999);
 
     // Generate windows going backwards week by week
-    // We'll generate about 12 windows (3 months of weekly windows)
+    // We'll generate about 12 windows (84 days of weekly windows)
     const maxWindows = 12;
+
+    // Fetch market metrics history
+    const marketMetrics = await MarketMetric.find().sort({ effectiveDate: 1 }).lean();
     
     for (let i = 0; i < maxWindows; i++) {
-      // For each window, calculate the start date (3 months before the end)
-      const windowStart = new Date(currentWindowEnd);
-      windowStart.setMonth(windowStart.getMonth() - 3);
+      // Calculate data window end date (1 week offset requested)
+      // Original logic was currentWindowEnd - 7 days buffer.
+      // New request: "1st row components to go and instead the 2nd row components to come up to the first"
+      // This means for a window ending on date X, we want the data that would normally belong to the window ending on X-7.
+      // So calculation end = (X - 7) - 7 = X - 14 days.
+      
+      const dataWindowEnd = new Date(currentWindowEnd);
+      dataWindowEnd.setDate(dataWindowEnd.getDate() - 7); // Shift to previous window's end date
+      
+      // Now apply the standard 7-day buffer calculation on that previous window
+      const calculationEnd = new Date(dataWindowEnd);
+      calculationEnd.setDate(calculationEnd.getDate() - 7);
+      calculationEnd.setHours(23, 59, 59, 999);
+
+      // Calculate the start date (84 days before the calculation end)
+      const windowStart = new Date(calculationEnd);
+      windowStart.setDate(windowStart.getDate() - 84);
       windowStart.setHours(0, 0, 0, 0);
 
-      // Get total sales in this 3-month window
+      // Get total sales in this 84-day window
       const totalSalesCount = await Order.countDocuments({
         ...sellerMatch,
-        dateSold: { $gte: windowStart, $lte: currentWindowEnd }
+        dateSold: { $gte: windowStart, $lte: calculationEnd }
       });
 
-      // Get SNAD cases in this 3-month window
+      // Get SNAD cases in this 84-day window
       const snadCount = await Case.countDocuments({
         ...sellerMatch,
         caseType: 'SNAD',
-        creationDate: { $gte: windowStart, $lte: currentWindowEnd }
+        creationDate: { $gte: windowStart, $lte: calculationEnd }
       });
 
-      // Get SNAD returns in this 3-month window
+      // Get SNAD returns in this 84-day window
       const snadReturnCount = await Return.countDocuments({
         ...sellerMatch,
         returnReason: { $in: SNAD_RETURN_REASONS },
-        creationDate: { $gte: windowStart, $lte: currentWindowEnd }
+        creationDate: { $gte: windowStart, $lte: calculationEnd }
       });
 
       const totalSnadCount = snadCount + snadReturnCount;
       const bbeRate = totalSalesCount > 0 ? (totalSnadCount / totalSalesCount) * 100 : 0;
 
+      // Calculate evaluation window start (1 week before end)
+      const evaluationWindowStart = new Date(currentWindowEnd);
+      evaluationWindowStart.setDate(evaluationWindowStart.getDate() - 7);
+      evaluationWindowStart.setHours(0, 0, 0, 0);
+
+      // Determine Market Avg for this window
+      // Find the latest metric that is effective on or before evaluationWindowEnd
+      let marketAvg = 1.1; // Default fallback
+      const applicableMetric = marketMetrics.findLast(m => new Date(m.effectiveDate) <= new Date(currentWindowEnd));
+      if (applicableMetric) {
+        marketAvg = applicableMetric.value;
+      }
+
       windows.push({
         windowStart: windowStart.toISOString(),
-        windowEnd: currentWindowEnd.toISOString(),
+        windowEnd: currentWindowEnd.toISOString(), // Kept as is for display date
+        evaluationWindowStart: evaluationWindowStart.toISOString(),
+        evaluationWindowEnd: currentWindowEnd.toISOString(),
         totalSales: totalSalesCount,
         snadCount: totalSnadCount,
         bbeRate: bbeRate.toFixed(2),
-        marketAvg: 1.1, // Benchmark - could be made configurable
+        marketAvg, 
         evaluationDate: currentWindowEnd.toISOString()
       });
 
@@ -243,6 +277,36 @@ router.get('/evaluation-windows', requireAuth, requireRole('fulfillmentadmin', '
   } catch (error) {
     console.error('Error fetching evaluation windows:', error);
     res.status(500).json({ error: 'Failed to fetch evaluation windows' });
+  }
+});
+
+/**
+ * POST /account-health/evaluation-windows/market-avg
+ * Update market average (creates a new historical record)
+ */
+router.post('/evaluation-windows/market-avg', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+  try {
+    const { value, effectiveDate } = req.body;
+    
+    if (!value || isNaN(value)) {
+      return res.status(400).json({ error: 'Valid value is required' });
+    }
+    if (!effectiveDate) {
+      return res.status(400).json({ error: 'Effective date is required' });
+    }
+
+    const metric = new MarketMetric({
+      value,
+      effectiveDate: new Date(effectiveDate),
+      createdBy: req.user._id
+    });
+
+    await metric.save();
+
+    res.json({ success: true, metric });
+  } catch (error) {
+    console.error('Error saving market average:', error);
+    res.status(500).json({ error: 'Failed to save market average' });
   }
 });
 
@@ -273,6 +337,128 @@ router.patch('/details/:orderId', requireAuth, requireRole('fulfillmentadmin', '
   } catch (error) {
     console.error('Error updating order seller fault:', error);
     res.status(500).json({ error: 'Failed to update order' });
+  }
+});
+
+/**
+ * GET /account-health/overview
+ * Returns overview data for all sellers across 4 weeks
+ * Week 1 & 2: Actual BBE rate (past data)
+ * Week 3 & 4: Additional sales needed to meet market avg (prediction)
+ */
+router.get('/overview', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+  try {
+    // Fetch all sellers with user data
+    const sellers = await Seller.find().populate('user', 'username email').lean();
+
+    // Get current market avg
+    const latestMarketMetric = await MarketMetric.findOne({ type: 'bbe_market_avg' }).sort({ effectiveDate: -1 }).lean();
+    const marketAvg = latestMarketMetric?.value || 1.1;
+
+    // Calculate window end dates for 4 weeks
+    const today = new Date();
+    let currentWindowEnd = new Date(today);
+    const dayOfWeek = currentWindowEnd.getDay();
+    if (dayOfWeek !== 0) {
+      currentWindowEnd.setDate(currentWindowEnd.getDate() - dayOfWeek);
+    }
+    currentWindowEnd.setHours(23, 59, 59, 999);
+
+    // Week ends: Week 2 = currentWindowEnd, Week 1 = currentWindowEnd - 7 days
+    // Week 3 = currentWindowEnd + 7 days, Week 4 = currentWindowEnd + 14 days
+    const weekEnds = [
+      new Date(currentWindowEnd.getTime() - 7 * 24 * 60 * 60 * 1000),  // Week 1 (past)
+      new Date(currentWindowEnd.getTime()),                             // Week 2 (current)
+      new Date(currentWindowEnd.getTime() + 7 * 24 * 60 * 60 * 1000),  // Week 3 (future)
+      new Date(currentWindowEnd.getTime() + 14 * 24 * 60 * 60 * 1000)  // Week 4 (future)
+    ];
+
+    const overviewData = [];
+
+    for (const seller of sellers) {
+      const sellerMatch = { seller: seller._id };
+      const weeks = [];
+
+      for (let weekIdx = 0; weekIdx < 4; weekIdx++) {
+        const windowEnd = weekEnds[weekIdx];
+        
+        // Apply the same row shift logic: data window is 1 week before display window
+        const dataWindowEnd = new Date(windowEnd);
+        dataWindowEnd.setDate(dataWindowEnd.getDate() - 7);
+        
+        // Apply 7-day buffer
+        const calculationEnd = new Date(dataWindowEnd);
+        calculationEnd.setDate(calculationEnd.getDate() - 7);
+        calculationEnd.setHours(23, 59, 59, 999);
+
+        // Calculate start date (84 days before)
+        const windowStart = new Date(calculationEnd);
+        windowStart.setDate(windowStart.getDate() - 84);
+        windowStart.setHours(0, 0, 0, 0);
+
+        // Get total sales
+        const totalSales = await Order.countDocuments({
+          ...sellerMatch,
+          dateSold: { $gte: windowStart, $lte: calculationEnd }
+        });
+
+        // Get SNAD cases
+        const snadCaseCount = await Case.countDocuments({
+          ...sellerMatch,
+          caseType: 'SNAD',
+          creationDate: { $gte: windowStart, $lte: calculationEnd }
+        });
+
+        // Get SNAD returns
+        const snadReturnCount = await Return.countDocuments({
+          ...sellerMatch,
+          returnReason: { $in: SNAD_RETURN_REASONS },
+          creationDate: { $gte: windowStart, $lte: calculationEnd }
+        });
+
+        const totalSnad = snadCaseCount + snadReturnCount;
+        const bbeRate = totalSales > 0 ? (totalSnad / totalSales) * 100 : 0;
+
+        if (weekIdx < 2) {
+          // Week 1 & 2: Show actual BBE rate
+          weeks.push({
+            week: weekIdx + 1,
+            type: 'actual',
+            bbeRate: parseFloat(bbeRate.toFixed(2)),
+            totalSales,
+            totalSnad
+          });
+        } else {
+          // Week 3 & 4: Show sales needed to meet market avg
+          // Formula: salesNeeded = (totalSnad * 100 / marketAvg) - totalSales
+          let salesNeeded = 0;
+          if (totalSnad > 0) {
+            const requiredSales = (totalSnad * 100) / marketAvg;
+            salesNeeded = Math.ceil(requiredSales - totalSales);
+          }
+          weeks.push({
+            week: weekIdx + 1,
+            type: 'prediction',
+            salesNeeded,
+            bbeRate: parseFloat(bbeRate.toFixed(2)),
+            totalSales,
+            totalSnad
+          });
+        }
+      }
+
+      overviewData.push({
+        sellerId: seller._id,
+        sellerName: seller.user?.username || seller._id.toString(),
+        weeks,
+        marketAvg
+      });
+    }
+
+    res.json({ overview: overviewData, marketAvg });
+  } catch (error) {
+    console.error('Error fetching account health overview:', error);
+    res.status(500).json({ error: 'Failed to fetch overview' });
   }
 });
 
