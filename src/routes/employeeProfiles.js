@@ -448,6 +448,46 @@ router.get('/:id/file/pan', requireAuth, async (req, res) => {
   }
 });
 
+// PATCH /api/employee-profiles/:id/toggle-hidden - Toggle hidden status (superadmin, hradmin only)
+router.patch('/:id/toggle-hidden', requireAuth, async (req, res) => {
+  try {
+    // Only superadmin and hradmin can hide/unhide profiles
+    if (!['superadmin', 'hradmin'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden: Only superadmin and hradmin can hide/unhide profiles' });
+    }
+
+    const profile = await EmployeeProfile.findById(req.params.id).populate('user', 'username role email department');
+
+    if (!profile) {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
+
+    // Toggle the isHidden field
+    profile.isHidden = !profile.isHidden;
+    await profile.save();
+
+    // Convert to object and exclude binary data
+    const profileObj = profile.toObject();
+
+    // Add boolean flags for file existence
+    profileObj.hasProfilePic = !!(profile.profilePic && profile.profilePic.data);
+    profileObj.hasAadhar = !!(profile.aadharDocument && profile.aadharDocument.data);
+    profileObj.hasPan = !!(profile.panDocument && profile.panDocument.data);
+
+    // Remove binary data
+    delete profileObj.profilePic;
+    delete profileObj.aadharDocument;
+    delete profileObj.panDocument;
+
+    res.json({
+      message: `Profile ${profile.isHidden ? 'hidden' : 'unhidden'} successfully`,
+      profile: profileObj
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to toggle hidden status', details: err.message });
+  }
+});
+
 // DELETE /api/employee-profiles/:id - Hard delete employee profile and user account (admin only)
 router.delete('/:id', requireAuth, async (req, res) => {
   try {

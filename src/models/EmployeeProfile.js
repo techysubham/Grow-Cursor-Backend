@@ -24,6 +24,9 @@ const EmployeeProfileSchema = new mongoose.Schema(
     primaryTask: { type: String, trim: true, default: 'Number of listings per day : ?' },
     secondaryTask: { type: String, trim: true },
 
+    // Visibility Control
+    isHidden: { type: Boolean, default: false },
+
     // NEW: BLOB storage for files (images and PDFs)
     profilePic: {
       data: Buffer,
