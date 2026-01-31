@@ -125,7 +125,7 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
         );
         
         // Use higher token limit for description field to avoid truncation
-        const maxTokens = config.ebayField === 'description' ? 1000 : 150;
+        const maxTokens = config.ebayField === 'description' ? 2000 : 150;
         
         let generatedValue = await generateWithGemini(processedPrompt, { maxTokens });
         
