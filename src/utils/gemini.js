@@ -33,7 +33,13 @@ export async function generateWithGemini(prompt, options = {}) {
       max_tokens: maxTokens,
     });
     
-    return completion.choices[0]?.message?.content?.trim() || '';
+    let content = completion.choices[0]?.message?.content?.trim() || '';
+    
+    // Strip markdown code blocks (```html ... ```, ```javascript ... ```, etc.)
+    // This prevents AI from wrapping HTML/code responses in markdown fences
+    content = content.replace(/```(?:html|javascript|python|css|json|[a-z]*)?\n?([\s\S]*?)```/g, '$1').trim();
+    
+    return content;
   } catch (error) {
     console.error('OpenAI API error:', error);
     throw new Error('Failed to generate content with OpenAI');
