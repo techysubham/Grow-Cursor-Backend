@@ -52,11 +52,6 @@ import templateOverridesRoutes from './routes/templateOverrides.js';
 import sellerPricingConfigRoutes from './routes/sellerPricingConfig.js';
 import accountHealthRoutes from './routes/accountHealth.js';
 
-import cron from 'node-cron';
-import Order from './models/Order.js';
-import Seller from './models/Seller.js';
-import { sendAutoMessage } from './routes/ebay.js';
-
 const app = express();
 
 app.use(helmet());
@@ -129,63 +124,6 @@ app.use('/api/account-health', accountHealthRoutes);
 
 const port = process.env.PORT || 5000;
 
-// Auto-message start date: Jan 27, 2026
-const AUTO_MESSAGE_START_DATE = new Date('2026-01-27T00:00:00Z');
-
-// Auto-message cron job function
-async function runAutoMessageJob() {
-  console.log('[AutoMessage Cron] Starting hourly auto-message job...');
-  try {
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-    // Find all eligible orders
-    const orders = await Order.find({
-      creationDate: { 
-        $lte: twentyFourHoursAgo,
-        $gte: AUTO_MESSAGE_START_DATE 
-      },
-      autoMessageSent: { $ne: true },
-      autoMessageDisabled: { $ne: true },
-      orderFulfillmentStatus: { $ne: 'FULFILLED' }, // Skip if already shipped
-      $or: [
-        { cancelState: { $exists: false } },
-        { cancelState: null },
-        { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
-      ]
-    }).populate({
-      path: 'seller',
-      populate: { path: 'user' }
-    }).limit(50);
-
-    console.log(`[AutoMessage Cron] Found ${orders.length} orders to process`);
-
-    let successCount = 0;
-    let failCount = 0;
-
-    for (const order of orders) {
-      if (!order.seller) {
-        console.log(`[AutoMessage Cron] Skip order ${order.orderId}: No seller`);
-        failCount++;
-        continue;
-      }
-
-      const result = await sendAutoMessage(order, order.seller);
-      if (result.success) {
-        successCount++;
-      } else {
-        failCount++;
-      }
-
-      // Small delay to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-
-    console.log(`[AutoMessage Cron] Completed: ${successCount} sent, ${failCount} failed`);
-  } catch (err) {
-    console.error('[AutoMessage Cron] Error:', err);
-  }
-}
-
 connectToDatabase()
   .then(async () => {
     // Ensure email index is sparse unique to allow multiple nulls
@@ -204,14 +142,8 @@ connectToDatabase()
     app.listen(port, () => {
       console.log(`API listening on :${port}`);
     });
-
-    // Schedule auto-message cron job - runs every hour at minute 0
-    cron.schedule('0 * * * *', runAutoMessageJob);
-    console.log('[AutoMessage Cron] Scheduled to run every hour');
   })
   .catch((err) => {
     console.error('Failed to start server', err);
     process.exit(1);
   });
-
-
