@@ -1239,6 +1239,19 @@ router.get('/stored-orders', async (req, res) => {
       query.orderPaymentStatus = paymentStatus;
     }
 
+    // Exclude Low Value Orders (less than $3)
+    if (req.query.excludeLowValue === 'true') {
+      // Filter orders where subtotal or subtotalUSD is >= 3
+      // Check both fields since some orders may have one or the other
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { subtotalUSD: { $gte: 3 } },
+          { subtotal: { $gte: 3 } }
+        ]
+      });
+    }
+
     // Calculate pagination
     const pageNum = parseInt(page, 10);
     const limitNum = parseInt(limit, 10);
