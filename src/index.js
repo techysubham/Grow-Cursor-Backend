@@ -61,7 +61,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
   exposedHeaders: ['Content-Disposition']
 }));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Increased limit for bulk operations
 app.use(morgan('dev'));
 
 // Serve static uploads
