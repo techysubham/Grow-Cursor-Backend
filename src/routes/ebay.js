@@ -16,6 +16,7 @@ import Case from '../models/Case.js';
 import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
+import ActiveListing from '../models/ActiveListing.js';
 import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
 import ExchangeRate from '../models/ExchangeRate.js';
@@ -1180,9 +1181,9 @@ router.get('/stored-orders', async (req, res) => {
     // --- Amazon Arrivals Filter ---
     if (amazonArriving === 'true') {
       // Only show orders with arrivingDate in ISO format (YYYY-MM-DD)
-      query.arrivingDate = { 
-        $exists: true, 
-        $ne: null, 
+      query.arrivingDate = {
+        $exists: true,
+        $ne: null,
         $ne: '',
         $regex: /^\d{4}-\d{2}-\d{2}/ // Only ISO formatted dates
       };
@@ -1270,8 +1271,8 @@ router.get('/stored-orders', async (req, res) => {
       })
       // Sorting: ShipBy Date for awaiting (Oldest First), Arriving Date for Amazon Arrivals, Creation Date otherwise (Newest First)
       .sort(
-        awaitingShipment === 'true' 
-          ? { shipByDate: 1 } 
+        awaitingShipment === 'true'
+          ? { shipByDate: 1 }
           : amazonArriving === 'true'
             ? { arrivingDate: arrivalSort === 'desc' ? -1 : 1 }
             : { creationDate: -1 }
@@ -3106,12 +3107,12 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
           seller: seller._id,
           lastModifiedDate: { $exists: true, $ne: null }
         })
-        .sort({ lastModifiedDate: -1 })
-        .select('lastModifiedDate orderId')
-        .lean();
+          .sort({ lastModifiedDate: -1 })
+          .select('lastModifiedDate orderId')
+          .lean();
 
         let sinceDate;
-        
+
         if (latestOrder && latestOrder.lastModifiedDate) {
           // Use latest lastModifiedDate from DB
           sinceDate = new Date(latestOrder.lastModifiedDate);
@@ -3160,7 +3161,7 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
         // ✅ STEP 2: Fetch orders from eBay with lastModifiedDate >= sinceDate
         const toDate = new Date(nowUTC);
         const modifiedFilter = `lastmodifieddate:[${sinceDate.toISOString()}..${toDate.toISOString()}]`;
-        
+
         console.log(`[${sellerName}] Filter: ${modifiedFilter}`);
         const updatedOrders = [];
 
@@ -3500,10 +3501,10 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
   let cancelState = 'NONE_REQUESTED';
   if (ebayOrder.cancelStatus) {
     // Try different possible property names from eBay API
-    cancelState = ebayOrder.cancelStatus.cancelState || 
-                  ebayOrder.cancelStatus.state ||
-                  ebayOrder.cancelStatus.status ||
-                  (ebayOrder.cancelStatus.cancelled ? 'CANCELED' : 'NONE_REQUESTED');
+    cancelState = ebayOrder.cancelStatus.cancelState ||
+      ebayOrder.cancelStatus.state ||
+      ebayOrder.cancelStatus.status ||
+      (ebayOrder.cancelStatus.cancelled ? 'CANCELED' : 'NONE_REQUESTED');
   }
   orderData.cancelState = cancelState;
 
@@ -3720,17 +3721,17 @@ router.patch('/orders/:orderId/fulfillment-notes', async (req, res) => {
 // Dismiss order from Amazon Arrivals (soft delete - clears arrivingDate)
 router.patch('/orders/:orderId/dismiss-arrival', requireAuth, async (req, res) => {
   const { orderId } = req.params;
-  
+
   try {
     const order = await Order.findById(orderId);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
-    
+
     // Clear the arriving date (soft delete)
     order.arrivingDate = null;
     await order.save();
-    
+
     // Populate seller info for response
     await order.populate({
       path: 'seller',
@@ -3739,11 +3740,11 @@ router.patch('/orders/:orderId/dismiss-arrival', requireAuth, async (req, res) =
         select: 'username email'
       }
     });
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       message: 'Order dismissed from Amazon Arrivals',
-      order 
+      order
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -4101,7 +4102,7 @@ router.post('/fetch-inr-cases', requireAuth, requireRole('fulfillmentadmin', 'su
 
             // Try to get orderId from eBay response, or look it up in Order collection
             let orderId = ebayCase.orderId || ebayCase.orderNumber;
-            
+
             // If no orderId from eBay, try to find it using lineItemId or transactionId
             if (!orderId && (ebayCase.lineItemId || ebayCase.transactionId || ebayCase.itemId)) {
               try {
@@ -4112,7 +4113,7 @@ router.post('/fetch-inr-cases', requireAuth, requireRole('fulfillmentadmin', 'su
                 } else if (ebayCase.transactionId) {
                   orderQuery['lineItems.legacyItemId'] = ebayCase.itemId;
                 }
-                
+
                 if (Object.keys(orderQuery).length > 0) {
                   orderQuery.seller = seller._id;
                   const matchingOrder = await Order.findOne(orderQuery).select('orderId');
@@ -4138,8 +4139,8 @@ router.post('/fetch-inr-cases', requireAuth, requireRole('fulfillmentadmin', 'su
               // Dates
               creationDate: ebayCase.creationDate?.value ? new Date(ebayCase.creationDate.value) : null,
               // FIX: eBay returns 'respondByDate' directly, not nested under 'sellerResponseDue'
-              sellerResponseDueDate: ebayCase.respondByDate?.value 
-                ? new Date(ebayCase.respondByDate.value) 
+              sellerResponseDueDate: ebayCase.respondByDate?.value
+                ? new Date(ebayCase.respondByDate.value)
                 : (ebayCase.sellerResponseDue?.respondByDate?.value ? new Date(ebayCase.sellerResponseDue.respondByDate.value) : null),
               escalationDate: ebayCase.escalationDate?.value ? new Date(ebayCase.escalationDate.value) : null,
               closedDate: ebayCase.closedDate?.value ? new Date(ebayCase.closedDate.value) : null,
@@ -5706,6 +5707,7 @@ router.post('/sync-listings', requireAuth, async (req, res) => {
             currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
             listingStatus: status,
             mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
+            categoryName: categoryName, // Store category for filtering
             descriptionPreview: cleanHtml,
             compatibility: parsedCompatibility,
             // Save the START TIME for sorting
@@ -5731,9 +5733,9 @@ router.post('/sync-listings', requireAuth, async (req, res) => {
   }
 });
 
-// 2. GET LISTINGS (With Search & Sort)
+// 2. GET LISTINGS (With Search & Sort) - For Compatibility Dashboard (Uses Listing collection)
 router.get('/listings', requireAuth, async (req, res) => {
-  const { sellerId, page = 1, limit = 50, search } = req.query; // Added 'search'
+  const { sellerId, page = 1, limit = 50, search } = req.query;
   try {
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
@@ -5744,11 +5746,11 @@ router.get('/listings', requireAuth, async (req, res) => {
 
     // --- SEARCH LOGIC ---
     if (search && search.trim() !== '') {
-      const searchRegex = { $regex: search.trim(), $options: 'i' }; // 'i' = case insensitive
+      const searchRegex = { $regex: search.trim(), $options: 'i' };
       query.$or = [
         { title: searchRegex },
         { sku: searchRegex },
-        { itemId: searchRegex } // Allows partial ID matches
+        { itemId: searchRegex }
       ];
     }
 
@@ -5876,7 +5878,7 @@ async function fetchApiUsageStats(token) {
     );
 
     const rateLimits = response.data?.rateLimits || [];
-    
+
     // Find the TradingAPI context
     const tradingAPI = rateLimits.find(
       api => api.apiContext === 'TradingAPI' || api.apiName === 'TradingAPI'
@@ -5918,7 +5920,7 @@ async function fetchApiUsageStats(token) {
     const limit = dailyRate.limit || 5000;
     const remaining = dailyRate.remaining || (limit - used);
     const resetTime = dailyRate.reset || new Date(Date.now() + 86400000).toISOString();
-    
+
     // Calculate hours until reset
     const resetDate = new Date(resetTime);
     const now = new Date();
@@ -5935,12 +5937,12 @@ async function fetchApiUsageStats(token) {
     };
   } catch (err) {
     console.error('Error fetching API usage stats:', err.message);
-    
+
     // If error response contains rate limit data, try to parse it
     if (err.response?.data) {
       console.error('API Response:', JSON.stringify(err.response.data, null, 2));
     }
-    
+
     throw err;
   }
 }
@@ -5949,19 +5951,19 @@ async function fetchApiUsageStats(token) {
 async function getCachedUsageStats(sellerId, token) {
   const cacheKey = `usage_${sellerId}`;
   const cached = apiUsageCache.get(cacheKey);
-  
+
   // Return cached if less than 5 minutes old
   if (cached && (Date.now() - cached.timestamp < 5 * 60 * 1000)) {
     return cached.data;
   }
-  
+
   // Fetch fresh data
   const freshData = await fetchApiUsageStats(token);
   apiUsageCache.set(cacheKey, {
     data: freshData,
     timestamp: Date.now()
   });
-  
+
   return freshData;
 }
 
@@ -6032,17 +6034,17 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
     if (ack === 'Failure') {
       const errors = result.ReviseFixedPriceItemResponse.Errors || [];
       const errorMessage = errors.map(e => e.LongMessage[0]).join('; ');
-      
+
       // Check if it's a rate limit error
-      const isRateLimitError = errorMessage.includes('exceeded usage limit') || 
-                               errorMessage.includes('call limit') ||
-                               errorMessage.includes('Developer Analytics API');
-      
+      const isRateLimitError = errorMessage.includes('exceeded usage limit') ||
+        errorMessage.includes('call limit') ||
+        errorMessage.includes('Developer Analytics API');
+
       if (isRateLimitError) {
         try {
           // Fetch usage stats
           const usageStats = await getCachedUsageStats(sellerId, token);
-          return res.status(429).json({ 
+          return res.status(429).json({
             error: errorMessage,
             rateLimitInfo: {
               used: usageStats.used,
@@ -6058,7 +6060,7 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
           return res.status(429).json({ error: errorMessage });
         }
       }
-      
+
       throw new Error(`eBay Failed: ${errorMessage}`);
     }
 
@@ -6093,29 +6095,270 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================
+// EDIT ACTIVE LISTINGS - SYNC ALL LISTINGS
+// ============================================
+// Syncs ALL active listings (not just Motors) for editing title/description/price
+router.post('/sync-all-listings', requireAuth, async (req, res) => {
+  const { sellerId } = req.body;
+
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller) return res.status(404).json({ error: "Seller not found" });
+
+    const token = await ensureValidToken(seller);
+
+    // Use a fixed start date for initial sync (Feb 3, 2026)
+    const defaultStartDate = new Date('2026-02-03T00:00:00Z');
+    const startTimeFrom = seller.lastAllListingsPolledAt || defaultStartDate;
+    const startTimeTo = new Date();
+
+    let page = 1;
+    let totalPages = 1;
+    let processedCount = 0;
+
+    do {
+      console.log(`[Sync All Listings] Fetching Page ${page}...`);
+
+      const xmlRequest = `
+        <?xml version="1.0" encoding="utf-8"?>
+        <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+          <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+          <ErrorLanguage>en_US</ErrorLanguage>
+          <WarningLevel>High</WarningLevel>
+          <DetailLevel>ItemReturnDescription</DetailLevel>
+          <StartTimeFrom>${new Date(startTimeFrom).toISOString()}</StartTimeFrom>
+          <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
+          <IncludeWatchCount>true</IncludeWatchCount>
+          <Pagination>
+            <EntriesPerPage>100</EntriesPerPage>
+            <PageNumber>${page}</PageNumber>
+          </Pagination>
+          <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
+          <OutputSelector>ItemArray.Item.Title</OutputSelector>
+          <OutputSelector>ItemArray.Item.SKU</OutputSelector>
+          <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
+          <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
+          <OutputSelector>ItemArray.Item.Description</OutputSelector>
+          <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
+          <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
+          <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
+          <OutputSelector>PaginationResult</OutputSelector>
+        </GetSellerListRequest>
+      `;
+
+      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+        headers: {
+          'X-EBAY-API-SITEID': '0', // Use SiteID 0 for all listings (not just Motors)
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+          'X-EBAY-API-CALL-NAME': 'GetSellerList',
+          'Content-Type': 'text/xml'
+        }
+      });
+
+      const result = await parseStringPromise(response.data);
+      if (result.GetSellerListResponse.Ack[0] === 'Failure') {
+        throw new Error(result.GetSellerListResponse.Errors[0].LongMessage[0]);
+      }
+
+      const pagination = result.GetSellerListResponse.PaginationResult[0];
+      totalPages = parseInt(pagination.TotalNumberOfPages[0]);
+      const items = result.GetSellerListResponse.ItemArray?.[0]?.Item || [];
+
+      for (const item of items) {
+        const status = item.SellingStatus?.[0]?.ListingStatus?.[0];
+        if (status !== 'Active') continue;
+
+        const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
+        const rawHtml = item.Description ? item.Description[0] : '';
+        const cleanHtml = extractCleanDescription(rawHtml);
+
+        // Upsert to ActiveListing collection (separate from Motors Listing collection)
+        await ActiveListing.findOneAndUpdate(
+          { itemId: item.ItemID[0] },
+          {
+            seller: seller._id,
+            title: item.Title[0],
+            sku: item.SKU ? item.SKU[0] : '',
+            currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
+            currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
+            listingStatus: status,
+            mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
+            categoryName: categoryName,
+            descriptionPreview: cleanHtml,
+            startTime: item.ListingDetails?.[0]?.StartTime?.[0]
+          },
+          { upsert: true }
+        );
+        processedCount++;
+      }
+      page++;
+    } while (page <= totalPages);
+
+    // Update last polled timestamp
+    seller.lastAllListingsPolledAt = startTimeTo;
+    await seller.save();
+
+    res.json({
+      success: true,
+      message: `Synced ${processedCount} active listings.`
+    });
+
+  } catch (err) {
+    console.error('[Sync All Listings] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET ALL LISTINGS (Without Motors filter)
+router.get('/all-listings', requireAuth, async (req, res) => {
+  const { sellerId, page = 1, limit = 50, search } = req.query;
+  try {
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Base Query - no category filter
+    let query = { seller: sellerId, listingStatus: 'Active' };
+
+    // Search Logic
+    if (search && search.trim() !== '') {
+      const searchRegex = { $regex: search.trim(), $options: 'i' };
+      query.$or = [
+        { title: searchRegex },
+        { sku: searchRegex },
+        { itemId: searchRegex }
+      ];
+    }
+
+    const totalDocs = await ActiveListing.countDocuments(query);
+    const listings = await ActiveListing.find(query)
+      .sort({ startTime: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    res.json({
+      listings,
+      pagination: {
+        total: totalDocs,
+        page: pageNum,
+        pages: Math.ceil(totalDocs / limitNum)
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// UPDATE LISTING (Title, Description, Price)
+router.post('/update-listing', requireAuth, async (req, res) => {
+  const { sellerId, itemId, title, description, price } = req.body;
+
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const token = await ensureValidToken(seller);
+
+    // Build Item XML content
+    let itemContent = `<ItemID>${itemId}</ItemID>`;
+
+    if (title) {
+      itemContent += `<Title>${escapeXml(title)}</Title>`;
+    }
+
+    if (description !== undefined) {
+      // Wrap description in CDATA to preserve HTML
+      itemContent += `<Description><![CDATA[${description}]]></Description>`;
+    }
+
+    if (price !== undefined && price !== null) {
+      itemContent += `<StartPrice>${parseFloat(price).toFixed(2)}</StartPrice>`;
+    }
+
+    const xmlRequest = `
+      <?xml version="1.0" encoding="utf-8"?>
+      <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+        <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+        <ErrorLanguage>en_US</ErrorLanguage>
+        <WarningLevel>Low</WarningLevel>
+        <Item>
+          ${itemContent}
+        </Item>
+      </ReviseFixedPriceItemRequest>
+    `;
+
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+      headers: {
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem',
+        'Content-Type': 'text/xml'
+      }
+    });
+
+    const result = await parseStringPromise(response.data);
+    const ack = result.ReviseFixedPriceItemResponse.Ack[0];
+
+    // Handle Failures - show all errors to user
+    if (ack === 'Failure') {
+      const errors = result.ReviseFixedPriceItemResponse.Errors || [];
+      const errorMessage = errors.map(e => e.LongMessage?.[0]).join('; ');
+      throw new Error(`eBay Error: ${errorMessage}`);
+    }
+
+    // Handle Warnings - show all warnings to user
+    let warningMessage = null;
+    if (ack === 'Warning') {
+      const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
+      warningMessage = warnings.map(e => e.LongMessage?.[0]).join('; ');
+    }
+
+    console.log(`[Update Listing] Success! ItemID: ${result.ReviseFixedPriceItemResponse.ItemID?.[0]}`);
+
+    // Update local DB
+    const updateFields = {};
+    if (title) updateFields.title = title;
+    if (description !== undefined) updateFields.descriptionPreview = extractCleanDescription(description);
+    if (price !== undefined && price !== null) updateFields.currentPrice = parseFloat(price);
+
+    if (Object.keys(updateFields).length > 0) {
+      await ActiveListing.findOneAndUpdate(
+        { itemId: itemId },
+        updateFields
+      );
+    }
+
+    res.json({ success: true, warning: warningMessage });
+
+  } catch (err) {
+    console.error('[Update Listing] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
 // 4.5. GET EBAY API USAGE STATS
 router.get('/api-usage-stats', requireAuth, async (req, res) => {
   const { sellerId } = req.query;
-  
+
   if (!sellerId) {
     return res.status(400).json({ error: 'sellerId is required' });
   }
-  
+
   try {
     const seller = await Seller.findById(sellerId);
     if (!seller) {
       return res.status(404).json({ error: 'Seller not found' });
     }
-    
+
     const token = await ensureValidToken(seller);
     const stats = await getCachedUsageStats(sellerId, token);
-    
+
     res.json(stats);
   } catch (err) {
     console.error('Error fetching API usage stats:', err.message);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to fetch API usage stats',
       success: false
     });
@@ -6900,9 +7143,9 @@ router.get('/orders/auto-message-stats', requireAuth, async (req, res) => {
     // Count orders eligible for auto-message (24+ hours old, not sent, not disabled, not cancelled)
     // Count orders eligible for auto-message (24+ hours old, not sent, not disabled, not cancelled, AND NOT FULFILLED)
     const pending = await Order.countDocuments({
-      creationDate: { 
+      creationDate: {
         $lte: twentyFourHoursAgo,
-        $gte: AUTO_MESSAGE_START_DATE 
+        $gte: AUTO_MESSAGE_START_DATE
       },
       autoMessageSent: { $ne: true },
       autoMessageDisabled: { $ne: true },
@@ -6939,7 +7182,7 @@ async function sendAutoMessage(order, seller) {
   const nameToUse = order.shippingFullName || order.buyer?.username || 'Buyer';
   // Attempt to get just the first name if it's a full name
   const firstName = nameToUse.split(' ')[0];
-  
+
   const initialBody = AUTO_MESSAGE_TEMPLATE.replace('{{BUYER_NAME}}', firstName);
 
   // Escape the message body
@@ -6993,9 +7236,9 @@ router.post('/orders/send-auto-messages', requireAuth, requireRole('fulfillmenta
 
     // Find all eligible orders (not sent, not disabled, not cancelled, NOT FULFILLED)
     const orders = await Order.find({
-      creationDate: { 
+      creationDate: {
         $lte: twentyFourHoursAgo,
-        $gte: AUTO_MESSAGE_START_DATE 
+        $gte: AUTO_MESSAGE_START_DATE
       },
       autoMessageSent: { $ne: true },
       autoMessageDisabled: { $ne: true },

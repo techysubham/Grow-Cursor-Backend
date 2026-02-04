@@ -8,9 +8,12 @@ const ListingSchema = new mongoose.Schema({
   currentPrice: { type: Number },
   currency: { type: String },
   mainImageUrl: { type: String },
-  
+
+  // Primary category from eBay (e.g., "eBay Motors:Parts & Accessories:...")
+  categoryName: { type: String },
+
   // We store the clean HTML here
-  descriptionPreview: { type: String }, 
+  descriptionPreview: { type: String },
 
   // Compatibility Data
   compatibility: [

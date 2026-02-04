@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 const SellerSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
-    ebayMarketplaces: [{ type: String, required: true }], 
+    ebayMarketplaces: [{ type: String, required: true }],
     ebayTokens: {
       access_token: String,
       refresh_token: String,
@@ -15,12 +15,15 @@ const SellerSchema = new mongoose.Schema(
     },
     // Default: Nov 1, 2025 00:00:00 UTC
     initialSyncDate: { type: Date, default: () => new Date(Date.UTC(2025, 10, 1, 0, 0, 0, 0)) },
-    
-    // NEW: Message Polling Metadata
-    lastMessagePolledAt: { type: Date, default: null } ,
 
-    lastListingPolledAt: { type: Date, default: null }
-    
+    // NEW: Message Polling Metadata
+    lastMessagePolledAt: { type: Date, default: null },
+
+    lastListingPolledAt: { type: Date, default: null },
+
+    // For Edit Listings: tracks last sync of ALL listings (not just Motors)
+    lastAllListingsPolledAt: { type: Date, default: null }
+
   },
   { timestamps: true }
 );
