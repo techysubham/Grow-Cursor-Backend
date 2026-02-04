@@ -1150,6 +1150,15 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
     }
     
     console.log(`💰 Pricing config enabled: ${pricingConfig?.enabled}, multiplier: ${pricingConfig?.multiplier}`);
+    if (pricingConfig?.enabled) {
+      console.log(`   Desired profit: ${pricingConfig.desiredProfit} INR`);
+      console.log(`   Profit tiers: ${pricingConfig.profitTiers?.length || 0} configured`);
+      if (pricingConfig.profitTiers?.length > 0) {
+        pricingConfig.profitTiers.forEach((tier, idx) => {
+          console.log(`     Tier ${idx + 1}: $${tier.minCost}-$${tier.maxCost} → +${tier.profit} INR`);
+        });
+      }
+    }
     console.log(`📋 Field configs: ${template.asinAutomation.fieldConfigs.length} total`);
     
     // Log field config breakdown
@@ -1165,17 +1174,19 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
     const previewItems = [];
     const errors = [];
     
-    // Get existing ACTIVE SKUs to detect duplicates
+    // Get existing ACTIVE SKUs to detect duplicates (ONCE per request, not per ASIN)
     const existingActiveSKUs = await TemplateListing.find({ 
       templateId,
       sellerId,
       status: 'active'
-    }).distinct('customLabel');
+    }).lean().distinct('customLabel');
     
     const skuSet = new Set(existingActiveSKUs);
     
-    // Process each ASIN
-    for (const asin of asins) {
+    console.log(`🚀 Processing ${asins.length} ASINs in parallel...`);
+    
+    // Process ALL ASINs in parallel using Promise.allSettled
+    const asinPromises = asins.map(async (asin) => {
       try {
         console.log(`📦 Processing ASIN for preview: ${asin}`);
         
@@ -1217,8 +1228,19 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
           validationErrors.push('Missing required field: title');
         }
         
-        if (mergedCoreFields.startPrice === undefined || mergedCoreFields.startPrice === null) {
-          validationErrors.push('Missing required field: startPrice');
+        if (mergedCoreFields.startPrice === undefined || mergedCoreFields.startPrice === null || mergedCoreFields.startPrice === '') {
+          if (pricingConfig?.enabled) {
+            if (pricingCalculation?.error) {
+              validationErrors.push(`Failed to calculate startPrice: ${pricingCalculation.error}`);
+            } else {
+              validationErrors.push('Pricing calculator enabled but startPrice not generated');
+            }
+          } else {
+            validationErrors.push('Missing required field: startPrice (no pricing config or field mapping)');
+          }
+          console.error(`❌ [ASIN: ${asin}] startPrice validation failed. Value: ${mergedCoreFields.startPrice}, Pricing Config Enabled: ${pricingConfig?.enabled}, Error: ${pricingCalculation?.error || 'none'}`);
+        } else {
+          console.log(`✅ [ASIN: ${asin}] startPrice validated: $${mergedCoreFields.startPrice}`);
         }
         
         if (skuSet.has(sku)) {
@@ -1251,46 +1273,86 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
           pricingCalculation,
           warnings,
           errors: validationErrors,
-          status: validationErrors.length > 0 ? 'error' : warnings.length > 0 ? 'warning' : 'ready'
+          status: validationErrors.length > 0 ? 'error' : (warnings.length > 0 ? 'warning' : 'success')
         });
         
-        console.log(`✅ Preview generated for ${asin}: ${coreFields.title?.substring(0, 50)}...`);
+        return {
+          success: true,
+          item: previewItems[previewItems.length - 1]
+        };
         
       } catch (error) {
         console.error(`❌ Error processing ASIN ${asin}:`, error);
         
-        errors.push({
-          asin,
-          error: error.message
-        });
-        
-        previewItems.push({
+        const errorItem = {
           id: `preview-${asin}`,
           asin,
           sku: generateSKUFromASIN(asin),
           sourceData: null,
           generatedListing: null,
+          pricingCalculation: null,
           warnings: [],
           errors: [error.message],
           status: 'error'
+        };
+        
+        return {
+          success: false,
+          item: errorItem,
+          error: error.message
+        };
+      }
+    });
+    
+    // Wait for all ASINs to complete (parallel processing)
+    const results = await Promise.allSettled(asinPromises);
+    
+    // Collect all items from results
+    const finalItems = [];
+    const finalErrors = [];
+    
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        finalItems.push(result.value.item);
+        if (!result.value.success) {
+          finalErrors.push({
+            asin: asins[index],
+            error: result.value.error
+          });
+        }
+      } else {
+        // Promise rejected (shouldn't happen with try/catch, but handle it)
+        const asin = asins[index];
+        finalErrors.push({
+          asin,
+          error: result.reason?.message || 'Unknown error'
+        });
+        finalItems.push({
+          id: `preview-${asin}`,
+          asin,
+          sku: generateSKUFromASIN(asin),
+          sourceData: null,
+          generatedListing: null,
+          pricingCalculation: null,
+          warnings: [],
+          errors: [result.reason?.message || 'Unknown error'],
+          status: 'error'
         });
       }
-    }
+    });
     
-    const successful = previewItems.filter(i => i.status !== 'error').length;
-    const failed = previewItems.filter(i => i.status === 'error').length;
-    const withWarnings = previewItems.filter(i => i.status === 'warning').length;
+    console.log(`✅ Parallel processing complete: ${finalItems.length} items processed`);
     
     res.json({
       success: true,
-      items: previewItems,
+      items: finalItems,
+      errors: finalErrors,
       summary: {
         total: asins.length,
-        successful,
-        failed,
-        withWarnings
-      },
-      errors: errors.length > 0 ? errors : undefined
+        successful: finalItems.filter(i => i.status !== 'error').length,
+        failed: finalErrors.length,
+        warnings: finalItems.filter(i => i.status === 'warning').length
+      }
     });
     
   } catch (error) {

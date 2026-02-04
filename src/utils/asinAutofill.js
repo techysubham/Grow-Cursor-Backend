@@ -32,8 +32,25 @@ export async function fetchAmazonData(asin) {
     title = title.replace(new RegExp(brand, 'ig'), '').trim();
   }
   
-  let price = item.Offers?.Listings?.[0]?.Price?.DisplayAmount || '';
-  price = price.split(' ')[0]; // Extract numeric part
+  // Extract price with detailed logging - log the entire Offers structure
+  console.log(`[ASIN: ${asin}] 📦 Full Offers object:`, JSON.stringify(item.Offers, null, 2));
+  console.log(`[ASIN: ${asin}] 🔍 Checking price paths:`);
+  console.log(`   Offers?.Listings?.[0]?.Price?.DisplayAmount: ${item.Offers?.Listings?.[0]?.Price?.DisplayAmount}`);
+  console.log(`   Offers?.Listings?.[0]?.Price?.Amount: ${item.Offers?.Listings?.[0]?.Price?.Amount}`);
+  console.log(`   Offers?.Summaries?.[0]?.LowestPrice?.DisplayAmount: ${item.Offers?.Summaries?.[0]?.LowestPrice?.DisplayAmount}`);
+  console.log(`   Offers?.Summaries?.[0]?.HighestPrice?.DisplayAmount: ${item.Offers?.Summaries?.[0]?.HighestPrice?.DisplayAmount}`);
+  
+  let price = item.Offers?.Listings?.[0]?.Price?.DisplayAmount || 
+              item.Offers?.Listings?.[0]?.Price?.Amount?.toString() ||
+              item.Offers?.Summaries?.[0]?.LowestPrice?.DisplayAmount ||
+              item.Offers?.Summaries?.[0]?.HighestPrice?.DisplayAmount || '';
+  
+  if (price) {
+    price = price.toString().split(' ')[0]; // Extract numeric part (handle both "$49.99" and "49.99")
+    console.log(`[ASIN: ${asin}] ✅ Extracted price: "${price}"`);
+  } else {
+    console.warn(`[ASIN: ${asin}] ⚠️ No price found in Amazon response - full item keys:`, Object.keys(item));
+  }
   
   const description = (item.ItemInfo?.Features?.DisplayValues || []).join('\n');
   
@@ -105,6 +122,12 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
       // Process ALL AI configs (both core and custom fields)
       aiConfigs.push(config);
     }
+  }
+  
+  // Check if pricing calculator will override startPrice field config
+  const startPriceConfig = fieldConfigs.find(c => c.ebayField === 'startPrice' && c.enabled);
+  if (pricingConfig?.enabled && startPriceConfig) {
+    console.log(`ℹ️ [ASIN: ${amazonData.asin}] Pricing calculator enabled - will override startPrice field config (${startPriceConfig.source})`);
   }
   
   // Process disabled configs (apply default values immediately)
@@ -222,38 +245,56 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
   }
   
   // PRIORITY: If pricing config enabled, calculate startPrice (overrides field config)
-  if (pricingConfig?.enabled && amazonData.price) {
-    try {
-      // Extract numeric cost from Amazon price string (e.g., "$49.99" -> 49.99)
-      const amazonCost = parseFloat(amazonData.price.replace(/[^0-9.]/g, ''));
-      
-      if (!isNaN(amazonCost) && amazonCost > 0) {
-        const result = calculateStartPrice(pricingConfig, amazonCost);
-        
-        // Override startPrice regardless of field configs
-        coreFields.startPrice = result.price.toFixed(2);
-        
-        pricingCalculation = {
-          enabled: true,
-          amazonCost: amazonData.price,
-          calculatedStartPrice: result.price.toFixed(2),
-          breakdown: result.breakdown
-        };
-        
-        // Enhanced logging with tier information
-        if (result.breakdown.profitTier?.enabled) {
-          console.log(`[Pricing Calculator] Cost: ${amazonData.price}, Tier: ${result.breakdown.profitTier.costRange} (${result.breakdown.profitTier.profit} INR), Start Price: $${result.price.toFixed(2)}`);
-        } else {
-          console.log(`[Pricing Calculator] Cost: ${amazonData.price}, Calculated Start Price: $${result.price.toFixed(2)}`);
-        }
-      }
-    } catch (error) {
-      console.error('[Pricing Calculator] Error:', error.message);
-      // Fall back to regular field config processing for startPrice
+  if (pricingConfig?.enabled) {
+    console.log(`[Pricing Calculator] Enabled, Amazon price: "${amazonData.price}"`);
+    
+    if (!amazonData.price || amazonData.price.trim() === '') {
+      console.warn(`[ASIN: ${amazonData.asin}] ⚠️ Amazon price not available - cannot calculate startPrice`);
       pricingCalculation = {
         enabled: true,
-        error: error.message
+        error: 'Amazon price not available'
       };
+    } else {
+      try {
+        // Extract numeric cost from Amazon price string (e.g., "$49.99" -> 49.99)
+        const amazonCost = parseFloat(amazonData.price.replace(/[^0-9.]/g, ''));
+        
+        console.log(`[Pricing Calculator] Extracted numeric cost: ${amazonCost}`);
+        
+        if (!isNaN(amazonCost) && amazonCost > 0) {
+          const result = calculateStartPrice(pricingConfig, amazonCost);
+          
+          // Override startPrice regardless of field configs
+          coreFields.startPrice = result.price.toFixed(2);
+          
+          pricingCalculation = {
+            enabled: true,
+            amazonCost: amazonData.price,
+            calculatedStartPrice: result.price.toFixed(2),
+            breakdown: result.breakdown
+          };
+          
+          // Enhanced logging with tier information
+          if (result.breakdown.profitTier?.enabled) {
+            console.log(`✅ [Pricing Calculator] Cost: ${amazonData.price}, Tier: ${result.breakdown.profitTier.costRange} (+${result.breakdown.profitTier.profit} INR), Start Price: $${result.price.toFixed(2)}`);
+          } else {
+            console.log(`✅ [Pricing Calculator] Cost: ${amazonData.price}, Calculated Start Price: $${result.price.toFixed(2)}`);
+          }
+        } else {
+          console.warn(`[ASIN: ${amazonData.asin}] ⚠️ Invalid price value: "${amazonData.price}" (extracted: ${amazonCost})`);
+          pricingCalculation = {
+            enabled: true,
+            error: `Invalid price value: ${amazonData.price}`
+          };
+        }
+      } catch (error) {
+        console.error(`[ASIN: ${amazonData.asin}] ❌ [Pricing Calculator] Error:`, error.message);
+        // Fall back to regular field config processing for startPrice
+        pricingCalculation = {
+          enabled: true,
+          error: error.message
+        };
+      }
     }
   }
   
