@@ -1,24 +1,52 @@
 import { generateWithGemini, replacePlaceholders } from './gemini.js';
 import { calculateStartPrice } from './pricingCalculator.js';
 import { processImagePlaceholders } from './imageReplacer.js';
+import { scrapeAmazonPriceWithScraperAPI } from './scraperApiPrice.js';
+
+/**
+ * Fetch from PAAPI with retry logic
+ */
+async function fetchFromPAAPI(asin, retries = 2) {
+  const url = `https://amazon-helper.vercel.app/api/items?asin=${asin}`;
+  
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, { timeout: 15000 });
+      
+      if (!response.ok) {
+        if (attempt < retries) {
+          console.log(`[ASIN: ${asin}] PAAPI attempt ${attempt} failed with ${response.status}, retrying...`);
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); // Exponential backoff
+          continue;
+        }
+        throw new Error(`PAAPI returned status ${response.status}`);
+      }
+      
+      const data = await response.json();
+      const item = data.ItemsResult?.Items?.[0];
+      
+      if (!item) {
+        throw new Error('No item found for this ASIN');
+      }
+      
+      return item;
+    } catch (error) {
+      if (attempt < retries) {
+        console.log(`[ASIN: ${asin}] PAAPI attempt ${attempt} error: ${error.message}, retrying...`);
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
 
 /**
  * Fetch Amazon product data by ASIN
+ * Uses PAAPI as primary source, falls back to ScraperAPI for price if unavailable
  */
 export async function fetchAmazonData(asin) {
-  const url = `https://amazon-helper.vercel.app/api/items?asin=${asin}`;
-  const response = await fetch(url);
-  
-  if (!response.ok) {
-    throw new Error('Failed to fetch Amazon data');
-  }
-  
-  const data = await response.json();
-  const item = data.ItemsResult?.Items?.[0];
-  
-  if (!item) {
-    throw new Error('No item found for this ASIN');
-  }
+  const item = await fetchFromPAAPI(asin);
   
   // Extract core data
   let title = item.ItemInfo?.Title?.DisplayValue || '';
@@ -47,9 +75,20 @@ export async function fetchAmazonData(asin) {
   
   if (price) {
     price = price.toString().split(' ')[0]; // Extract numeric part (handle both "$49.99" and "49.99")
-    console.log(`[ASIN: ${asin}] ✅ Extracted price: "${price}"`);
+    console.log(`[ASIN: ${asin}] ✅ PAAPI price found: "${price}"`);
   } else {
-    console.warn(`[ASIN: ${asin}] ⚠️ No price found in Amazon response - full item keys:`, Object.keys(item));
+    console.warn(`[ASIN: ${asin}] ⚠️ No price in PAAPI response, attempting ScraperAPI...`);
+    
+    // Fallback to ScraperAPI when PAAPI doesn't provide price
+    try {
+      price = await scrapeAmazonPriceWithScraperAPI(asin, 'US');
+      if (price) {
+        console.log(`[ASIN: ${asin}] ✅ ScraperAPI successfully retrieved price: "${price}"`);
+      }
+    } catch (scraperError) {
+      console.error(`[ASIN: ${asin}] ❌ ScraperAPI also failed:`, scraperError.message);
+      // Price remains empty string - will be caught by validation later
+    }
   }
   
   const description = (item.ItemInfo?.Features?.DisplayValues || []).join('\n');

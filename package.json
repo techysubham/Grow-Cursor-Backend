@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
-    "axios": "^1.13.2",
+    "axios": "^1.13.4",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -27,6 +27,7 @@
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "openai": "^6.15.0",
+    "scraperapi-sdk": "^2.0.1",
     "sharp": "^0.34.5",
     "xml2js": "^0.6.2"
   }
