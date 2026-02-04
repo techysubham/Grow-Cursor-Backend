@@ -1069,7 +1069,7 @@ router.get('/orders', async (req, res) => {
 // New endpoint: Get orders with any cancellation status
 router.get('/cancelled-orders', async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, sellerId, marketplace } = req.query;
 
     console.log(`[Cancelled Orders] Fetching all cancellation orders`);
 
@@ -1077,6 +1077,16 @@ router.get('/cancelled-orders', async (req, res) => {
     const query = {
       cancelState: { $in: ['CANCEL_REQUESTED', 'IN_PROGRESS', 'CANCELED', 'CANCELLED'] }
     };
+
+    // Add filters
+    if (sellerId) {
+      query.seller = sellerId;
+    }
+
+    if (marketplace) {
+      // Handle the Canada edge case if consistent with other endpoints, otherwise exact match
+      query.purchaseMarketplaceId = marketplace;
+    }
 
     // Add date filter if provided (using PST timezone logic like other endpoints)
     if (startDate || endDate) {
