@@ -1069,7 +1069,7 @@ router.get('/orders', async (req, res) => {
 // New endpoint: Get orders with any cancellation status
 router.get('/cancelled-orders', async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, marketplace } = req.query;
+    const { startDate, endDate, sellerId, marketplace, page = 1, limit = 50 } = req.query;
 
     console.log(`[Cancelled Orders] Fetching all cancellation orders`);
 
@@ -1107,6 +1107,14 @@ router.get('/cancelled-orders', async (req, res) => {
       }
     }
 
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count for pagination
+    const totalCount = await Order.countDocuments(query);
+    const totalPages = Math.ceil(totalCount / limitNum);
+
     const cancelledOrders = await Order.find(query)
       .populate({
         path: 'seller',
@@ -1115,13 +1123,21 @@ router.get('/cancelled-orders', async (req, res) => {
           select: 'username email'
         }
       })
-      .sort({ creationDate: -1 }); // Newest first
+      .sort({ creationDate: -1 })
+      .skip(skip)
+      .limit(limitNum);
 
-    console.log(`[Cancelled Orders] Found ${cancelledOrders.length} cancellation orders`);
+    console.log(`[Cancelled Orders] Found ${cancelledOrders.length} cancellation orders (page ${pageNum}/${totalPages})`);
 
     res.json({
       orders: cancelledOrders,
-      totalOrders: cancelledOrders.length
+      totalOrders: totalCount,
+      pagination: {
+        currentPage: pageNum,
+        totalPages,
+        totalOrders: totalCount,
+        limit: limitNum
+      }
     });
   } catch (err) {
     console.error('[Cancelled Orders] Error:', err);
@@ -3961,7 +3977,7 @@ router.post('/fetch-returns', requireAuth, requireRole('fulfillmentadmin', 'supe
 // Get stored returns from database
 
 router.get('/stored-returns', async (req, res) => {
-  const { sellerId, status, reason, startDate, endDate, page = 1, limit = 50 } = req.query;
+  const { sellerId, status, reason, startDate, endDate, urgentOnly, page = 1, limit = 50 } = req.query;
 
   try {
     let query = {};
@@ -3989,6 +4005,20 @@ router.get('/stored-returns', async (req, res) => {
       }
     }
 
+    // Urgent filter - response due within next 2 days (48 hours) to match the URGENT chip
+    if (urgentOnly === 'true') {
+      const now = new Date();
+      // Calculate 48 hours (2 days) from now - matches isResponseUrgent in frontend
+      const in48Hours = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
+      // Show entries where response is due between now and 48 hours from now
+      // Also include entries that are already overdue (responseDate < now)
+      query.responseDate = {
+        $lte: in48Hours
+      };
+      // Exclude CLOSED returns since they don't show URGENT chip
+      query.returnStatus = { $ne: 'CLOSED' };
+    }
+
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const skip = (pageNum - 1) * limitNum;
@@ -4004,14 +4034,27 @@ router.get('/stored-returns', async (req, res) => {
       })
       .sort({ creationDate: -1 })
       .skip(skip)
-      .limit(limitNum);
+      .limit(limitNum)
+      .lean(); // Use lean for faster queries and to allow modification
+
+    // Lookup product names from Orders collection
+    const orderIds = returns.map(r => r.orderId).filter(Boolean);
+    const orders = await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1 }).lean();
+    const orderMap = {};
+    orders.forEach(o => { orderMap[o.orderId] = o.productName; });
+
+    // Attach productName to each return
+    const returnsWithProductName = returns.map(r => ({
+      ...r,
+      productName: orderMap[r.orderId] || null
+    }));
 
     // Get total count for the query
     const totalCount = await Return.countDocuments(query);
     const totalPages = Math.ceil(totalCount / limitNum);
 
     res.json({
-      returns,
+      returns: returnsWithProductName,
       pagination: {
         currentPage: pageNum,
         totalPages,
