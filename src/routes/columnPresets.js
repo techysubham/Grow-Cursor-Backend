@@ -4,10 +4,14 @@ import ColumnPreset from '../models/ColumnPreset.js';
 
 const router = Router();
 
-// GET all presets (shared across all users)
+// GET all presets (shared across all users), optionally filtered by page
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const presets = await ColumnPreset.find().sort({ name: 1 });
+    const { page } = req.query;
+    const query = {};
+    if (page) query.page = page;
+    
+    const presets = await ColumnPreset.find(query).sort({ name: 1 });
     res.json(presets);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -16,7 +20,7 @@ router.get('/', requireAuth, async (req, res) => {
 
 // CREATE a new preset
 router.post('/', requireAuth, async (req, res) => {
-  const { name, columns } = req.body || {};
+  const { name, columns, page = 'dashboard' } = req.body || {};
   if (!name || !columns) {
     return res.status(400).json({ error: 'name and columns required' });
   }
@@ -24,6 +28,7 @@ router.post('/', requireAuth, async (req, res) => {
     const preset = await ColumnPreset.create({
       name,
       columns,
+      page,
       createdBy: req.user._id
     });
     res.json(preset);
