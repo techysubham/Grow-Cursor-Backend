@@ -1,127 +1,55 @@
 import { generateWithGemini, replacePlaceholders } from './gemini.js';
 import { calculateStartPrice } from './pricingCalculator.js';
 import { processImagePlaceholders } from './imageReplacer.js';
-import { scrapeAmazonPriceWithScraperAPI } from './scraperApiPrice.js';
-
-/**
- * Fetch from PAAPI with retry logic
- */
-async function fetchFromPAAPI(asin, retries = 2) {
-  const url = `https://amazon-helper.vercel.app/api/items?asin=${asin}`;
-  
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const response = await fetch(url, { timeout: 15000 });
-      
-      if (!response.ok) {
-        if (attempt < retries) {
-          console.log(`[ASIN: ${asin}] PAAPI attempt ${attempt} failed with ${response.status}, retrying...`);
-          await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); // Exponential backoff
-          continue;
-        }
-        throw new Error(`PAAPI returned status ${response.status}`);
-      }
-      
-      const data = await response.json();
-      const item = data.ItemsResult?.Items?.[0];
-      
-      if (!item) {
-        throw new Error('No item found for this ASIN');
-      }
-      
-      return item;
-    } catch (error) {
-      if (attempt < retries) {
-        console.log(`[ASIN: ${asin}] PAAPI attempt ${attempt} error: ${error.message}, retrying...`);
-        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-        continue;
-      }
-      throw error;
-    }
-  }
-}
+import { scrapeAmazonProductWithScraperAPI } from './scraperApiProduct.js';
+import { trackApiUsage } from './apiUsageTracker.js';
 
 /**
  * Fetch Amazon product data by ASIN
- * Uses PAAPI as primary source, falls back to ScraperAPI for price if unavailable
+ * Uses ScraperAPI for ALL product data (Title, Brand, Description, Images, Price)
+ * Replaces PAAPI entirely
  */
 export async function fetchAmazonData(asin) {
-  const item = await fetchFromPAAPI(asin);
+  const startTime = Date.now();
   
-  // Extract core data
-  let title = item.ItemInfo?.Title?.DisplayValue || '';
-  const brand = 
-    item.ItemInfo?.ByLineInfo?.Brand?.DisplayValue ||
-    item.ItemInfo?.ByLineInfo?.Manufacturer?.DisplayValue ||
-    'Unbranded';
-  
-  // Remove brand from title
-  if (brand && title.toLowerCase().includes(brand.toLowerCase())) {
-    title = title.replace(new RegExp(brand, 'ig'), '').trim();
-  }
-  
-  // Extract price with detailed logging - log the entire Offers structure
-  console.log(`[ASIN: ${asin}] 📦 Full Offers object:`, JSON.stringify(item.Offers, null, 2));
-  console.log(`[ASIN: ${asin}] 🔍 Checking price paths:`);
-  console.log(`   Offers?.Listings?.[0]?.Price?.DisplayAmount: ${item.Offers?.Listings?.[0]?.Price?.DisplayAmount}`);
-  console.log(`   Offers?.Listings?.[0]?.Price?.Amount: ${item.Offers?.Listings?.[0]?.Price?.Amount}`);
-  console.log(`   Offers?.Summaries?.[0]?.LowestPrice?.DisplayAmount: ${item.Offers?.Summaries?.[0]?.LowestPrice?.DisplayAmount}`);
-  console.log(`   Offers?.Summaries?.[0]?.HighestPrice?.DisplayAmount: ${item.Offers?.Summaries?.[0]?.HighestPrice?.DisplayAmount}`);
-  
-  let price = item.Offers?.Listings?.[0]?.Price?.DisplayAmount || 
-              item.Offers?.Listings?.[0]?.Price?.Amount?.toString() ||
-              item.Offers?.Summaries?.[0]?.LowestPrice?.DisplayAmount ||
-              item.Offers?.Summaries?.[0]?.HighestPrice?.DisplayAmount || '';
-  
-  if (price) {
-    price = price.toString().split(' ')[0]; // Extract numeric part (handle both "$49.99" and "49.99")
-    console.log(`[ASIN: ${asin}] ✅ PAAPI price found: "${price}"`);
-  } else {
-    console.warn(`[ASIN: ${asin}] ⚠️ No price in PAAPI response, attempting ScraperAPI...`);
+  try {
+    console.log(`[fetchAmazonData] 🔍 Fetching product data for ASIN: ${asin}`);
     
-    // Fallback to ScraperAPI when PAAPI doesn't provide price
-    try {
-      price = await scrapeAmazonPriceWithScraperAPI(asin, 'US');
-      if (price) {
-        console.log(`[ASIN: ${asin}] ✅ ScraperAPI successfully retrieved price: "${price}"`);
-      }
-    } catch (scraperError) {
-      console.error(`[ASIN: ${asin}] ❌ ScraperAPI also failed:`, scraperError.message);
-      // Price remains empty string - will be caught by validation later
+    // Single ScraperAPI call for ALL data
+    const scrapedData = await scrapeAmazonProductWithScraperAPI(asin, 'US');
+    
+    const responseTime = Date.now() - startTime;
+    
+    // Extract fields
+    let { title, brand, price, description, images } = scrapedData;
+    
+    // Remove brand from title (maintain existing behavior)
+    if (brand && brand !== 'Unbranded' && title.toLowerCase().includes(brand.toLowerCase())) {
+      title = title.replace(new RegExp(brand, 'ig'), '').trim();
     }
+    
+    // Keep images as array (same as PAAPI format)
+    const imagesArray = Array.isArray(images) ? images : [];
+    
+    console.log(`[fetchAmazonData] ✅ Successfully fetched data for ${asin} in ${responseTime}ms`);
+    console.log(`[fetchAmazonData] 📊 Extracted fields: Title="${title.substring(0, 40)}...", Brand="${brand}", Price="${price}", Images=${imagesArray.length} URLs, Description=${description.split('\n').length} features`);
+    console.log(`[fetchAmazonData] 🖼️ First image: ${imagesArray[0] || 'none'}`);
+    
+    return {
+      asin,
+      title,
+      price,
+      brand,
+      description,
+      images: imagesArray, // Return as array (same as PAAPI)
+      rawData: scrapedData // Store scraped data for debugging
+    };
+  } catch (error) {
+    const responseTime = Date.now() - startTime;
+    
+    console.error(`[fetchAmazonData] ❌ Failed to fetch data for ${asin}:`, error.message);
+    throw error;
   }
-  
-  const description = (item.ItemInfo?.Features?.DisplayValues || []).join('\n');
-  
-  // Collect images
-  const images = [];
-  if (item.Images?.Primary?.Large?.URL) {
-    images.push(item.Images.Primary.Large.URL);
-  }
-  if (item.Images?.Variants?.length) {
-    item.Images.Variants.forEach(img => {
-      if (img.Large?.URL && !images.includes(img.Large.URL)) {
-        images.push(img.Large.URL);
-      }
-    });
-  }
-  if (item.Images?.Alternate?.length) {
-    item.Images.Alternate.forEach(img => {
-      if (img.Large?.URL && !images.includes(img.Large.URL)) {
-        images.push(img.Large.URL);
-      }
-    });
-  }
-  
-  return {
-    asin,
-    title,
-    price,
-    brand,
-    description,
-    images,
-    rawData: item
-  };
 }
 
 /**
@@ -145,6 +73,9 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
     price: amazonData.price,
     asin: amazonData.asin
   };
+  
+  // Images are already an array (same as PAAPI format)
+  const imagesArray = Array.isArray(amazonData.images) ? amazonData.images : [];
   
   // Separate configs by processing type for parallel execution
   const directConfigs = [];
@@ -190,7 +121,7 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
       
       // Apply image placeholder replacement for description field
       if (config.ebayField === 'description' && typeof value === 'string') {
-        value = processImagePlaceholders(value, amazonData.images);
+        value = processImagePlaceholders(value, imagesArray);
       }
       
       targetObject[config.ebayField] = value;
@@ -238,7 +169,7 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
         
         // Apply image placeholder replacement for description field and description-like custom fields
         if ((config.ebayField === 'description' || config.ebayField.toLowerCase().includes('description')) && typeof generatedValue === 'string') {
-          generatedValue = processImagePlaceholders(generatedValue, amazonData.images);
+          generatedValue = processImagePlaceholders(generatedValue, imagesArray);
         }
         
         return {
