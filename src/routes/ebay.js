@@ -4037,16 +4037,22 @@ router.get('/stored-returns', async (req, res) => {
       .limit(limitNum)
       .lean(); // Use lean for faster queries and to allow modification
 
-    // Lookup product names from Orders collection
+    // Lookup product names and order dates from Orders collection
     const orderIds = returns.map(r => r.orderId).filter(Boolean);
-    const orders = await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1 }).lean();
+    const orders = await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1, creationDate: 1 }).lean();
     const orderMap = {};
-    orders.forEach(o => { orderMap[o.orderId] = o.productName; });
+    orders.forEach(o => {
+      orderMap[o.orderId] = {
+        productName: o.productName,
+        dateSold: o.creationDate
+      };
+    });
 
-    // Attach productName to each return
-    const returnsWithProductName = returns.map(r => ({
+    // Attach productName and dateSold to each return
+    const returnsWithOrderData = returns.map(r => ({
       ...r,
-      productName: orderMap[r.orderId] || null
+      productName: orderMap[r.orderId]?.productName || null,
+      dateSold: orderMap[r.orderId]?.dateSold || null
     }));
 
     // Get total count for the query
@@ -4054,7 +4060,7 @@ router.get('/stored-returns', async (req, res) => {
     const totalPages = Math.ceil(totalCount / limitNum);
 
     res.json({
-      returns: returnsWithProductName,
+      returns: returnsWithOrderData,
       pagination: {
         currentPage: pageNum,
         totalPages,
