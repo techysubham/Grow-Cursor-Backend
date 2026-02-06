@@ -7,6 +7,7 @@ import SellerPricingConfig from '../models/SellerPricingConfig.js';
 import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
 import { generateSKUFromASIN } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
+import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
 
 const router = express.Router();
 
@@ -618,7 +619,7 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
         title: amazonData.title,
         brand: amazonData.brand,
         price: amazonData.price,
-        imageCount: amazonData.images.length
+        imageCount: amazonData.images ? amazonData.images.split(' | ').filter(url => url.trim()).length : 0
       },
       pricingCalculation: pricingCalculation || null
     });
@@ -802,7 +803,7 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
               title: amazonData.title,
               brand: amazonData.brand,
               price: amazonData.price,
-              imageCount: amazonData.images.length
+              imageCount: amazonData.images ? amazonData.images.split(' | ').filter(url => url.trim()).length : 0
             },
             pricingCalculation: pricingCalculation || null
           };
@@ -1923,7 +1924,8 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
     // Get existing SKUs for this seller to avoid duplicates
     const existingSKUs = await TemplateListing.find({ 
       templateId,
-      sellerId
+      sellerId,
+      status: { $in: ['active', 'draft'] }
     }).distinct('customLabel');
     
     const skuSet = new Set(existingSKUs);
@@ -1973,7 +1975,7 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
         title: `Imported Product - ${cleanASIN}`,
         startPrice: 0.01, // Minimum placeholder
         quantity: 1,
-        status: 'draft',
+        status: 'active',
         conditionId: '1000-New',
         format: 'FixedPrice',
         duration: 'GTC',
@@ -1984,32 +1986,77 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
     
     console.log(`📊 Prepared ${listingsToCreate.length} listings, ${skippedASINs.length} skipped (validation)`);
     
-    // Check for existing listings with same ASINs (database duplicates)
+    // Check for existing listings with same ASINs in active/draft status
     const existingByASIN = await TemplateListing.find({
       templateId,
       sellerId,
-      _asinReference: { $in: listingsToCreate.map(l => l._asinReference) }
+      _asinReference: { $in: listingsToCreate.map(l => l._asinReference) },
+      status: { $in: ['active', 'draft'] }
     }).select('customLabel _asinReference');
     
     const existingASINs = new Set(existingByASIN.map(l => l._asinReference));
     
-    console.log(`🔍 Found ${existingASINs.size} existing ASINs in database`);
+    console.log(`🔍 Found ${existingASINs.size} existing active/draft ASINs in database`);
     
-    // Filter out existing listings
-    const newListings = listingsToCreate.filter(listing => {
+    // Check for inactive listings that can be reactivated
+    const inactiveListings = await TemplateListing.find({
+      templateId,
+      sellerId,
+      _asinReference: { $in: listingsToCreate.map(l => l._asinReference) },
+      status: 'inactive'
+    }).select('customLabel _asinReference');
+    
+    const inactiveASINMap = new Map(inactiveListings.map(l => [l._asinReference, l]));
+    
+    console.log(`🔄 Found ${inactiveASINMap.size} inactive ASINs that can be reactivated`);
+    
+    // Separate listings into: reactivate, skip (already active), or create new
+    const listingsToReactivate = [];
+    const newListings = [];
+    
+    for (const listing of listingsToCreate) {
       if (existingASINs.has(listing._asinReference)) {
+        // Already exists as active/draft - skip
         const existing = existingByASIN.find(e => e._asinReference === listing._asinReference);
         skippedASINs.push({
           asin: listing._asinReference,
           sku: listing.customLabel,
           reason: `Already exists in database (SKU: ${existing.customLabel})`
         });
-        return false;
+      } else if (inactiveASINMap.has(listing._asinReference)) {
+        // Exists as inactive - reactivate
+        listingsToReactivate.push({
+          existing: inactiveASINMap.get(listing._asinReference),
+          newData: listing
+        });
+      } else {
+        // Doesn't exist - create new
+        newListings.push(listing);
       }
-      return true;
-    });
+    }
     
-    console.log(`✅ ${newListings.length} new listings to insert`);
+    console.log(`✅ ${newListings.length} new listings to insert, ${listingsToReactivate.length} to reactivate`);
+    
+    // Reactivate inactive listings
+    let reactivatedCount = 0;
+    if (listingsToReactivate.length > 0) {
+      const reactivateOps = listingsToReactivate.map(({ existing, newData }) => ({
+        updateOne: {
+          filter: { _id: existing._id },
+          update: {
+            $set: {
+              ...newData,
+              status: 'active',
+              updatedAt: Date.now()
+            }
+          }
+        }
+      }));
+      
+      const reactivateResult = await TemplateListing.bulkWrite(reactivateOps);
+      reactivatedCount = reactivateResult.modifiedCount || 0;
+      console.log(`🔄 Reactivated ${reactivatedCount} inactive listings`);
+    }
     
     // Bulk insert new listings
     let importedCount = 0;
@@ -2062,11 +2109,12 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
       }
     }
     
-    console.log(`🎉 Import complete: ${importedCount} imported, ${skippedASINs.length} skipped`);
+    console.log(`🎉 Import complete: ${importedCount} new, ${reactivatedCount} reactivated, ${skippedASINs.length} skipped`);
     
     res.json({
       total: asins.length,
       imported: importedCount,
+      reactivated: reactivatedCount,
       skipped: skippedASINs.length,
       skippedDetails: skippedASINs,
       errors: insertErrors.length > 0 ? insertErrors : undefined
@@ -2158,7 +2206,7 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
         title: `Product - ${cleanSKU}`,
         startPrice: 0.01, // Minimum placeholder
         quantity: 1,
-        status: 'draft',
+        status: 'active',
         conditionId: '1000-New',
         format: 'FixedPrice',
         duration: 'GTC',
@@ -2198,31 +2246,76 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
       return true;
     });
     
-    // Check for existing listings with same SKUs (database duplicates in current template)
+    // Check for existing listings with same SKUs in active/draft status (current template)
     const existingBySKU = await TemplateListing.find({
       templateId,
       sellerId,
-      customLabel: { $in: skusNotInOtherTemplates.map(l => l.customLabel) }
+      customLabel: { $in: skusNotInOtherTemplates.map(l => l.customLabel) },
+      status: { $in: ['active', 'draft'] }
     }).select('customLabel _asinReference');
     
     const existingSKUs = new Set(existingBySKU.map(l => l.customLabel));
     
-    console.log(`🔍 Found ${existingSKUs.size} existing SKUs in database`);
+    console.log(`🔍 Found ${existingSKUs.size} existing active/draft SKUs in database`);
     
-    // Filter out existing listings
-    const newListings = skusNotInOtherTemplates.filter(listing => {
+    // Check for inactive listings that can be reactivated
+    const inactiveListings = await TemplateListing.find({
+      templateId,
+      sellerId,
+      customLabel: { $in: skusNotInOtherTemplates.map(l => l.customLabel) },
+      status: 'inactive'
+    }).select('customLabel _asinReference');
+    
+    const inactiveSKUMap = new Map(inactiveListings.map(l => [l.customLabel, l]));
+    
+    console.log(`🔄 Found ${inactiveSKUMap.size} inactive SKUs that can be reactivated`);
+    
+    // Separate listings into: reactivate, skip (already active), or create new
+    const listingsToReactivate = [];
+    const newListings = [];
+    
+    for (const listing of skusNotInOtherTemplates) {
       if (existingSKUs.has(listing.customLabel)) {
+        // Already exists as active/draft - skip
         const existing = existingBySKU.find(e => e.customLabel === listing.customLabel);
         skippedSKUs.push({
           sku: listing.customLabel,
           reason: `Already exists in database${existing._asinReference ? ` (ASIN: ${existing._asinReference})` : ''}`
         });
-        return false;
+      } else if (inactiveSKUMap.has(listing.customLabel)) {
+        // Exists as inactive - reactivate
+        listingsToReactivate.push({
+          existing: inactiveSKUMap.get(listing.customLabel),
+          newData: listing
+        });
+      } else {
+        // Doesn't exist - create new
+        newListings.push(listing);
       }
-      return true;
-    });
+    }
     
-    console.log(`✅ ${newListings.length} new listings to insert`);
+    console.log(`✅ ${newListings.length} new listings to insert, ${listingsToReactivate.length} to reactivate`);
+    
+    // Reactivate inactive listings
+    let reactivatedCount = 0;
+    if (listingsToReactivate.length > 0) {
+      const reactivateOps = listingsToReactivate.map(({ existing, newData }) => ({
+        updateOne: {
+          filter: { _id: existing._id },
+          update: {
+            $set: {
+              ...newData,
+              status: 'active',
+              updatedAt: Date.now()
+            }
+          }
+        }
+      }));
+      
+      const reactivateResult = await TemplateListing.bulkWrite(reactivateOps);
+      reactivatedCount = reactivateResult.modifiedCount || 0;
+      console.log(`🔄 Reactivated ${reactivatedCount} inactive listings`);
+    }
     
     // Bulk insert new listings
     let importedCount = 0;
@@ -2272,11 +2365,12 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
       }
     }
     
-    console.log(`🎉 SKU Import complete: ${importedCount} imported, ${skippedSKUs.length} skipped`);
+    console.log(`🎉 SKU Import complete: ${importedCount} new, ${reactivatedCount} reactivated, ${skippedSKUs.length} skipped`);
     
     res.json({
       total: skus.length,
       imported: importedCount,
+      reactivated: reactivatedCount,
       skipped: skippedSKUs.length,
       skippedDetails: skippedSKUs,
       errors: insertErrors.length > 0 ? insertErrors : undefined
@@ -2991,6 +3085,138 @@ router.post('/bulk-deactivate', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Error deactivating listings:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/seller/:sellerId/template-listings/api-usage-stats
+ * Get API usage statistics (ScraperAPI, PAAPI, Gemini)
+ */
+router.get('/api/seller/:sellerId/template-listings/api-usage-stats', requireAuth, async (req, res) => {
+  try {
+    const { sellerId } = req.params;
+    const { service, year, month } = req.query;
+    
+    // Build query
+    const query = {};
+    if (service) query.service = service;
+    if (year) query.year = parseInt(year);
+    if (month) query.month = parseInt(month);
+    
+    const stats = await getUsageStats(query);
+    
+    res.json({
+      success: true,
+      stats,
+      message: `Retrieved usage statistics${service ? ` for ${service}` : ''}`
+    });
+  } catch (error) {
+    console.error('[API Usage Stats] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/seller/:sellerId/template-listings/api-usage-field-stats
+ * Get field extraction statistics for a specific service
+ */
+router.get('/api/seller/:sellerId/template-listings/api-usage-field-stats', requireAuth, async (req, res) => {
+  try {
+    const { sellerId } = req.params;
+    const { service, year, month } = req.query;
+    
+    if (!service) {
+      return res.status(400).json({
+        success: false,
+        message: 'Service parameter is required'
+      });
+    }
+    
+    const query = { service };
+    if (year) query.year = parseInt(year);
+    if (month) query.month = parseInt(month);
+    
+    const stats = await getFieldExtractionStats(query);
+    
+    res.json({
+      success: true,
+      stats,
+      message: `Retrieved field extraction statistics for ${service}`
+    });
+  } catch (error) {
+    console.error('[API Field Stats] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/seller/:sellerId/template-listings/api-usage-errors
+ * Get recent API errors for debugging
+ */
+router.get('/api/seller/:sellerId/template-listings/api-usage-errors', requireAuth, async (req, res) => {
+  try {
+    const { sellerId } = req.params;
+    const { service, limit = 50 } = req.query;
+    
+    if (!service) {
+      return res.status(400).json({
+        success: false,
+        message: 'Service parameter is required'
+      });
+    }
+    
+    const errors = await getRecentErrors(service, parseInt(limit));
+    
+    res.json({
+      success: true,
+      errors,
+      count: errors.length,
+      message: `Retrieved ${errors.length} recent errors for ${service}`
+    });
+  } catch (error) {
+    console.error('[API Errors] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/seller/:sellerId/template-listings/api-quota-status
+ * Check quota status for a service
+ */
+router.get('/api/seller/:sellerId/template-listings/api-quota-status', requireAuth, async (req, res) => {
+  try {
+    const { sellerId } = req.params;
+    const { service, quota = 5000 } = req.query;
+    
+    if (!service) {
+      return res.status(400).json({
+        success: false,
+        message: 'Service parameter is required'
+      });
+    }
+    
+    const status = await checkQuotaStatus(service, parseInt(quota));
+    
+    res.json({
+      success: true,
+      quotaStatus: status,
+      message: `Quota status: ${status.status.toUpperCase()} - ${status.percentUsed}% used`
+    });
+  } catch (error) {
+    console.error('[Quota Status] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
   }
 });
 
