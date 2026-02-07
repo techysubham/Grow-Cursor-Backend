@@ -8,6 +8,7 @@ import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
 import { generateSKUFromASIN } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
+import { getAsinCacheStats, clearAsinCache, invalidateAsinCache } from '../utils/asinCache.js';
 
 const router = express.Router();
 
@@ -378,6 +379,224 @@ router.get('/analytics', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Error fetching analytics:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Bulk preview with SSE streaming (real-time updates) - MUST be before /:id route
+router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, asins: asinsParam } = req.query;
+    
+    if (!templateId || !sellerId || !asinsParam) {
+      return res.status(400).json({ error: 'Template ID, Seller ID, and ASINs are required' });
+    }
+    
+    const asins = asinsParam.split(',').map(a => a.trim()).filter(Boolean);
+    
+    if (asins.length === 0) {
+      return res.status(400).json({ error: 'At least one ASIN is required' });
+    }
+    
+    if (asins.length > 80) {
+      return res.status(400).json({ error: 'Maximum 80 ASINs allowed per batch' });
+    }
+    
+    // Set up SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no' // Disable nginx buffering
+    });
+    
+    console.log(`📡 [SSE Stream] Starting for ${asins.length} ASINs...`);
+    
+    // Send initial event
+    res.write(`data: ${JSON.stringify({ type: 'started', total: asins.length })}\n\n`);
+    
+    // Validate seller and template
+    const [seller, template] = await Promise.all([
+      Seller.findById(sellerId),
+      getEffectiveTemplate(templateId, sellerId)
+    ]);
+    
+    if (!seller || !template) {
+      res.write(`data: ${JSON.stringify({ type: 'error', error: 'Seller or template not found' })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+    
+    // Get pricing config
+    let pricingConfig = template.pricingConfig;
+    const sellerConfig = await SellerPricingConfig.findOne({ sellerId, templateId });
+    if (sellerConfig) {
+      pricingConfig = sellerConfig.pricingConfig;
+    }
+    
+    // Check for existing ASINs and SKUs (same as bulk-preview)
+    const existingAsinListings = await TemplateListing.find({
+      sellerId,
+      _asinReference: { $in: asins },
+      status: 'active'
+    }).select('_asinReference templateId').lean();
+    
+    const asinInCurrentTemplate = new Set();
+    const asinInOtherTemplates = new Map();
+    
+    existingAsinListings.forEach(listing => {
+      if (listing.templateId.toString() === templateId.toString()) {
+        asinInCurrentTemplate.add(listing._asinReference);
+      } else {
+        asinInOtherTemplates.set(listing._asinReference, listing.templateId);
+      }
+    });
+    
+    // Pre-generate SKUs and check conflicts
+    const generatedSKUs = asins.map(asin => ({
+      asin,
+      sku: generateSKUFromASIN(asin)
+    }));
+    
+    const existingBySKU = await TemplateListing.find({
+      templateId,
+      sellerId,
+      customLabel: { $in: generatedSKUs.map(item => item.sku) },
+      status: { $in: ['active', 'draft'] }
+    }).select('customLabel _asinReference _id').lean();
+    
+    const existingSKUMap = new Map(
+      existingBySKU.map(listing => [listing.customLabel, {
+        id: listing._id,
+        asin: listing._asinReference
+      }])
+    );
+    
+    // Process ASINs in parallel and stream results as they complete
+    let completed = 0;
+    
+    const processPromises = asins.map(async (asin) => {
+      try {
+        // Check for blocking conditions
+        if (asinInOtherTemplates.has(asin)) {
+          const item = {
+            id: `preview-${asin}`,
+            asin,
+            sku: generateSKUFromASIN(asin),
+            status: 'blocked',
+            blockedReason: 'cross_template_duplicate',
+            errors: [`ASIN exists in another template`]
+          };
+          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+          return;
+        }
+        
+        const sku = generateSKUFromASIN(asin);
+        const existingSKU = existingSKUMap.get(sku);
+        
+        if (existingSKU) {
+          const item = {
+            id: `preview-${asin}`,
+            asin,
+            sku,
+            status: 'blocked',
+            blockedReason: 'sku_conflict',
+            errors: [`SKU ${sku} already exists`]
+          };
+          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+          return;
+        }
+        
+        // Fetch and process ASIN
+        const amazonData = await fetchAmazonData(asin);
+        const { coreFields, customFields, pricingCalculation } = 
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+        
+        const mergedCoreFields = {
+          ...(template.coreFieldDefaults || {}),
+          ...coreFields
+        };
+        
+        if (template?.customColumns && template.customColumns.length > 0) {
+          template.customColumns.forEach(col => {
+            if (col.defaultValue && !customFields[col.name]) {
+              customFields[col.name] = col.defaultValue;
+            }
+          });
+        }
+        
+        const warnings = [];
+        const validationErrors = [];
+        
+        if (!mergedCoreFields.title) {
+          validationErrors.push('Missing required field: title');
+        }
+        
+        if (mergedCoreFields.startPrice === undefined || mergedCoreFields.startPrice === null || mergedCoreFields.startPrice === '') {
+          validationErrors.push('Missing required field: startPrice');
+        }
+        
+        if (asinInCurrentTemplate.has(asin)) {
+          warnings.push('ASIN already exists in this template');
+        }
+        
+        if (!mergedCoreFields.description) {
+          warnings.push('Missing description');
+        }
+        
+        const item = {
+          id: `preview-${asin}`,
+          asin,
+          sku,
+          sourceData: {
+            title: amazonData.title,
+            brand: amazonData.brand,
+            price: amazonData.price,
+            description: amazonData.description,
+            images: amazonData.images
+          },
+          generatedListing: {
+            ...mergedCoreFields,
+            customLabel: sku,
+            customFields,
+            _asinReference: asin
+          },
+          pricingCalculation,
+          warnings,
+          errors: validationErrors,
+          status: validationErrors.length > 0 ? 'error' : (warnings.length > 0 ? 'warning' : 'success')
+        };
+        
+        // Stream the completed item
+        res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+        
+      } catch (error) {
+        console.error(`❌ Error processing ASIN ${asin}:`, error);
+        const item = {
+          id: `preview-${asin}`,
+          asin,
+          sku: generateSKUFromASIN(asin),
+          status: 'error',
+          errors: [error.message]
+        };
+        res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+      }
+    });
+    
+    // Wait for all to complete
+    await Promise.allSettled(processPromises);
+    
+    // Send completion event
+    res.write(`data: ${JSON.stringify({ type: 'complete', total: completed })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    
+    console.log(`📡 [SSE Stream] Completed: ${completed}/${asins.length} ASINs`);
+    res.end();
+    
+  } catch (error) {
+    console.error('SSE Stream error:', error);
+    res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
   }
 });
 
@@ -3246,4 +3465,71 @@ router.get('/api/seller/:sellerId/template-listings/api-quota-status', requireAu
   }
 });
 
+/**
+ * GET /template-listings/cache-stats
+ * Get ASIN cache statistics
+ */
+router.get('/cache-stats', requireAuth, async (req, res) => {
+  try {
+    const stats = getAsinCacheStats();
+    
+    res.json({
+      success: true,
+      cache: stats,
+      message: `Cache ${stats.enabled ? 'enabled' : 'disabled'} - ${stats.keys} ASINs cached, ${stats.hitRate}% hit rate`
+    });
+  } catch (error) {
+    console.error('[Cache Stats] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /template-listings/cache-clear
+ * Clear ASIN cache
+ */
+router.post('/cache-clear', requireAuth, async (req, res) => {
+  try {
+    clearAsinCache();
+    
+    res.json({
+      success: true,
+      message: 'ASIN cache cleared successfully'
+    });
+  } catch (error) {
+    console.error('[Cache Clear] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /template-listings/cache-invalidate/:asin
+ * Invalidate specific ASIN from cache
+ */
+router.post('/cache-invalidate/:asin', requireAuth, async (req, res) => {
+  try {
+    const { asin } = req.params;
+    const invalidated = invalidateAsinCache(asin);
+    
+    res.json({
+      success: true,
+      invalidated,
+      message: invalidated ? `ASIN ${asin} removed from cache` : `ASIN ${asin} not found in cache`
+    });
+  } catch (error) {
+    console.error('[Cache Invalidate] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
 export default router;
+

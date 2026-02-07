@@ -3,6 +3,7 @@ import { calculateStartPrice } from './pricingCalculator.js';
 import { processImagePlaceholders } from './imageReplacer.js';
 import { scrapeAmazonProductWithScraperAPI } from './scraperApiProduct.js';
 import { trackApiUsage } from './apiUsageTracker.js';
+import { getCachedAsinData, setCachedAsinData } from './asinCache.js';
 
 /**
  * Fetch Amazon product data by ASIN
@@ -14,6 +15,14 @@ export async function fetchAmazonData(asin) {
   
   try {
     console.log(`[fetchAmazonData] 🔍 Fetching product data for ASIN: ${asin}`);
+    
+    // Check cache first
+    const cached = getCachedAsinData(asin);
+    if (cached) {
+      const cacheTime = Date.now() - startTime;
+      console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} (${cacheTime}ms)`);
+      return cached;
+    }
     
     // Single ScraperAPI call for ALL data
     const scrapedData = await scrapeAmazonProductWithScraperAPI(asin, 'US');
@@ -35,7 +44,7 @@ export async function fetchAmazonData(asin) {
     console.log(`[fetchAmazonData] 📊 Extracted fields: Title="${title.substring(0, 40)}...", Brand="${brand}", Price="${price}", Images=${imagesArray.length} URLs, Description=${description.split('\n').length} features`);
     console.log(`[fetchAmazonData] 🖼️ First image: ${imagesArray[0] || 'none'}`);
     
-    return {
+    const result = {
       asin,
       title,
       price,
@@ -44,6 +53,11 @@ export async function fetchAmazonData(asin) {
       images: imagesArray, // Return as array (same as PAAPI)
       rawData: scrapedData // Store scraped data for debugging
     };
+    
+    // Cache the result for future requests
+    setCachedAsinData(asin, result);
+    
+    return result;
   } catch (error) {
     const responseTime = Date.now() - startTime;
     

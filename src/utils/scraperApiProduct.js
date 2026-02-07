@@ -394,6 +394,7 @@ function extractProductDataFromHTML(html, asin) {
 
 /**
  * Main function - Scrape complete Amazon product data using ScraperAPI
+ * With intelligent retry and exponential backoff
  * @param {string} asin - Amazon ASIN
  * @param {string} region - Amazon region (US, UK, CA, AU)
  * @param {number} retries - Retry attempts (default: 2)
@@ -451,8 +452,9 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         // Validate critical fields
         if (!price) {
           if (attempt < maxRetries) {
-            console.warn(`[ScraperAPI] ⚠️ No price found for ${asin}, retrying...`);
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            const backoffDelay = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
+            console.warn(`[ScraperAPI] ⚠️ No price found for ${asin}, retrying after ${backoffDelay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, backoffDelay));
             continue;
           }
           console.warn(`[ScraperAPI] ⚠️ No price found for ASIN: ${asin}`);
@@ -497,31 +499,19 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
       } catch (error) {
         const responseTime = Date.now() - startTime;
         
-        // Don't retry on 429 errors or NO_PRICE_FOUND (final attempt)
-        if (error.response?.status === 429 || error.message === 'NO_PRICE_FOUND') {
-          // Track failed usage
-          trackApiUsage({
-            service: 'ScraperAPI',
-            asin,
-            creditsUsed: 1,
-            success: false,
-            errorMessage: error.message,
-            responseTime,
-            extractedFields: []
-          }).catch(err => console.error('[Usage Tracker] Failed to track:', err.message));
-          
-          console.error(`[ScraperAPI] ❌ Failed to scrape ASIN ${asin}:`, error.message);
-          throw error;
-        }
+        // Check if error is retryable
+        const isRetryable = error.response?.status !== 429 && error.message !== 'NO_PRICE_FOUND';
         
-        // Retry on other errors
-        if (attempt < maxRetries) {
-          console.warn(`[ScraperAPI] ⚠️ Attempt ${attempt} failed for ${asin}: ${error.message}, retrying...`);
-          await new Promise(resolve => setTimeout(resolve, 2000 * attempt)); // Exponential backoff
+        // Retry with exponential backoff for retryable errors
+        if (isRetryable && attempt < maxRetries) {
+          const backoffDelay = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
+          console.warn(`[ScraperAPI] ⚠️ Attempt ${attempt} failed for ${asin}: ${error.message}`);
+          console.log(`[ScraperAPI] 🔄 Retrying after ${backoffDelay}ms (exponential backoff)...`);
+          await new Promise(resolve => setTimeout(resolve, backoffDelay));
           continue;
         }
         
-        // Track final failed attempt
+        // Track failed usage
         trackApiUsage({
           service: 'ScraperAPI',
           asin,
@@ -532,7 +522,7 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
           extractedFields: []
         }).catch(err => console.error('[Usage Tracker] Failed to track:', err.message));
         
-        console.error(`[ScraperAPI] ❌ Failed to scrape ASIN ${asin}:`, error.message);
+        console.error(`[ScraperAPI] ❌ Failed to scrape ASIN ${asin} after ${attempt} attempt(s):`, error.message);
         throw error;
       }
     }
