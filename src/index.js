@@ -51,6 +51,7 @@ import templateListingsRoutes from './routes/templateListings.js';
 import templateOverridesRoutes from './routes/templateOverrides.js';
 import sellerPricingConfigRoutes from './routes/sellerPricingConfig.js';
 import accountHealthRoutes from './routes/accountHealth.js';
+import chatTemplatesRoutes from './routes/chatTemplates.js';
 
 const app = express();
 
@@ -120,6 +121,7 @@ app.use('/api/template-listings', templateListingsRoutes);
 app.use('/api/template-overrides', templateOverridesRoutes);
 app.use('/api/seller-pricing-config', sellerPricingConfigRoutes);
 app.use('/api/account-health', accountHealthRoutes);
+app.use('/api/chat-templates', chatTemplatesRoutes);
 
 
 const port = process.env.PORT || 5000;

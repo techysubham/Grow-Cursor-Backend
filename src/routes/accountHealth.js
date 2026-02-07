@@ -12,7 +12,7 @@ const router = Router();
 // SNAD-related return reasons
 const SNAD_RETURN_REASONS = [
   'NOT_AS_DESCRIBED',
-  'DEFECTIVE',
+  'DEFECTIVE_ITEM',
   'WRONG_ITEM',
   'MISSING_PARTS',
   'ARRIVED_DAMAGED',
