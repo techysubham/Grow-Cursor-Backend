@@ -1,47 +1,22 @@
 import axios from 'axios';
 import { trackApiUsage } from './apiUsageTracker.js';
+import pLimit from 'p-limit';
 
 /**
  * ScraperAPI - Complete Product Data Extraction
  * Uses Structured Data API endpoint for clean JSON extraction
  * 
- * Free tier: 5,000 requests/month
- * Sign up: https://www.scraperapi.com
+ * Optimized with p-limit for concurrent requests
+ * ScraperAPI Plan: 20 concurrent requests available
  */
 
 const SCRAPER_API_BASE = 'https://api.scraperapi.com/structured/amazon/product/v1';
 
-// Rate limiting queue to prevent 429 errors
-let requestQueue = Promise.resolve();
-let lastRequestTime = 0;
-const MIN_REQUEST_DELAY = parseInt(process.env.SCRAPER_API_RATE_LIMIT_MS) || 2000;
+// Concurrency limiter - use 15 of 20 available concurrent requests
+const CONCURRENT_REQUESTS = parseInt(process.env.SCRAPER_API_CONCURRENT) || 15;
+const limit = pLimit(CONCURRENT_REQUESTS);
 
-/**
- * Throttle function to ensure minimum delay between API calls
- */
-async function throttledRequest(requestFn) {
-  return new Promise((resolve, reject) => {
-    requestQueue = requestQueue.then(async () => {
-      const now = Date.now();
-      const timeSinceLastRequest = now - lastRequestTime;
-      const delayNeeded = Math.max(0, MIN_REQUEST_DELAY - timeSinceLastRequest);
-      
-      if (delayNeeded > 0) {
-        console.log(`[ScraperAPI] ⏱️ Rate limiting: waiting ${delayNeeded}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delayNeeded));
-      }
-      
-      lastRequestTime = Date.now();
-      
-      try {
-        const result = await requestFn();
-        resolve(result);
-      } catch (error) {
-        reject(error);
-      }
-    });
-  });
-}
+console.log(`[ScraperAPI] 🚀 Initialized with ${CONCURRENT_REQUESTS} concurrent request limit`);
 
 /**
  * Get API key from environment
@@ -425,7 +400,7 @@ function extractProductDataFromHTML(html, asin) {
  * @returns {Promise<Object>} - Complete product data
  */
 export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', retries = 2) {
-  return throttledRequest(async () => {
+  return limit(async () => {
     const SCRAPER_API_KEY = getApiKey();
     const timeout = parseInt(process.env.SCRAPER_API_TIMEOUT_MS) || 30000;
     const maxRetries = parseInt(process.env.SCRAPER_API_MAX_RETRIES) || retries;
@@ -565,25 +540,25 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
 }
 
 /**
- * Batch scrape multiple ASINs (with throttling)
+ * Batch scrape multiple ASINs in parallel (with concurrency limit)
  * @param {Array<string>} asins - Array of ASINs to scrape
  * @param {string} region - Amazon region
  * @returns {Promise<Array>} - Array of scraped product data
  */
 export async function batchScrapeAmazonProductsWithScraperAPI(asins, region = 'US') {
-  console.log(`[ScraperAPI] 📦 Batch scraping ${asins.length} ASINs...`);
+  console.log(`[ScraperAPI] 📦 Batch scraping ${asins.length} ASINs in parallel (max ${CONCURRENT_REQUESTS} concurrent)...`);
   
-  const results = [];
+  // Process all ASINs in parallel with concurrency limit
+  const promises = asins.map(asin =>
+    scrapeAmazonProductWithScraperAPI(asin, region)
+      .then(data => ({ asin, data, success: true }))
+      .catch(error => {
+        console.error(`[ScraperAPI] ❌ Batch scrape failed for ${asin}:`, error.message);
+        return { asin, data: null, success: false, error: error.message };
+      })
+  );
   
-  for (const asin of asins) {
-    try {
-      const data = await scrapeAmazonProductWithScraperAPI(asin, region);
-      results.push({ asin, data, success: true });
-    } catch (error) {
-      console.error(`[ScraperAPI] ❌ Batch scrape failed for ${asin}:`, error.message);
-      results.push({ asin, data: null, success: false, error: error.message });
-    }
-  }
+  const results = await Promise.all(promises);
   
   const successCount = results.filter(r => r.success).length;
   console.log(`[ScraperAPI] ✅ Batch complete: ${successCount}/${asins.length} successful`);

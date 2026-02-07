@@ -739,10 +739,19 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
     const startTime = Date.now();
     const results = [];
     
-    // Process ASINs in batches of 5 (parallel within batch, sequential between batches)
-    const batchSize = 5;
+    // Process ASINs in batches of 20 (parallel within batch, parallel between batches)
+    const batchSize = parseInt(process.env.BACKEND_BATCH_SIZE) || 20;
+    const batches = [];
     for (let i = 0; i < cleanedAsins.length; i += batchSize) {
-      const batch = cleanedAsins.slice(i, i + batchSize);
+      batches.push(cleanedAsins.slice(i, i + batchSize));
+    }
+    
+    console.log(`🚀 Processing ${batches.length} batches in parallel (${batchSize} ASINs per batch)...`);
+    
+    // Process all batches in parallel
+    const batchPromises = batches.map(async (batch, batchIndex) => {
+      const batchNum = batchIndex + 1;
+      console.log(`  ⏳ Batch ${batchNum}/${batches.length}: Starting ${batch.length} ASINs...`);
       
       const batchPromises = batch.map(async (asin) => {
         // Check if ASIN exists in OTHER templates for this seller (block)
@@ -820,13 +829,30 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
       });
       
       const batchResults = await Promise.all(batchPromises);
-      results.push(...batchResults);
-      
-      // Add small delay between batches to avoid rate limiting
-      if (i + batchSize < cleanedAsins.length) {
-        await new Promise(resolve => setTimeout(resolve, 500));
+      console.log(`  ✅ Batch ${batchNum}/${batches.length}: Completed`);
+      return batchResults;
+    });
+    
+    // Wait for all batches to complete (use allSettled for resilience)
+    const allBatchResults = await Promise.allSettled(batchPromises);
+    
+    // Flatten and collect all results
+    allBatchResults.forEach((batchResult, batchIndex) => {
+      if (batchResult.status === 'fulfilled') {
+        results.push(...batchResult.value);
+      } else {
+        // Entire batch failed (rare) - mark all ASINs in batch as failed
+        const batch = batches[batchIndex];
+        console.error(`❌ Batch ${batchIndex + 1} completely failed:`, batchResult.reason);
+        batch.forEach(asin => {
+          results.push({
+            asin,
+            status: 'error',
+            error: `Batch processing failed: ${batchResult.reason?.message || 'Unknown error'}`
+          });
+        });
       }
-    }
+    });
     
     const processingTime = ((Date.now() - startTime) / 1000).toFixed(1);
     const successful = results.filter(r => r.status === 'success').length;

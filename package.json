@@ -27,6 +27,7 @@
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "openai": "^6.15.0",
+    "p-limit": "^7.3.0",
     "scraperapi-sdk": "^2.0.1",
     "sharp": "^0.34.5",
     "xml2js": "^0.6.2"
