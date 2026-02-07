@@ -6675,7 +6675,7 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
   const { orderId } = req.params;
   const updates = req.body;
 
-  const allowedFields = ['amazonAccount', 'arrivingDate', 'beforeTax', 'estimatedTax', 'azOrderId', 'amazonRefund', 'cardName', 'remark'];
+  const allowedFields = ['amazonAccount', 'arrivingDate', 'beforeTax', 'estimatedTax', 'azOrderId', 'amazonRefund', 'cardName', 'remark', 'alreadyInUse'];
   const updateData = {};
 
   Object.keys(updates).forEach(key => {
@@ -7408,7 +7408,27 @@ router.get('/awaiting-sheet-summary', requireAuth, requireRole('fulfillmentadmin
             }
           },
           // Total orders count (for Upload Tracking column)
-          uploadTrackingCount: { $sum: 1 }
+          uploadTrackingCount: { $sum: 1 },
+          // Count orders with alreadyInUse = 'Yes' and no tracking number
+          alreadyInUseCount: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$alreadyInUse', 'Yes'] },
+                    {
+                      $or: [
+                        { $eq: [{ $ifNull: ['$trackingNumber', ''] }, ''] },
+                        { $eq: ['$trackingNumber', null] }
+                      ]
+                    }
+                  ]
+                },
+                1,
+                0
+              ]
+            }
+          }
         }
       },
       // Lookup seller info
@@ -7431,7 +7451,6 @@ router.get('/awaiting-sheet-summary', requireAuth, requireRole('fulfillmentadmin
         }
       },
       { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
-      // Project final shape
       {
         $project: {
           sellerId: '$_id',
@@ -7440,6 +7459,7 @@ router.get('/awaiting-sheet-summary', requireAuth, requireRole('fulfillmentadmin
           deliveredCount: 1,
           inTransitCount: 1,
           uploadTrackingCount: 1,
+          alreadyInUseCount: 1,
           _id: 0
         }
       },
@@ -7451,8 +7471,9 @@ router.get('/awaiting-sheet-summary', requireAuth, requireRole('fulfillmentadmin
       trackingId: acc.trackingId + item.trackingIdCount,
       delivered: acc.delivered + item.deliveredCount,
       inTransit: acc.inTransit + item.inTransitCount,
-      uploadTracking: acc.uploadTracking + item.uploadTrackingCount
-    }), { trackingId: 0, delivered: 0, inTransit: 0, uploadTracking: 0 });
+      uploadTracking: acc.uploadTracking + item.uploadTrackingCount,
+      alreadyInUse: acc.alreadyInUse + item.alreadyInUseCount
+    }), { trackingId: 0, delivered: 0, inTransit: 0, uploadTracking: 0, alreadyInUse: 0 });
 
     res.json({
       date,

@@ -56,8 +56,8 @@ const OrderSchema = new mongoose.Schema(
     estimatedTaxUSD: Number, // Amazon estimated tax in USD
     conversionRate: Number, // Stored conversion rate for reference
     cancelState: String, // NONE_REQUESTED, CANCEL_REQUESTED, CANCELED, etc.
-    worksheetStatus: { 
-      type: String, 
+    worksheetStatus: {
+      type: String,
       enum: ['open', 'attended', 'resolved'],
       default: 'open'
     }, // Manual status for worksheet tracking
@@ -67,8 +67,8 @@ const OrderSchema = new mongoose.Schema(
     trackingNumber: String, // Extracted from fulfillmentHrefs
     manualTrackingNumber: String, // Manually entered tracking number (separate from trackingNumber)
     purchaseMarketplaceId: String, // e.g., EBAY_US, EBAY_AUS, EBAY_Canada
-    messagingStatus: { 
-      type: String, 
+    messagingStatus: {
+      type: String,
       enum: ['Not Yet Started', 'Ongoing Conversation', 'Resolved'],
       default: 'Not Yet Started'
     },
@@ -78,8 +78,8 @@ const OrderSchema = new mongoose.Schema(
       default: 'None'
     },
     resolvedFrom: String, // Track which page it was resolved from: 'Return', 'Replace', or 'INR'
-    sellerFault: { 
-      type: String, 
+    sellerFault: {
+      type: String,
       enum: ['Yes', 'No'],
       default: 'No'
     }, // For Account Health Report - track if seller is at fault for SNAD
@@ -121,14 +121,21 @@ const OrderSchema = new mongoose.Schema(
     igst: Number, // 18% of marketplaceFee
     totalCC: Number, // marketplaceFee + igst
     profit: { type: Number, default: 0 }, // P.Balance (INR) - A_total-inr - Total_CC
-    
+
     // Manual logs field for internal notes (used in Issues & Resolutions)
     logs: { type: String, default: '' },
-    
+
     // Auto-message feature (24-hour order processing message)
     autoMessageSent: { type: Boolean, default: false },
     autoMessageSentAt: Date,
     autoMessageDisabled: { type: Boolean, default: false },
+
+    // Already in use flag for Awaiting Shipment
+    alreadyInUse: {
+      type: String,
+      enum: ['Yes', 'No'],
+      default: 'No'
+    },
   },
   { timestamps: true }
 );
