@@ -7367,7 +7367,7 @@ router.post('/orders/send-auto-messages', requireAuth, requireRole('fulfillmenta
 // =====================================================
 router.get('/awaiting-sheet-summary', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
   try {
-    const { date } = req.query;
+    const { date, marketplace } = req.query;
 
     if (!date) {
       return res.status(400).json({ error: 'Date is required (YYYY-MM-DD format)' });
@@ -7387,6 +7387,11 @@ router.get('/awaiting-sheet-summary', requireAuth, requireRole('fulfillmentadmin
       shipByDate: { $gte: startOfDay, $lte: endOfDay },
       cancelState: { $in: ['NONE_REQUESTED', 'IN_PROGRESS', null, ''] }
     };
+
+    // Add marketplace filter if provided
+    if (marketplace && marketplace !== '') {
+      baseMatch.purchaseMarketplaceId = marketplace === 'EBAY_CA' ? { $in: ['EBAY_CA', 'EBAY_ENCA'] } : marketplace;
+    }
 
     // Aggregation pipeline - group by seller with conditional counts
     const summary = await Order.aggregate([
