@@ -1176,7 +1176,7 @@ router.get('/order/:orderId', requireAuth, requireRole('fulfillmentadmin', 'supe
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate } = req.query;
 
   try {
     let query = {};
@@ -1213,6 +1213,12 @@ router.get('/stored-orders', async (req, res) => {
         $ne: '',
         $regex: /^\d{4}-\d{2}-\d{2}/ // Only ISO formatted dates
       };
+
+      // Optional arrival date range filter (string compare is safe for YYYY-MM-DD)
+      if (arrivalStartDate || arrivalEndDate) {
+        if (arrivalStartDate) query.arrivingDate.$gte = arrivalStartDate;
+        if (arrivalEndDate) query.arrivingDate.$lte = arrivalEndDate;
+      }
     }
 
     // Amazon Account Filter

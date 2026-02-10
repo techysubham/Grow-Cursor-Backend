@@ -14,6 +14,11 @@ const marketMetricSchema = new mongoose.Schema({
     type: Date,
     required: true
   },
+  seller: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Seller',
+    default: null
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -22,7 +27,9 @@ const marketMetricSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Index for efficient querying by date
+// Index for efficient querying by seller/date
+marketMetricSchema.index({ type: 1, seller: 1, effectiveDate: -1 });
+// Backward-compat index
 marketMetricSchema.index({ type: 1, effectiveDate: -1 });
 
 const MarketMetric = mongoose.model('MarketMetric', marketMetricSchema);

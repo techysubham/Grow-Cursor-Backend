@@ -197,27 +197,38 @@ router.get('/evaluation-windows', requireAuth, requireRole('fulfillmentadmin', '
     // We'll generate about 12 windows (84 days of weekly windows)
     const maxWindows = 12;
 
-    // Fetch market metrics history
-    const marketMetrics = await MarketMetric.find().sort({ effectiveDate: 1 }).lean();
+    // Fetch market metrics history:
+    // - with seller selected: include that seller's metrics + global fallback metrics
+    // - without seller selected: use only global metrics
+    const marketMetricQuery = sellerId
+      ? {
+          type: 'bbe_market_avg',
+          $or: [
+            { seller: new mongoose.Types.ObjectId(sellerId) },
+            { seller: { $exists: false } },
+            { seller: null }
+          ]
+        }
+      : {
+          type: 'bbe_market_avg',
+          $or: [{ seller: { $exists: false } }, { seller: null }]
+        };
+    const marketMetrics = await MarketMetric.find(marketMetricQuery).sort({ effectiveDate: 1 }).lean();
+    const sellerScopedMetrics = sellerId
+      ? marketMetrics.filter(m => m.seller && m.seller.toString() === sellerId)
+      : [];
+    const globalMetrics = marketMetrics.filter(m => !m.seller);
     
     for (let i = 0; i < maxWindows; i++) {
-      // Calculate data window end date (1 week offset requested)
-      // Original logic was currentWindowEnd - 7 days buffer.
-      // New request: "1st row components to go and instead the 2nd row components to come up to the first"
-      // This means for a window ending on date X, we want the data that would normally belong to the window ending on X-7.
-      // So calculation end = (X - 7) - 7 = X - 14 days.
-      
-      const dataWindowEnd = new Date(currentWindowEnd);
-      dataWindowEnd.setDate(dataWindowEnd.getDate() - 7); // Shift to previous window's end date
-      
-      // Now apply the standard 7-day buffer calculation on that previous window
-      const calculationEnd = new Date(dataWindowEnd);
-      calculationEnd.setDate(calculationEnd.getDate() - 7);
+      // Data should cover 84 days ending on the displayed window end date minus 1 day.
+      // Example: if display end is 01/25, data should include up to 01/24.
+      const calculationEnd = new Date(currentWindowEnd);
+      calculationEnd.setDate(calculationEnd.getDate() - 1);
       calculationEnd.setHours(23, 59, 59, 999);
 
-      // Calculate the start date (84 days before the calculation end)
+      // 84-day inclusive window: start = end - 83 days
       const windowStart = new Date(calculationEnd);
-      windowStart.setDate(windowStart.getDate() - 84);
+      windowStart.setDate(windowStart.getDate() - 83);
       windowStart.setHours(0, 0, 0, 0);
 
       // Get total sales in this 84-day window
@@ -249,9 +260,11 @@ router.get('/evaluation-windows', requireAuth, requireRole('fulfillmentadmin', '
       evaluationWindowStart.setHours(0, 0, 0, 0);
 
       // Determine Market Avg for this window
-      // Find the latest metric that is effective on or before evaluationWindowEnd
+      // Priority: seller-scoped metric -> global fallback metric
       let marketAvg = 1.1; // Default fallback
-      const applicableMetric = marketMetrics.findLast(m => new Date(m.effectiveDate) <= new Date(currentWindowEnd));
+      const applicableMetric = (sellerId ? sellerScopedMetrics : globalMetrics)
+        .findLast(m => new Date(m.effectiveDate) <= new Date(currentWindowEnd))
+        || globalMetrics.findLast(m => new Date(m.effectiveDate) <= new Date(currentWindowEnd));
       if (applicableMetric) {
         marketAvg = applicableMetric.value;
       }
@@ -287,7 +300,7 @@ router.get('/evaluation-windows', requireAuth, requireRole('fulfillmentadmin', '
  */
 router.post('/evaluation-windows/market-avg', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
   try {
-    const { value, effectiveDate } = req.body;
+    const { value, effectiveDate, sellerId } = req.body;
     
     if (!value || isNaN(value)) {
       return res.status(400).json({ error: 'Valid value is required' });
@@ -295,10 +308,14 @@ router.post('/evaluation-windows/market-avg', requireAuth, requireRole('fulfillm
     if (!effectiveDate) {
       return res.status(400).json({ error: 'Effective date is required' });
     }
+    if (sellerId && !mongoose.Types.ObjectId.isValid(sellerId)) {
+      return res.status(400).json({ error: 'Invalid sellerId' });
+    }
 
     const metric = new MarketMetric({
       value,
       effectiveDate: new Date(effectiveDate),
+      ...(sellerId ? { seller: new mongoose.Types.ObjectId(sellerId) } : {}),
       createdBy: req.user._id
     });
 
@@ -353,7 +370,10 @@ router.get('/overview', requireAuth, requireRole('fulfillmentadmin', 'superadmin
     const sellers = await Seller.find().populate('user', 'username email').lean();
 
     // Get current market avg
-    const latestMarketMetric = await MarketMetric.findOne({ type: 'bbe_market_avg' }).sort({ effectiveDate: -1 }).lean();
+    const latestMarketMetric = await MarketMetric.findOne({
+      type: 'bbe_market_avg',
+      $or: [{ seller: { $exists: false } }, { seller: null }]
+    }).sort({ effectiveDate: -1 }).lean();
     const marketAvg = latestMarketMetric?.value || 1.1;
 
     // Calculate window end dates for 4 weeks
