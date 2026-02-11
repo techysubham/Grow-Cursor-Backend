@@ -2536,6 +2536,10 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
 
               if (!existingOrder) {
                 const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+                const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
+                if (policyEligibleAt) {
+                  orderData.policyMessageEligibleAt = policyEligibleAt;
+                }
                 const newOrder = await Order.create(orderData);
                 newOrders.push(newOrder);
                 console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
@@ -2786,6 +2790,15 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
       totalUpdatedOrders
     });
 
+    // Trigger delayed policy messaging in background after polling
+    processPendingPolicyMessages(50)
+      .then((r) => {
+        if (r.processed > 0) {
+          console.log(`[PolicyMessage] Background run: processed=${r.processed}, sent=${r.sent}, failed=${r.failed}`);
+        }
+      })
+      .catch((e) => console.error('[PolicyMessage] Background run failed:', e.message));
+
     console.log('\n========== POLLING SUMMARY ==========');
     console.log(`Total sellers polled: ${sellers.length}`);
     console.log(`Total new orders: ${totalNewOrders}`);
@@ -2890,6 +2903,10 @@ router.post('/poll-new-orders', requireAuth, requireRole('fulfillmentadmin', 'su
 
             if (!existingOrder) {
               const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+              const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
+              if (policyEligibleAt) {
+                orderData.policyMessageEligibleAt = policyEligibleAt;
+              }
               const newOrder = await Order.create(orderData);
               newOrders.push(newOrder);
               console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
@@ -2940,6 +2957,15 @@ router.post('/poll-new-orders', requireAuth, requireRole('fulfillmentadmin', 'su
       totalPolled: sellers.length,
       totalNewOrders
     });
+
+    // Trigger delayed policy messaging in background after polling
+    processPendingPolicyMessages(50)
+      .then((r) => {
+        if (r.processed > 0) {
+          console.log(`[PolicyMessage] Background run: processed=${r.processed}, sent=${r.sent}, failed=${r.failed}`);
+        }
+      })
+      .catch((e) => console.error('[PolicyMessage] Background run failed:', e.message));
 
     console.log(`\n========== NEW ORDERS SUMMARY ==========`);
     console.log(`Total new orders: ${totalNewOrders}`);
@@ -7179,22 +7205,43 @@ router.patch('/orders/:orderId/logs', requireAuth, async (req, res) => {
 });
 
 // =====================================================
-// AUTO-MESSAGE FEATURE (24-hour order processing message)
+// POLICY MESSAGE FEATURE (20-minute follow-up message)
 // =====================================================
 
-// Auto-message template
-const AUTO_MESSAGE_TEMPLATE = `Hi {{BUYER_NAME}},
+const POLICY_MESSAGE_TEMPLATE = `If you have any questions or concerns, please contact us directly through eBay messages. We’re always happy to help and resolve issues quickly.
 
-We're pleased to inform you that your order has been processed.
+Please note that once an order is processed, cancellation may not be possible. Also, before opening any cases such as INR, returns, or payment disputes, we kindly request you to message us first. We genuinely want to assist you and make things right.
 
-Also, we are actively monitoring your order to ensure it reaches you smoothly and tracking number will be updated on your eBay order page as soon as they become available.
+As a small business, your support means a lot to us. Thank you for your understanding!`;
 
-We truly appreciate your patience and understanding.`;
+const POLICY_MESSAGE_DELAY_MS = 20 * 60 * 1000; // 20 minutes
 
-// Start date for auto-message feature
-const AUTO_MESSAGE_START_DATE = new Date('2026-01-27T00:00:00Z');
+function getPolicyEligibilityDate(creationDate) {
+  const createdAt = creationDate ? new Date(creationDate) : new Date();
+  const now = Date.now();
+  // If order is already older than 20 minutes when ingested, skip scheduling.
+  if (now - createdAt.getTime() > POLICY_MESSAGE_DELAY_MS) {
+    return null;
+  }
+  return new Date(createdAt.getTime() + POLICY_MESSAGE_DELAY_MS);
+}
 
-// Toggle auto-message for specific order
+function getPolicyMessageQuery(now = new Date()) {
+  return {
+    policyMessageEligibleAt: { $lte: now, $exists: true },
+    policyMessageSent: { $ne: true },
+    policyMessageDisabled: { $ne: true },
+    // keep behavior aligned with prior delayed-message logic
+    orderFulfillmentStatus: { $ne: 'FULFILLED' },
+    $or: [
+      { cancelState: { $exists: false } },
+      { cancelState: null },
+      { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+    ]
+  };
+}
+
+// Compatibility endpoint kept for existing UI wiring
 router.patch('/orders/:orderId/auto-message-toggle', requireAuth, async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -7202,7 +7249,7 @@ router.patch('/orders/:orderId/auto-message-toggle', requireAuth, async (req, re
 
     const order = await Order.findOneAndUpdate(
       { orderId },
-      { autoMessageDisabled: disabled },
+      { policyMessageDisabled: disabled },
       { new: true }
     );
 
@@ -7212,71 +7259,47 @@ router.patch('/orders/:orderId/auto-message-toggle', requireAuth, async (req, re
 
     res.json({ success: true, order });
   } catch (err) {
-    console.error('Error toggling auto-message:', err);
+    console.error('Error toggling policy message:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Get auto-message stats
+// Compatibility endpoint kept for existing UI wiring
 router.get('/orders/auto-message-stats', requireAuth, async (req, res) => {
   try {
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-    // Count orders eligible for auto-message (24+ hours old, not sent, not disabled, not cancelled)
-    // Count orders eligible for auto-message (24+ hours old, not sent, not disabled, not cancelled, AND NOT FULFILLED)
-    const pending = await Order.countDocuments({
-      creationDate: {
-        $lte: twentyFourHoursAgo,
-        $gte: AUTO_MESSAGE_START_DATE
-      },
-      autoMessageSent: { $ne: true },
-      autoMessageDisabled: { $ne: true },
-      orderFulfillmentStatus: { $ne: 'FULFILLED' }, // Skip if already shipped
-      $or: [
-        { cancelState: { $exists: false } },
-        { cancelState: null },
-        { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
-      ]
-    });
-
-    const sent = await Order.countDocuments({ autoMessageSent: true });
-    const disabled = await Order.countDocuments({ autoMessageDisabled: true });
+    const pending = await Order.countDocuments(getPolicyMessageQuery(new Date()));
+    const sent = await Order.countDocuments({ policyMessageSent: true });
+    const disabled = await Order.countDocuments({ policyMessageDisabled: true });
 
     res.json({ pending, sent, disabled });
   } catch (err) {
-    console.error('Error getting auto-message stats:', err);
+    console.error('Error getting policy message stats:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Helper function to send auto-message for a single order
-async function sendAutoMessage(order, seller) {
+async function sendPolicyMessage(order, seller) {
   const token = await ensureValidToken(seller);
   const itemId = order.lineItems?.[0]?.legacyItemId || order.itemNumber;
+  const itemTitle = order.lineItems?.[0]?.title || order.productName;
   const buyerUsername = order.buyer?.username;
 
   if (!itemId || !buyerUsername) {
-    console.log(`[AutoMessage] Skip order ${order.orderId}: Missing itemId or buyerUsername`);
+    console.log(`[PolicyMessage] Skip order ${order.orderId}: Missing itemId or buyerUsername`);
     return { success: false, reason: 'Missing itemId or buyerUsername' };
   }
 
-  // Prepare message body with dynamic buyer name
-  const nameToUse = order.shippingFullName || order.buyer?.username || 'Buyer';
-  // Attempt to get just the first name if it's a full name
-  const firstName = nameToUse.split(' ')[0];
+  const escapedBody = POLICY_MESSAGE_TEMPLATE
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 
-  const initialBody = AUTO_MESSAGE_TEMPLATE.replace('{{BUYER_NAME}}', firstName);
-
-  // Escape the message body
-  const escapedBody = initialBody.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  // Use AddMemberMessageAAQToPartner for post-transaction messages
   const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
     <AddMemberMessageAAQToPartnerRequest xmlns="urn:ebay:apis:eBLBaseComponents">
       <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
       <ItemID>${itemId}</ItemID>
       <MemberMessage>
-        <Subject>Order Update - #${order.orderId}</Subject>
+        <Subject>Order Policy - #${order.orderId}</Subject>
         <Body>${escapedBody}</Body>
         <QuestionType>General</QuestionType>
         <RecipientID>${buyerUsername}</RecipientID>
@@ -7294,76 +7317,74 @@ async function sendAutoMessage(order, seller) {
     });
 
     if (response.data.includes('<Ack>Success</Ack>') || response.data.includes('<Ack>Warning</Ack>')) {
-      // Update order to mark message as sent
       await Order.findByIdAndUpdate(order._id, {
-        autoMessageSent: true,
-        autoMessageSentAt: new Date()
+        policyMessageSent: true,
+        policyMessageSentAt: new Date()
       });
-      console.log(`[AutoMessage] Success: Order ${order.orderId}`);
+
+      await Message.create({
+        seller: seller._id,
+        orderId: order.orderId,
+        itemId,
+        itemTitle,
+        buyerUsername,
+        sender: 'SELLER',
+        subject: `Order Policy - #${order.orderId}`,
+        body: POLICY_MESSAGE_TEMPLATE,
+        read: true,
+        messageType: 'ORDER',
+        messageDate: new Date()
+      });
+
+      console.log(`[PolicyMessage] Success: Order ${order.orderId}`);
       return { success: true };
-    } else {
-      console.error(`[AutoMessage] Failed: Order ${order.orderId}`, response.data);
-      return { success: false, reason: 'eBay returned error' };
     }
+
+    console.error(`[PolicyMessage] Failed: Order ${order.orderId}`, response.data);
+    return { success: false, reason: 'eBay returned error' };
   } catch (err) {
-    console.error(`[AutoMessage] Error: Order ${order.orderId}`, err.message);
+    console.error(`[PolicyMessage] Error: Order ${order.orderId}`, err.message);
     return { success: false, reason: err.message };
   }
 }
 
-// Manual trigger to send pending auto-messages
-router.post('/orders/send-auto-messages', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
-  try {
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-    // Find all eligible orders (not sent, not disabled, not cancelled, NOT FULFILLED)
-    const orders = await Order.find({
-      creationDate: {
-        $lte: twentyFourHoursAgo,
-        $gte: AUTO_MESSAGE_START_DATE
-      },
-      autoMessageSent: { $ne: true },
-      autoMessageDisabled: { $ne: true },
-      orderFulfillmentStatus: { $ne: 'FULFILLED' }, // Skip if already shipped
-      $or: [
-        { cancelState: { $exists: false } },
-        { cancelState: null },
-        { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
-      ]
-    }).populate({
+async function processPendingPolicyMessages(limit = 50) {
+  const orders = await Order.find(getPolicyMessageQuery(new Date()))
+    .populate({
       path: 'seller',
       populate: { path: 'user' }
-    }).limit(50); // Process max 50 at a time to avoid timeouts
+    })
+    .limit(limit);
 
-    let successCount = 0;
-    let failCount = 0;
+  let successCount = 0;
+  let failCount = 0;
 
-    for (const order of orders) {
-      if (!order.seller) {
-        console.log(`[AutoMessage] Skip order ${order.orderId}: No seller`);
-        failCount++;
-        continue;
-      }
-
-      const result = await sendAutoMessage(order, order.seller);
-      if (result.success) {
-        successCount++;
-      } else {
-        failCount++;
-      }
-
-      // Small delay to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 500));
+  for (const order of orders) {
+    if (!order.seller) {
+      failCount++;
+      continue;
     }
 
+    const result = await sendPolicyMessage(order, order.seller);
+    if (result.success) successCount++;
+    else failCount++;
+
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  return { processed: orders.length, sent: successCount, failed: failCount };
+}
+
+// Compatibility endpoint path kept to avoid breaking existing UI button
+router.post('/orders/send-auto-messages', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  try {
+    const result = await processPendingPolicyMessages(50);
     res.json({
       success: true,
-      processed: orders.length,
-      sent: successCount,
-      failed: failCount
+      ...result
     });
   } catch (err) {
-    console.error('Error sending auto-messages:', err);
+    console.error('Error sending policy messages:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -7615,8 +7636,8 @@ router.get('/awaiting-sheet-summary', requireAuth, requireRole('fulfillmentadmin
   }
 });
 
-// Export the sendAutoMessage function for cron job use
-export { sendAutoMessage };
+// Export for optional external schedulers
+export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDate };
 
 export default router;
 
