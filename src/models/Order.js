@@ -125,10 +125,21 @@ const OrderSchema = new mongoose.Schema(
     // Manual logs field for internal notes (used in Issues & Resolutions)
     logs: { type: String, default: '' },
 
-    // Auto-message feature (24-hour order processing message)
-    autoMessageSent: { type: Boolean, default: false },
-    autoMessageSentAt: Date,
-    autoMessageDisabled: { type: Boolean, default: false },
+    // Policy message feature (20-minute follow-up message)
+    policyMessageSent: { type: Boolean, default: false },
+    policyMessageSentAt: Date,
+    policyMessageDisabled: { type: Boolean, default: false },
+    policyMessageEligibleAt: {
+      type: Date,
+      default: function () {
+        const createdAt = this.creationDate ? new Date(this.creationDate) : new Date();
+        const delayMs = 20 * 60 * 1000;
+        if (Date.now() - createdAt.getTime() > delayMs) {
+          return undefined;
+        }
+        return new Date(createdAt.getTime() + delayMs);
+      }
+    },
 
     // Already in use flag for Awaiting Shipment
     alreadyInUse: {
@@ -147,6 +158,6 @@ OrderSchema.index({ seller: 1, lastModifiedDate: -1 });
 OrderSchema.index({ seller: 1, creationDate: -1, lastModifiedDate: -1 }); // Compound index for polling queries
 OrderSchema.index({ dateSold: 1 }); // Index for date range searches
 OrderSchema.index({ cancelState: 1, creationDate: -1 }); // Index for cancelled orders queries
-OrderSchema.index({ autoMessageSent: 1, autoMessageDisabled: 1, creationDate: -1 }); // Index for auto-message cron job
+OrderSchema.index({ policyMessageSent: 1, policyMessageDisabled: 1, policyMessageEligibleAt: 1 }); // Index for policy message processing
 
 export default mongoose.model('Order', OrderSchema);
