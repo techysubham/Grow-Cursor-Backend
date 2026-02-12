@@ -1,9 +1,14 @@
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import path from 'path';
+import { setServers } from 'dns';
+
+// Set DNS to use Google's DNS servers to resolve MongoDB Atlas
+setServers(['8.8.8.8', '8.8.4.4']);
 
 // Load environment variables FIRST before any other imports
 dotenv.config();
