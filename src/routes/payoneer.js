@@ -84,7 +84,7 @@ router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 // POST /api/payoneer - Create new record
 router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
     try {
-        const { bankAccount, paymentDate, amount, exchangeRate, store } = req.body;
+        const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit } = req.body;
 
         if (!bankAccount || !paymentDate || !amount || !exchangeRate || !store) {
             return res.status(400).json({ error: 'Missing required fields' });
@@ -96,7 +96,10 @@ router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
             bankAccount,
             paymentDate,
             store,
-            ...calcs
+            ...calcs,
+            ...(periodStart && { periodStart }),
+            ...(periodEnd && { periodEnd }),
+            ...(profit !== undefined && profit !== '' && { profit: parseFloat(profit) })
         });
 
         await newRecord.save();
@@ -139,7 +142,7 @@ router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
     try {
         const { id } = req.params;
-        const { bankAccount, paymentDate, amount, exchangeRate, store } = req.body;
+        const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit } = req.body;
 
         const record = await PayoneerRecord.findById(id);
         if (!record) return res.status(404).json({ error: 'Record not found' });
@@ -148,6 +151,9 @@ router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
         if (bankAccount) record.bankAccount = bankAccount;
         if (paymentDate) record.paymentDate = paymentDate;
         if (store) record.store = store;
+        if (periodStart !== undefined) record.periodStart = periodStart || null;
+        if (periodEnd !== undefined) record.periodEnd = periodEnd || null;
+        if (profit !== undefined) record.profit = profit !== '' ? parseFloat(profit) : null;
 
         // Recalculate if amount or rate changes
         const newAmount = amount !== undefined ? amount : record.amount;
