@@ -9,10 +9,15 @@ const router = Router();
 // This route file uses the legacy name `attendance` for compatibility,
 // but the feature behavior is WORKING HOURS TRACKING (start/pause/resume/stop timer + reports).
 
-// Helper function to get today's date string (YYYY-MM-DD)
+// Helper function to get today's date string (YYYY-MM-DD) in IST
 function getTodayDateString() {
-    const now = new Date();
-    return now.toISOString().split('T')[0];
+    // Get current time in Indian Standard Time to avoid UTC rollover bugs early in the morning
+    const istString = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+    const istDate = new Date(istString);
+    const year = istDate.getFullYear();
+    const month = String(istDate.getMonth() + 1).padStart(2, '0');
+    const day = String(istDate.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
 }
 
 // POST /start - Start or restart timer
