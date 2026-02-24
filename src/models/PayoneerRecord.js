@@ -9,7 +9,10 @@ const PayoneerRecordSchema = new mongoose.Schema(
         exchangeRate: { type: Number, required: true },
         actualExchangeRate: { type: Number, required: true }, // Calculated: Rate + 2%
         bankDeposit: { type: Number, required: true }, // Calculated: Amount * ActualRate
-        store: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', required: true }
+        store: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', required: true },
+        periodStart: { type: Date },
+        periodEnd: { type: Date },
+        profit: { type: Number }
     },
     { timestamps: true }
 );
