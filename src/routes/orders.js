@@ -531,38 +531,27 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
     // Build seller filter if sellerId is provided
     const sellerMatch = sellerId ? { seller: new mongoose.Types.ObjectId(sellerId) } : {};
 
-    // Use UTC boundaries for filtering (matches frontend local date selection)
+    // Use Pacific Time boundaries for filtering (PST/PDT)
     const buildDateRangeMatch = (field) => {
       if (!startDate && !endDate) return {};
       const range = {};
       if (startDate) {
-        const start = new Date(startDate);
-        start.setUTCHours(0, 0, 0, 0); // Start of day in UTC
+        const { start } = getPtDayRange(startDate);
         range.$gte = start;
       }
       if (endDate) {
-        const end = new Date(endDate);
-        end.setUTCHours(23, 59, 59, 999); // End of day in UTC
+        const { end } = getPtDayRange(endDate);
         range.$lte = end;
       }
       return { [field]: range };
     };
 
-    // Project date in UTC (for grouping - matches frontend selection)
-    const utcDateProjection = (field) => ({
+    // Project date in Pacific Time for grouping
+    const ptDateProjection = (field) => ({
       $dateToString: {
         format: '%Y-%m-%d',
         date: field,
-        timezone: 'UTC'
-      }
-    });
-
-    // Project date in PST (for database reference)
-    const pstDateProjection = (field) => ({
-      $dateToString: {
-        format: '%Y-%m-%d',
-        date: field,
-        timezone: 'America/Los_Angeles'
+        timezone: PT_TIMEZONE
       }
     });
 
@@ -579,14 +568,12 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       {
         $project: {
           worksheetStatus: { $ifNull: ['$worksheetStatus', 'open'] },
-          date: utcDateProjection('$worksheetDate'),
-          pstDate: pstDateProjection('$worksheetDate')
+          date: ptDateProjection('$worksheetDate')
         }
       },
       {
         $group: {
           _id: { date: '$date', status: '$worksheetStatus' },
-          pstDate: { $first: '$pstDate' },
           count: { $sum: 1 }
         }
       }
@@ -597,14 +584,12 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       {
         $project: {
           worksheetStatus: { $ifNull: ['$worksheetStatus', 'open'] },
-          date: utcDateProjection('$creationDate'),
-          pstDate: pstDateProjection('$creationDate')
+          date: ptDateProjection('$creationDate')
         }
       },
       {
         $group: {
           _id: { date: '$date', status: '$worksheetStatus' },
-          pstDate: { $first: '$pstDate' },
           count: { $sum: 1 }
         }
       }
@@ -615,14 +600,12 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       {
         $project: {
           status: '$status',
-          date: utcDateProjection('$creationDate'),
-          pstDate: pstDateProjection('$creationDate')
+          date: ptDateProjection('$creationDate')
         }
       },
       {
         $group: {
           _id: { date: '$date', status: '$status' },
-          pstDate: { $first: '$pstDate' },
           count: { $sum: 1 }
         }
       }
@@ -634,14 +617,12 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       {
         $project: {
           status: '$paymentDisputeStatus',
-          date: utcDateProjection('$worksheetDate'),
-          pstDate: pstDateProjection('$worksheetDate')
+          date: ptDateProjection('$worksheetDate')
         }
       },
       {
         $group: {
           _id: { date: '$date', status: '$status' },
-          pstDate: { $first: '$pstDate' },
           count: { $sum: 1 }
         }
       }
@@ -661,14 +642,12 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
       },
       {
         $project: {
-          date: utcDateProjection('$messageDate'),
-          pstDate: pstDateProjection('$messageDate')
+          date: ptDateProjection('$messageDate')
         }
       },
       {
         $group: {
           _id: { date: '$date' },
-          pstDate: { $first: '$pstDate' },
           count: { $sum: 1 }
         }
       }
@@ -689,27 +668,22 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
     ]);
 
     const dateMap = new Map();
-    const pstDateMap = new Map(); // Track PST dates for each UTC date
-    
-    const ensureDate = (date, pstDate) => {
+    const ensureDate = (date) => {
       if (!dateMap.has(date)) {
         dateMap.set(date, {
           date,
-          pstDate: pstDate || date, // PST date for database reference
+          pstDate: date,
           cancellations: { open: 0, attended: 0, resolved: 0 },
           returns: { open: 0, attended: 0, resolved: 0 },
           inrDisputes: { open: 0, attended: 0, resolved: 0 },
           inquiries: { total: 0 }
         });
-      } else if (pstDate && !dateMap.get(date).pstDate) {
-        // Update PST date if we have one
-        dateMap.get(date).pstDate = pstDate;
       }
       return dateMap.get(date);
     };
 
-    const addCount = (date, pstDate, category, bucket, count) => {
-      const entry = ensureDate(date, pstDate);
+    const addCount = (date, category, bucket, count) => {
+      const entry = ensureDate(date);
       entry[category][bucket] += count;
     };
 
@@ -724,26 +698,26 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
     // Cancellations use manual worksheetStatus
     cancellationStats.forEach((stat) => {
       const { date, status } = stat._id;
-      addCount(date, stat.pstDate, 'cancellations', status, stat.count);
+      addCount(date, 'cancellations', status, stat.count);
     });
 
     // Returns use manual worksheetStatus
     returnStats.forEach((stat) => {
       const { date, status } = stat._id;
-      addCount(date, stat.pstDate, 'returns', status, stat.count);
+      addCount(date, 'returns', status, stat.count);
     });
 
     // Cases use automatic status logic
     caseStats.forEach((stat) => {
       const { date, status } = stat._id;
       if (caseOpen.has(status)) {
-        addCount(date, stat.pstDate, 'inrDisputes', 'open', stat.count);
+        addCount(date, 'inrDisputes', 'open', stat.count);
       } else if (caseAttended.has(status)) {
-        addCount(date, stat.pstDate, 'inrDisputes', 'attended', stat.count);
+        addCount(date, 'inrDisputes', 'attended', stat.count);
       } else if (caseResolved.has(status)) {
-        addCount(date, stat.pstDate, 'inrDisputes', 'resolved', stat.count);
+        addCount(date, 'inrDisputes', 'resolved', stat.count);
       } else {
-        addCount(date, stat.pstDate, 'inrDisputes', 'attended', stat.count);
+        addCount(date, 'inrDisputes', 'attended', stat.count);
       }
     });
 
@@ -751,19 +725,19 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
     disputeStats.forEach((stat) => {
       const { date, status } = stat._id;
       if (disputeOpen.has(status)) {
-        addCount(date, stat.pstDate, 'inrDisputes', 'open', stat.count);
+        addCount(date, 'inrDisputes', 'open', stat.count);
       } else if (disputeAttended.has(status)) {
-        addCount(date, stat.pstDate, 'inrDisputes', 'attended', stat.count);
+        addCount(date, 'inrDisputes', 'attended', stat.count);
       } else if (disputeResolved.has(status)) {
-        addCount(date, stat.pstDate, 'inrDisputes', 'resolved', stat.count);
+        addCount(date, 'inrDisputes', 'resolved', stat.count);
       } else {
-        addCount(date, stat.pstDate, 'inrDisputes', 'attended', stat.count);
+        addCount(date, 'inrDisputes', 'attended', stat.count);
       }
     });
 
     inquiryStats.forEach((stat) => {
       const date = stat._id.date;
-      const entry = ensureDate(date, stat.pstDate);
+      const entry = ensureDate(date);
       entry.inquiries.total += stat.count;
     });
 
@@ -781,20 +755,20 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
 // Worksheet summary for cards (totals + open counts + totalOrders) based on the same filter as worksheet-statistics
 router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, sellerId } = req.query;
 
-    // Use UTC boundaries for filtering (matches frontend local date selection)
+    const sellerMatch = sellerId ? { seller: new mongoose.Types.ObjectId(sellerId) } : {};
+
+    // Use Pacific Time boundaries for filtering (PST/PDT)
     const buildDateRangeMatch = (field) => {
       if (!startDate && !endDate) return {};
       const range = {};
       if (startDate) {
-        const start = new Date(startDate);
-        start.setUTCHours(0, 0, 0, 0); // Start of day in UTC
+        const { start } = getPtDayRange(startDate);
         range.$gte = start;
       }
       if (endDate) {
-        const end = new Date(endDate);
-        end.setUTCHours(23, 59, 59, 999); // End of day in UTC
+        const { end } = getPtDayRange(endDate);
         range.$lte = end;
       }
       return { [field]: range };
@@ -802,6 +776,7 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
 
     // Total orders denominator (uses dateSold like order analytics)
     const totalOrdersQuery = {
+      ...sellerMatch,
       ...buildDateRangeMatch('dateSold')
     };
 
@@ -818,6 +793,7 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
     const cancellationStates = ['CANCEL_REQUESTED', 'IN_PROGRESS', 'CANCELED', 'CANCELLED'];
     const cancellationsMatchStage = {
       $match: {
+        ...sellerMatch,
         cancelState: { $in: cancellationStates }
       }
     };
@@ -841,7 +817,12 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
 
     // Returns: Return.creationDate, manual worksheetStatus default open
     const returnsPipeline = [
-      ...(startDate || endDate ? [{ $match: buildDateRangeMatch('creationDate') }] : []),
+      {
+        $match: {
+          ...sellerMatch,
+          ...(startDate || endDate ? buildDateRangeMatch('creationDate') : {})
+        }
+      },
       {
         $project: {
           worksheetStatus: { $ifNull: ['$worksheetStatus', 'open'] }
@@ -857,7 +838,12 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
 
     // INR: Case.creationDate, automatic status based on Case.status (same mapping as worksheet table)
     const inrPipeline = [
-      ...(startDate || endDate ? [{ $match: buildDateRangeMatch('creationDate') }] : []),
+      {
+        $match: {
+          ...sellerMatch,
+          ...(startDate || endDate ? buildDateRangeMatch('creationDate') : {})
+        }
+      },
       {
         $project: {
           status: '$status'
@@ -874,7 +860,12 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
     // Disputes: PaymentDispute.openDate || createdAt, automatic status based on paymentDisputeStatus (same mapping as worksheet table)
     const disputesPipeline = [
       { $addFields: { worksheetDate: { $ifNull: ['$openDate', '$createdAt'] } } },
-      ...(startDate || endDate ? [{ $match: buildDateRangeMatch('worksheetDate') }] : []),
+      {
+        $match: {
+          ...sellerMatch,
+          ...(startDate || endDate ? buildDateRangeMatch('worksheetDate') : {})
+        }
+      },
       {
         $project: {
           status: '$paymentDisputeStatus'
@@ -888,8 +879,6 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
       }
     ];
 
-    // Open counts on cards should be overall (ignore date filter).
-    // Rates (based on totals + totalOrders) should still respect date filter.
     const [totalOrders, cancellationsByStatus, returnsByStatus, inrByStatus, disputesByStatus, cancellationsOpenOverall, returnsOpenOverall, inrOpenOverall, disputesOpenOverall] = await Promise.all([
       Order.countDocuments(totalOrdersQuery),
       Order.aggregate(cancellationsPipeline),
@@ -922,6 +911,7 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
 
     const cancellations = toWorksheetBuckets(cancellationsByStatus);
     const returns = toWorksheetBuckets(returnsByStatus);
+    // Keep left card values static (overall open counts), independent of filters.
     cancellations.open = cancellationsOpenOverall || 0;
     returns.open = returnsOpenOverall || 0;
 
@@ -936,7 +926,6 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
       inr.total += count;
     });
     inr.open = inrOpenOverall || 0;
-
     const disputes = { open: 0, attended: 0, resolved: 0, total: 0 };
     disputesByStatus.forEach((r) => {
       const status = r._id;
@@ -948,7 +937,6 @@ router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 's
       disputes.total += count;
     });
     disputes.open = disputesOpenOverall || 0;
-
     res.json({
       totalOrders,
       cancellations,

@@ -149,6 +149,9 @@ const OrderSchema = new mongoose.Schema(
       enum: ['Yes', 'No'],
       default: 'No'
     },
+
+    // Tracks whether a message was sent to the buyer when the remark was last updated
+    remarkMessageSent: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

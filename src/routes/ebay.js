@@ -20,6 +20,7 @@ import Listing from '../models/Listing.js';
 import ActiveListing from '../models/ActiveListing.js';
 import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
+import ChatAgent from '../models/ChatAgent.js';
 import ExchangeRate from '../models/ExchangeRate.js';
 import { parseStringPromise } from 'xml2js';
 import imageCache from '../lib/imageCache.js';
@@ -1520,6 +1521,9 @@ router.get('/stored-orders', async (req, res) => {
         $ne: '',
         $regex: /^\d{4}-\d{2}-\d{2}/ // Only ISO formatted dates
       };
+
+      // Exclude orders marked as Delivered
+      query.remark = { $ne: 'Delivered' };
 
       // Optional arrival date range filter (string compare is safe for YYYY-MM-DD)
       if (arrivalStartDate || arrivalEndDate) {
@@ -5218,6 +5222,43 @@ router.get('/stored-payment-disputes', async (req, res) => {
 });
 
 
+// Get a lightweight index of all issues (INR/SNAD cases, returns, disputes) keyed by orderId
+// Used by Fulfillment Dashboard to show an "Issues" column
+router.get('/issues-by-order', requireAuth, async (req, res) => {
+  try {
+    const [cases, returns, disputes] = await Promise.all([
+      Case.find({}, { orderId: 1, caseType: 1, status: 1, _id: 0 }).lean(),
+      Return.find({}, { orderId: 1, returnStatus: 1, _id: 0 }).lean(),
+      PaymentDispute.find({}, { orderId: 1, paymentDisputeStatus: 1, reason: 1, _id: 0 }).lean()
+    ]);
+
+    // Build index: orderId -> array of issue objects
+    const index = {};
+
+    const addIssue = (orderId, issue) => {
+      if (!orderId) return;
+      if (!index[orderId]) index[orderId] = [];
+      index[orderId].push(issue);
+    };
+
+    cases.forEach(c => {
+      addIssue(c.orderId, { type: c.caseType || 'INR', status: c.status });
+    });
+
+    returns.forEach(r => {
+      addIssue(r.orderId, { type: 'Return', status: r.returnStatus });
+    });
+
+    disputes.forEach(d => {
+      addIssue(d.orderId, { type: 'Dispute', status: d.paymentDisputeStatus, reason: d.reason });
+    });
+
+    res.json({ index });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // 1. HEAVY SYNC: Fetch Inbox (Manual Trigger)
 // 1. HEAVY SYNC: Fetch Inbox (Smart Polling)
@@ -7298,7 +7339,7 @@ router.post('/compatibility/values', requireAuth, async (req, res) => {
 // --- NEW ROUTE 1: UPSERT CONVERSATION TAGS (Called from BuyerChatPage) ---
 // 
 router.post('/conversation-meta', requireAuth, async (req, res) => {
-  const { sellerId, buyerUsername, orderId, itemId, category, caseStatus } = req.body;
+  const { sellerId, buyerUsername, orderId, itemId, category, caseStatus, status, pickedUpBy } = req.body;
 
   if (!category || !caseStatus) {
     return res.status(400).json({ error: 'Category and Case Status are required' });
@@ -7315,23 +7356,23 @@ router.post('/conversation-meta', requireAuth, async (req, res) => {
       query.orderId = null;
     }
 
+    const updateData = {
+      seller: sellerId,
+      buyerUsername,
+      orderId: orderId || null,
+      itemId,
+      category,
+      caseStatus,
+      // Use provided status if given; otherwise default to 'Open'
+      status: status || 'Open',
+      resolvedAt: null,
+      resolvedBy: null
+    };
+    if (pickedUpBy !== undefined) updateData.pickedUpBy = pickedUpBy;
+
     const meta = await ConversationMeta.findOneAndUpdate(
       query,
-      {
-        seller: sellerId,
-        buyerUsername,
-        orderId: orderId || null,
-        itemId,
-        category,
-        caseStatus,
-
-        // --- THE LOGIC FIX ---
-        // If the seller clicks "Save" in the chat window, we assume they are working on it.
-        // So we force it back to 'Open' and clear the resolution data.
-        status: 'Open',
-        resolvedAt: null,
-        resolvedBy: null
-      },
+      updateData,
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
@@ -7430,6 +7471,7 @@ router.get('/conversation-management/list', requireAuth, async (req, res) => {
           caseStatus: 1,
           status: 1,
           notes: 1,
+          pickedUpBy: 1,
           updatedAt: 1,
           buyerName: {
             $ifNull: [
@@ -7528,17 +7570,20 @@ router.get('/conversation-management/list', requireAuth, async (req, res) => {
 // --- NEW ROUTE 4: RESOLVE CONVERSATION (Called from Management Modal) ---
 router.patch('/conversation-management/:id/resolve', requireAuth, async (req, res) => {
   const { id } = req.params;
-  const { notes, status } = req.body;
+  const { notes, status, pickedUpBy } = req.body;
 
   try {
+    const updateData = {
+      notes,
+      status,
+      resolvedAt: status === 'Resolved' ? new Date() : null,
+      resolvedBy: req.user.username
+    };
+    if (pickedUpBy !== undefined) updateData.pickedUpBy = pickedUpBy;
+
     const meta = await ConversationMeta.findByIdAndUpdate(
       id,
-      {
-        notes,
-        status,
-        resolvedAt: status === 'Resolved' ? new Date() : null,
-        resolvedBy: req.user.username
-      },
+      updateData,
       { new: true }
     );
     res.json({ success: true, meta });
@@ -7549,12 +7594,69 @@ router.patch('/conversation-management/:id/resolve', requireAuth, async (req, re
 
 
 
+// --- PATCH PICKED UP BY only ---
+router.patch('/conversation-management/:id/pick-up', requireAuth, async (req, res) => {
+  const { pickedUpBy } = req.body;
+  try {
+    const meta = await ConversationMeta.findByIdAndUpdate(
+      req.params.id,
+      { pickedUpBy: pickedUpBy || null },
+      { new: true }
+    );
+    res.json({ success: true, meta });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- CHAT AGENTS CRUD (for "Picked Up By" dropdown) ---
+router.get('/chat-agents', requireAuth, async (req, res) => {
+  try {
+    const agents = await ChatAgent.find().sort({ name: 1 });
+    res.json(agents);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/chat-agents', requireAuth, async (req, res) => {
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
+  try {
+    const agent = await ChatAgent.create({ name: name.trim() });
+    res.json(agent);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/chat-agents/:id', requireAuth, async (req, res) => {
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
+  try {
+    const agent = await ChatAgent.findByIdAndUpdate(req.params.id, { name: name.trim() }, { new: true });
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    res.json(agent);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/chat-agents/:id', requireAuth, async (req, res) => {
+  try {
+    await ChatAgent.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 //Manual fields to upadte for amazon 
 router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const updates = req.body;
 
-  const allowedFields = ['amazonAccount', 'arrivingDate', 'beforeTax', 'estimatedTax', 'azOrderId', 'amazonRefund', 'cardName', 'remark', 'alreadyInUse'];
+  const allowedFields = ['amazonAccount', 'arrivingDate', 'beforeTax', 'estimatedTax', 'azOrderId', 'amazonRefund', 'cardName', 'remark', 'alreadyInUse', 'remarkMessageSent'];
   const updateData = {};
 
   Object.keys(updates).forEach(key => {
