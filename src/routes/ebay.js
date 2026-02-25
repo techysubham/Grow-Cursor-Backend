@@ -26,6 +26,8 @@ import { parseStringPromise } from 'xml2js';
 import imageCache from '../lib/imageCache.js';
 import multer from 'multer';
 import FeedUpload from '../models/FeedUpload.js';
+import UserSellerAssignment from '../models/UserSellerAssignment.js';
+import UserDailyQuantity from '../models/UserDailyQuantity.js';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
@@ -212,15 +214,46 @@ router.get('/feed/tasks', requireAuth, async (req, res) => {
 
           // Update local DB if status changed
           if (ebayTask.status !== task.status || ebayTask.uploadSummary) {
+            const oldStatus = task.status;
             task.status = ebayTask.status;
+            let newlyCompletedSuccessCount = 0;
+
             if (ebayTask.uploadSummary) {
+              const previousSuccess = task.uploadSummary?.successCount || 0;
               task.uploadSummary = {
                 successCount: ebayTask.uploadSummary.successCount,
                 failureCount: ebayTask.uploadSummary.failureCount
               };
+
+              // Calculate any newly added successful uploads if task was already somewhat processed
+              // Or if status changed to COMPLETED/COMPLETED_WITH_ERROR, process the new count
+              if ((ebayTask.status === 'COMPLETED' || ebayTask.status === 'COMPLETED_WITH_ERROR') &&
+                oldStatus !== 'COMPLETED' && oldStatus !== 'COMPLETED_WITH_ERROR') {
+                newlyCompletedSuccessCount = ebayTask.uploadSummary.successCount;
+              }
             }
             task.lastUpdated = new Date();
             await task.save();
+
+            // Track user performance based on Feed Upload
+            if (newlyCompletedSuccessCount > 0) {
+              try {
+                const assignment = await UserSellerAssignment.findOne({ seller: sellerId });
+                if (assignment) {
+                  const dateString = moment().format('YYYY-MM-DD'); // Local time
+                  await UserDailyQuantity.findOneAndUpdate(
+                    { user: assignment.user, seller: sellerId, dateString },
+                    { $inc: { quantity: newlyCompletedSuccessCount } },
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                  );
+                  console.log(`[User Performance] Added ${newlyCompletedSuccessCount} to user ${assignment.user} for seller ${sellerId} on ${dateString}`);
+                } else {
+                  console.log(`[User Performance] No user assigned to seller ${sellerId}, skipping quantity update`);
+                }
+              } catch (perfErr) {
+                console.error('[User Performance] Error updating daily quantity:', perfErr.message);
+              }
+            }
           }
         } catch (err) {
           console.error(`[Feed Tasks] Failed to sync task ${task.taskId}:`, err.message);
