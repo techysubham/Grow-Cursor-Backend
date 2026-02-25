@@ -93,17 +93,106 @@ function extractColor(data) {
  */
 function extractCompatibility(data) {
   if (!data) return '';
-  
-  // Try product_information.item_model_number first
+
+  // Try dedicated compatible_devices / compatible_phone_models fields
+  if (data.product_information?.compatible_devices) {
+    const v = data.product_information.compatible_devices;
+    return Array.isArray(v) ? v.join(', ') : String(v);
+  }
+  if (data.product_information?.compatible_phone_models) {
+    const v = data.product_information.compatible_phone_models;
+    return Array.isArray(v) ? v.join(', ') : String(v);
+  }
+  if (data.product_information?.compatibility) {
+    return String(data.product_information.compatibility);
+  }
+
+  return '';
+}
+
+/**
+ * Extract model number from structured API response
+ */
+function extractModel(data) {
+  if (!data) return '';
+
+  // Most reliable: product_information.item_model_number
   if (data.product_information?.item_model_number) {
-    return data.product_information.item_model_number;
+    return String(data.product_information.item_model_number);
   }
-  
-  // Try top-level model field
+  // Top-level model field
   if (data.model) {
-    return data.model;
+    return String(data.model);
   }
-  
+  // MPN as fallback
+  if (data.product_information?.manufacturer_part_number) {
+    return String(data.product_information.manufacturer_part_number);
+  }
+
+  return '';
+}
+
+/**
+ * Extract material from structured API response
+ */
+function extractMaterial(data) {
+  if (!data) return '';
+
+  if (data.product_information?.material) {
+    return String(data.product_information.material);
+  }
+  if (data.product_information?.material_type) {
+    return String(data.product_information.material_type);
+  }
+  if (data.product_information?.material_composition) {
+    return String(data.product_information.material_composition);
+  }
+  if (data.product_information?.outer_material) {
+    return String(data.product_information.outer_material);
+  }
+
+  return '';
+}
+
+/**
+ * Extract special features from structured API response
+ */
+function extractSpecialFeatures(data) {
+  if (!data) return '';
+
+  if (data.product_information?.special_features) {
+    const v = data.product_information.special_features;
+    return Array.isArray(v) ? v.join(', ') : String(v);
+  }
+  if (data.product_information?.special_feature) {
+    const v = data.product_information.special_feature;
+    return Array.isArray(v) ? v.join(', ') : String(v);
+  }
+
+  return '';
+}
+
+/**
+ * Extract size from structured API response
+ */
+function extractSize(data) {
+  if (!data) return '';
+
+  if (data.product_information?.size) {
+    return String(data.product_information.size);
+  }
+  if (data.product_information?.item_size) {
+    return String(data.product_information.item_size);
+  }
+  if (data.product_information?.item_dimensions) {
+    return String(data.product_information.item_dimensions);
+  }
+  // Customization size option (variant selector)
+  if (data.customization_options?.size && Array.isArray(data.customization_options.size)) {
+    const selected = data.customization_options.size.find(s => s.is_selected);
+    if (selected?.value) return selected.value;
+  }
+
   return '';
 }
 
@@ -479,9 +568,13 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         const features = data.feature_bullets || [];
         const description = features.join('\n');
         
-        // Extract color and compatibility
+        // Extract color, compatibility and new enrichment fields
         const color = extractColor(data);
         const compatibility = extractCompatibility(data);
+        const model = extractModel(data);
+        const material = extractMaterial(data);
+        const specialFeatures = extractSpecialFeatures(data);
+        const size = extractSize(data);
         
         // Use high_res_images if available, otherwise fall back to regular images
         // Take ONLY first 6 images (main product images, not all variants)
@@ -524,6 +617,10 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         const extractedFields = ['price', 'title', 'brand', 'description', 'images'];
         if (color) extractedFields.push('color');
         if (compatibility) extractedFields.push('compatibility');
+        if (model) extractedFields.push('model');
+        if (material) extractedFields.push('material');
+        if (specialFeatures) extractedFields.push('specialFeatures');
+        if (size) extractedFields.push('size');
 
         trackApiUsage({
           service: 'ScraperAPI',
@@ -545,6 +642,10 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
           images: images,
           color: color || '',
           compatibility: compatibility || '',
+          model: model || '',
+          material: material || '',
+          specialFeatures: specialFeatures || '',
+          size: size || '',
           rawData: data // Store full response for debugging
         };
       } catch (error) {

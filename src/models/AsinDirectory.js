@@ -29,6 +29,10 @@ const asinDirectorySchema = new mongoose.Schema({
   description: { type: String, default: '' },
   color: { type: String, default: '' },
   compatibility: { type: String, default: '' },
+  model: { type: String, default: '' },
+  material: { type: String, default: '' },
+  specialFeatures: { type: String, default: '' },
+  size: { type: String, default: '' },
 
   // Scrape tracking
   scraped: { type: Boolean, default: false, index: true },

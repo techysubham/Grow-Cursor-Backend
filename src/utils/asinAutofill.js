@@ -30,7 +30,7 @@ export async function fetchAmazonData(asin) {
     const responseTime = Date.now() - startTime;
     
     // Extract fields
-    let { title, brand, price, description, images, color, compatibility } = scrapedData;
+    let { title, brand, price, description, images, color, compatibility, model, material, specialFeatures, size } = scrapedData;
     
     // Remove brand from title (maintain existing behavior)
     if (brand && brand !== 'Unbranded' && title.toLowerCase().includes(brand.toLowerCase())) {
@@ -55,6 +55,10 @@ export async function fetchAmazonData(asin) {
       images: imagesArray, // Return as array (same as PAAPI)
       color: color || '',
       compatibility: compatibility || '',
+      model: model || '',
+      material: material || '',
+      specialFeatures: specialFeatures || '',
+      size: size || '',
       rawData: scrapedData // Store scraped data for debugging
     };
     
