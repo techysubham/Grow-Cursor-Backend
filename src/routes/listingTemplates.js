@@ -275,7 +275,7 @@ router.post('/:id/duplicate', requireAuth, async (req, res) => {
 // Update template
 router.put('/:id', requireAuth, async (req, res) => {
   try {
-    const { name, description, category, ebayCategory, customColumns, asinAutomation, pricingConfig, coreFieldDefaults } = req.body;
+    const { name, description, category, ebayCategory, customColumns, asinAutomation, pricingConfig, coreFieldDefaults, customActionField } = req.body;
     
     const updateData = { 
       name, 
@@ -291,6 +291,11 @@ router.put('/:id', requireAuth, async (req, res) => {
     // Add coreFieldDefaults if provided
     if (coreFieldDefaults !== undefined) {
       updateData.coreFieldDefaults = coreFieldDefaults;
+    }
+
+    // Add customActionField if provided
+    if (customActionField !== undefined) {
+      updateData.customActionField = customActionField;
     }
     
     const template = await ListingTemplate.findByIdAndUpdate(
