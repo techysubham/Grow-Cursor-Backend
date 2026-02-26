@@ -6,6 +6,7 @@ const UserDailyQuantitySchema = new mongoose.Schema(
         seller: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', required: true },
         dateString: { type: String, required: true }, // Store as YYYY-MM-DD for local time
         quantity: { type: Number, default: 0 },
+        targetQuantity: { type: Number, default: 0 }, // Effective daily target including carry-forwards
         remarks: {
             type: String,
             enum: ['Good', 'Average', 'Need for improvement', ''],

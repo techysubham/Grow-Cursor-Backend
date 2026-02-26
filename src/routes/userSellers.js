@@ -39,7 +39,7 @@ router.get('/assignments', requireAuth, requireHrOrSuperadmin, async (req, res) 
 // Assign seller to user
 router.post('/assignments', requireAuth, requireHrOrSuperadmin, async (req, res) => {
     try {
-        const { userId, sellerId } = req.body;
+        const { userId, sellerId, dailyTarget } = req.body;
 
         if (!userId || !sellerId) {
             return res.status(400).json({ error: 'User ID and Seller ID are required' });
@@ -57,7 +57,8 @@ router.post('/assignments', requireAuth, requireHrOrSuperadmin, async (req, res)
 
         const assignment = new UserSellerAssignment({
             user: userId,
-            seller: sellerId
+            seller: sellerId,
+            dailyTarget: dailyTarget || 0
         });
 
         await assignment.save();
@@ -66,6 +67,33 @@ router.post('/assignments', requireAuth, requireHrOrSuperadmin, async (req, res)
     } catch (err) {
         console.error('Error creating assignment:', err);
         res.status(500).json({ error: 'Server error creating assignment' });
+    }
+});
+
+// Update assignment daily target
+router.patch('/assignments/:id/target', requireAuth, requireHrOrSuperadmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { dailyTarget } = req.body;
+
+        if (dailyTarget === undefined || isNaN(dailyTarget)) {
+            return res.status(400).json({ error: 'Valid daily target is required' });
+        }
+
+        const assignment = await UserSellerAssignment.findByIdAndUpdate(
+            id,
+            { dailyTarget: Number(dailyTarget) },
+            { new: true }
+        );
+
+        if (!assignment) {
+            return res.status(404).json({ error: 'Assignment not found' });
+        }
+
+        res.json({ message: 'Target updated successfully', assignment });
+    } catch (err) {
+        console.error('Error updating assignment target:', err);
+        res.status(500).json({ error: 'Server error updating assignment target' });
     }
 });
 
@@ -88,9 +116,14 @@ router.delete('/assignments/:id', requireAuth, requireHrOrSuperadmin, async (req
 // PERFORMANCE TRACKING
 // ============================================
 
+import { syncDailyQuantities } from '../utils/performanceSync.js';
+
 // Get performance records
 router.get('/performance', requireAuth, async (req, res) => {
     try {
+        // Sync daily quantities before fetching to ensure today is created and carry-forwards are up to date
+        await syncDailyQuantities();
+
         let query = {};
 
         // If user is not HR/Superadmin, they can only see their own performance
