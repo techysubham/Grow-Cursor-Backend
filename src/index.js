@@ -61,6 +61,7 @@ import asinListRangesRoutes from './routes/asinListRanges.js';
 import asinListProductsRoutes from './routes/asinListProducts.js';
 import attendanceRoutes from './routes/attendance.js';
 import userSellersRoutes from './routes/userSellers.js';
+import salaryRoutes from './routes/salary.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 
 const app = express();
@@ -144,7 +145,7 @@ app.use('/api/asin-list-products', asinListProductsRoutes);
 // it serves working-hours tracking behavior (timer sessions), not traditional attendance management.
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/user-sellers', userSellersRoutes);
-
+app.use('/api/salary', salaryRoutes);
 
 const port = process.env.PORT || 5000;
 
