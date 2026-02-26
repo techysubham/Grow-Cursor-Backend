@@ -5,7 +5,7 @@ import ListingTemplate from '../models/ListingTemplate.js';
 import Seller from '../models/Seller.js';
 import SellerPricingConfig from '../models/SellerPricingConfig.js';
 import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
-import { generateSKUFromASIN } from '../utils/skuGenerator.js';
+import { generateSKUFromASIN, generateSKUWithCount } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
 import { getAsinCacheStats, clearAsinCache, invalidateAsinCache } from '../utils/asinCache.js';
@@ -496,18 +496,21 @@ router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
         // will have the same SKU and should be updateable, not blocked
         if (asinInCurrentTemplate.has(asin)) {
           const existingListing = asinInCurrentTemplate.get(asin);
-          const sku = generateSKUFromASIN(asin);
-          
+
           // Get existing customFields (already an object from .lean())
           const existingCustomFields = existingListing.customFields || {};
-          
+
+          // Compute future SKU based on current listing count
+          const asinCountDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
+          const futureSKU = generateSKUWithCount(asin, asinCountDoc?.listingCount || 0);
+
           // Return existing listing data for editing (no re-fetch)
           const item = {
             id: `preview-${asin}`,
             asin,
-            sku: existingListing.customLabel || sku,
+            sku: futureSKU,
             status: 'duplicate_updateable',
-            
+
             // Return existing data as generatedListing so modal can display it
             generatedListing: {
               title: existingListing.title,
@@ -519,21 +522,21 @@ router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
               format: existingListing.format || '',
               duration: existingListing.duration || '',
               location: existingListing.location || '',
-              customLabel: existingListing.customLabel,
+              customLabel: futureSKU,
               customFields: existingCustomFields,
               _asinReference: asin,
               _existingListingId: existingListing._id // Track which listing to update
             },
-            
+
             warnings: [
               `This ASIN already exists in this template.`,
-              existingListing.duplicateCount > 0 
+              existingListing.duplicateCount > 0
                 ? `Previously updated ${existingListing.duplicateCount} time(s).`
                 : `First time editing this ASIN.`
             ],
             errors: []
           };
-          
+
           res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
           return;
         }
@@ -587,11 +590,15 @@ router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
         if (!mergedCoreFields.description) {
           warnings.push('Missing description');
         }
-        
+
+        // Compute count-based SKU for new listing preview
+        const countDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
+        const finalSKU = generateSKUWithCount(asin, countDoc?.listingCount || 0);
+
         const item = {
           id: `preview-${asin}`,
           asin,
-          sku,
+          sku: finalSKU,
           sourceData: {
             title: amazonData.title,
             brand: amazonData.brand,
@@ -603,7 +610,7 @@ router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
           },
           generatedListing: {
             ...mergedCoreFields,
-            customLabel: sku,
+            customLabel: finalSKU,
             customFields,
             _asinReference: asin
           },
@@ -612,10 +619,10 @@ router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
           errors: validationErrors,
           status: validationErrors.length > 0 ? 'error' : (warnings.length > 0 ? 'warning' : 'success')
         };
-        
+
         // Stream the completed item
         res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
-        
+
       } catch (error) {
         console.error(`❌ Error processing ASIN ${asin}:`, error);
         const item = {
@@ -628,17 +635,17 @@ router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
         res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
       }
     });
-    
+
     // Wait for all to complete
     await Promise.allSettled(processPromises);
-    
+
     // Send completion event
     res.write(`data: ${JSON.stringify({ type: 'complete', total: completed })}\n\n`);
     res.write('data: [DONE]\n\n');
-    
+
     console.log(`📡 [SSE Stream] Completed: ${completed}/${asins.length} ASINs`);
     res.end();
-    
+
   } catch (error) {
     console.error('SSE Stream error:', error);
     res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
@@ -744,10 +751,12 @@ router.get('/bulk-preview-from-directory-stream', requireAuth, async (req, res) 
         // Duplicate in current template — updateable
         if (asinInCurrentTemplate.has(asin)) {
           const existingListing = asinInCurrentTemplate.get(asin);
-          const sku = generateSKUFromASIN(asin);
+          // Compute future SKU based on current listing count
+          const asinCountDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
+          const futureSKU = generateSKUWithCount(asin, asinCountDoc?.listingCount || 0);
           const item = {
             id: `preview-${asin}`, asin,
-            sku: existingListing.customLabel || sku,
+            sku: futureSKU,
             status: 'duplicate_updateable',
             generatedListing: {
               title: existingListing.title,
@@ -759,7 +768,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuth, async (req, res) 
               format: existingListing.format || '',
               duration: existingListing.duration || '',
               location: existingListing.location || '',
-              customLabel: existingListing.customLabel,
+              customLabel: futureSKU,
               customFields: existingListing.customFields || {},
               _asinReference: asin,
               _existingListingId: existingListing._id
@@ -846,10 +855,13 @@ router.get('/bulk-preview-from-directory-stream', requireAuth, async (req, res) 
         }
         if (!mergedCoreFields.description) warnings.push('Missing description');
 
+        // Compute count-based SKU using the already-fetched directory doc
+        const finalSKU = generateSKUWithCount(asin, doc?.listingCount || 0);
+
         const item = {
           id: `preview-${asin}`,
           asin,
-          sku,
+          sku: finalSKU,
           sourceData: {
             title: amazonData.title,
             brand: amazonData.brand,
@@ -861,7 +873,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuth, async (req, res) 
           },
           generatedListing: {
             ...mergedCoreFields,
-            customLabel: sku,
+            customLabel: finalSKU,
             customFields,
             _asinReference: asin
           },
@@ -2278,11 +2290,16 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
             ? new Map(Object.entries(listingData.customFields))
             : new Map();
-          
+
+          // Compute new count-based SKU fresh at save time
+          const dupAsinDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
+          const newSKU = generateSKUWithCount(listingData._asinReference, dupAsinDoc?.listingCount || 0);
+
           // Update existing listing with new data
           // Build update object - only overwrite fields that are explicitly provided
           // (guards against undefined wiping values that weren't sent from the frontend)
           const updateData = {
+            customLabel: newSKU,
             customFields: customFieldsMap,
             pendingRedownload: true,
             duplicateCount: (existingListing.duplicateCount || 0) + 1,
@@ -2296,18 +2313,21 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             }
           }
           Object.assign(existingListing, updateData);
-          
+
           await existingListing.save();
-          
+
+          // Increment AsinDirectory listing count
+          await AsinDirectory.updateOne({ asin: listingData._asinReference }, { $inc: { listingCount: 1 } });
+
           results.push({
             status: 'updated',
             listing: existingListing.toObject(),
             asin: listingData._asinReference,
-            sku: listingData.customLabel,
+            sku: newSKU,
             duplicateCount: existingListing.duplicateCount
           });
-          
-          console.log(`✅ Updated duplicate ASIN ${listingData._asinReference} (count: ${existingListing.duplicateCount})`);
+
+          console.log(`✅ Updated duplicate ASIN ${listingData._asinReference} (count: ${existingListing.duplicateCount}, newSKU: ${newSKU})`);
           continue;
         }
         
@@ -2338,8 +2358,13 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           continue;
         }
         
-        const sku = listingData.customLabel;
-        
+        // Compute count-based SKU fresh at save time
+        let sku = listingData.customLabel;
+        if (listingData._asinReference) {
+          const newAsinDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
+          sku = generateSKUWithCount(listingData._asinReference, newAsinDoc?.listingCount || 0);
+        }
+
         if (!sku) {
           errors.push({
             asin: listingData._asinReference,
@@ -2352,7 +2377,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           });
           continue;
         }
-        
+
         console.log(`🔍 Saving SKU: ${sku}`);
         
         // Check if SKU already exists (from ASIN imports or SKU imports)
@@ -2456,19 +2481,24 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
         
         await listing.save();
         skuSet.add(sku);
-        
+
+        // Increment AsinDirectory listing count
+        if (listingData._asinReference) {
+          await AsinDirectory.updateOne({ asin: listingData._asinReference }, { $inc: { listingCount: 1 } });
+        }
+
         results.push({
           status: 'created',
           listing: listing.toObject(),
           asin: listingData._asinReference,
           sku
         });
-        
+
         console.log(`✅ Created: ${sku}`);
-        
+
       } catch (error) {
         console.error('Error saving listing:', error);
-        
+
         if (error.code === 11000) {
           skippedCount++;
           results.push({
@@ -2489,7 +2519,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
         }
       }
     }
-    
+
     const created = results.filter(r => r.status === 'created').length;
     const updated = results.filter(r => r.status === 'updated').length;
     const reactivated = results.filter(r => r.status === 'reactivated').length;
