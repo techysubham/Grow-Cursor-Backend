@@ -12,7 +12,7 @@ const ConversationMetaSchema = new mongoose.Schema(
     // The Workflow Dropdowns
     category: {
       type: String,
-      enum: ['INR', 'Cancellation', 'Return', 'Out of Stock', 'Issue with Product', 'Inquiry'],
+      enum: ['INR', 'Cancellation', 'Return', 'Refund', 'Replace', 'Out of Stock', 'Issue with Product', 'Inquiry'],
       required: true
     },
     caseStatus: {
@@ -22,7 +22,7 @@ const ConversationMetaSchema = new mongoose.Schema(
     },
 
     // Management Status
-    status: { type: String, enum: ['Open', 'In Progress', 'Resolved'], default: 'Open' },
+    status: { type: String, enum: ['Case Not Opened', 'Open', 'In Progress', 'Resolved'], default: 'Open' },
 
     // Who picked up the conversation
     pickedUpBy: { type: String, default: null },

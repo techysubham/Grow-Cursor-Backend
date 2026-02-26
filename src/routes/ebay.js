@@ -5915,6 +5915,61 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       });
     }
 
+    // 5.5 FILTER OUT RESOLVED CONVERSATIONS (Lookup ConversationMeta)
+    pipeline.push({
+      $lookup: {
+        from: 'conversationmetas',
+        let: {
+          orderId: '$orderId',
+          buyerUsername: '$buyerUsername',
+          itemId: '$itemId',
+          sellerId: '$sellerId'
+        },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ['$seller', '$$sellerId'] },
+                  {
+                    $or: [
+                      // Order conversation: matched by orderId
+                      {
+                        $and: [
+                          { $ne: ['$$orderId', null] },
+                          { $eq: ['$orderId', '$$orderId'] }
+                        ]
+                      },
+                      // Inquiry: matched by buyerUsername + itemId + orderId is null
+                      {
+                        $and: [
+                          { $eq: ['$$orderId', null] },
+                          { $eq: ['$orderId', null] },
+                          { $eq: ['$buyerUsername', '$$buyerUsername'] },
+                          { $eq: ['$itemId', '$$itemId'] }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        as: 'conversationMeta'
+      }
+    });
+
+    // Exclude threads where ConversationMeta exists and status is 'Resolved'
+    pipeline.push({
+      $match: {
+        $or: [
+          { 'conversationMeta': { $size: 0 } },          // No meta record → not resolved
+          { 'conversationMeta.0.status': { $ne: 'Resolved' } } // Meta exists but not resolved
+        ]
+      }
+    });
+
     // 6. SEARCH FILTER (Applied AFTER grouping so we search distinct threads)
     if (search && search.trim() !== '') {
       const regex = new RegExp(search.trim(), 'i'); // Case-insensitive
