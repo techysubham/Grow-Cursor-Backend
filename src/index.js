@@ -62,6 +62,7 @@ import asinListProductsRoutes from './routes/asinListProducts.js';
 import attendanceRoutes from './routes/attendance.js';
 import userSellersRoutes from './routes/userSellers.js';
 import salaryRoutes from './routes/salary.js';
+import aiRoutes from './routes/ai.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 
 const app = express();
@@ -146,6 +147,7 @@ app.use('/api/asin-list-products', asinListProductsRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/user-sellers', userSellersRoutes);
 app.use('/api/salary', salaryRoutes);
+app.use('/api/ai', aiRoutes);
 
 const port = process.env.PORT || 5000;
 
