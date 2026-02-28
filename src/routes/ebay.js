@@ -7434,8 +7434,8 @@ router.post('/compatibility/values', requireAuth, async (req, res) => {
 router.post('/conversation-meta', requireAuth, async (req, res) => {
   const { sellerId, buyerUsername, orderId, itemId, category, caseStatus, status, pickedUpBy } = req.body;
 
-  if (!category || !caseStatus) {
-    return res.status(400).json({ error: 'Category and Case Status are required' });
+  if (!caseStatus) {
+    return res.status(400).json({ error: 'Case Status is required' });
   }
 
   try {
