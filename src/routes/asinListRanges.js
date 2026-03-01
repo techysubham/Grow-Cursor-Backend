@@ -60,6 +60,53 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
+// Rename a range
+router.put('/:id', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Range name is required' });
+    }
+    const range = await AsinListRange.findByIdAndUpdate(
+      id,
+      { name: name.trim() },
+      { new: true, runValidators: true }
+    );
+    if (!range) return res.status(404).json({ error: 'Range not found' });
+    res.json(range);
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'Range already exists in this category' });
+    }
+    console.error('Error renaming asin list range:', error);
+    res.status(500).json({ error: 'Failed to rename range' });
+  }
+});
+
+// Shallow duplicate a range (same category, no products copied)
+router.post('/duplicate', requireAuth, async (req, res) => {
+  try {
+    const { sourceRangeId, name } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Range name is required' });
+    }
+    if (!sourceRangeId) {
+      return res.status(400).json({ error: 'sourceRangeId is required' });
+    }
+    const source = await AsinListRange.findById(sourceRangeId).lean();
+    if (!source) return res.status(404).json({ error: 'Source range not found' });
+    const range = await AsinListRange.create({ name: name.trim(), categoryId: source.categoryId });
+    res.status(201).json(range);
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'Range already exists in this category' });
+    }
+    console.error('Error duplicating asin list range:', error);
+    res.status(500).json({ error: 'Failed to duplicate range' });
+  }
+});
+
 // Delete a range and cascade-delete its products and orphan assigned ASINs
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
