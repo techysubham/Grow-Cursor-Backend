@@ -6002,8 +6002,57 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
 
     const result = await Message.aggregate(facetedPipeline);
 
-    const threads = result[0].data;
-    const total = result[0].metadata[0] ? result[0].metadata[0].total : 0;
+    let threads = result[0].data;
+    let total = result[0].metadata[0] ? result[0].metadata[0].total : 0;
+
+    // --- ORDER FALLBACK SEARCH ---
+    // If a search term is provided, also look up matching Orders directly.
+    // This handles the case where an order exists but has never had a message synced.
+    if (search && search.trim() !== '') {
+      const searchTrim = search.trim();
+      const regex = new RegExp(searchTrim, 'i');
+
+      // Build order query
+      const orderQuery = {
+        $or: [
+          { orderId: regex },
+          { legacyOrderId: regex },
+          { 'buyer.username': regex },
+          { 'buyer.buyerRegistrationAddress.fullName': regex }
+        ]
+      };
+      if (sellerId) {
+        orderQuery.seller = new mongoose.Types.ObjectId(sellerId);
+      }
+
+      const matchingOrders = await Order.find(orderQuery).limit(20).lean();
+
+      // Get the set of orderIds already in message threads
+      const existingOrderIds = new Set(threads.map(t => t.orderId).filter(Boolean));
+
+      // For each matching order not already in threads, create a synthetic thread
+      for (const order of matchingOrders) {
+        if (!existingOrderIds.has(order.orderId)) {
+          threads.push({
+            orderId: order.orderId,
+            buyerUsername: order.buyer?.username || '',
+            buyerName: order.buyer?.buyerRegistrationAddress?.fullName || '',
+            itemId: order.lineItems?.[0]?.legacyItemId || null,
+            itemTitle: order.lineItems?.[0]?.title || order.productName || '',
+            lastMessage: '(No messages yet)',
+            lastDate: order.lastModifiedDate || order.creationDate,
+            sender: null,
+            unreadCount: 0,
+            sellerId: order.seller,
+            orderMarketplaceId: order.purchaseMarketplaceId,
+            computedMarketplaceId: order.purchaseMarketplaceId || 'Unknown',
+            _isSyntheticOrder: true
+          });
+          total += 1;
+        }
+      }
+    }
+
 
     // --- NEW: MARKETPLACE RESOLUTION LOGIC ---
     // Process threads to add 'marketplaceId'
