@@ -63,6 +63,8 @@ import attendanceRoutes from './routes/attendance.js';
 import userSellersRoutes from './routes/userSellers.js';
 import salaryRoutes from './routes/salary.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
+import swaggerUi from 'swagger-ui-express';
+import { swaggerSpec } from './swagger.js';
 
 const app = express();
 
@@ -90,6 +92,13 @@ app.use('/api', (req, res, next) => {
 app.get('/health', (req, res) => {
   res.json({ ok: true });
 });
+
+// API Documentation
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  customSiteTitle: 'Grow – Buyer Chat API Docs',
+  swaggerOptions: { persistAuthorization: true }
+}));
+app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));;
 
 
 
