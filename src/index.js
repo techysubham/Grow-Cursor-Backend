@@ -59,6 +59,7 @@ import asinDirectoryRoutes from './routes/asinDirectory.js';
 import asinListCategoriesRoutes from './routes/asinListCategories.js';
 import asinListRangesRoutes from './routes/asinListRanges.js';
 import asinListProductsRoutes from './routes/asinListProducts.js';
+import csvStorageRoutes from './routes/csvStorage.js';
 import attendanceRoutes from './routes/attendance.js';
 import userSellersRoutes from './routes/userSellers.js';
 import salaryRoutes from './routes/salary.js';
@@ -140,6 +141,7 @@ app.use('/api/asin-directory', asinDirectoryRoutes);
 app.use('/api/asin-list-categories', asinListCategoriesRoutes);
 app.use('/api/asin-list-ranges', asinListRangesRoutes);
 app.use('/api/asin-list-products', asinListProductsRoutes);
+app.use('/api/csv-storage', csvStorageRoutes);
 // Nomenclature note:
 // `/api/attendance` is a legacy endpoint name kept for compatibility;
 // it serves working-hours tracking behavior (timer sessions), not traditional attendance management.
