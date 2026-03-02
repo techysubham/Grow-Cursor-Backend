@@ -3094,7 +3094,7 @@ router.post('/bulk-import', requireAuth, async (req, res) => {
 router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params;
-    const { sellerId } = req.query;
+    const { sellerId, listingIds } = req.query;
     
     // Build filter for ACTIVE listings only that haven't been downloaded yet
     // Inactive listings (deactivated by user) are excluded from CSV downloads
@@ -3106,6 +3106,13 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     };
     if (sellerId) {
       filter.sellerId = sellerId;
+    }
+    // Optional: filter to specific listing IDs (used by "List Directly" flow)
+    if (listingIds) {
+      const ids = listingIds.split(',').map(id => id.trim()).filter(Boolean);
+      if (ids.length > 0) {
+        filter._id = { $in: ids };
+      }
     }
     
     // Fetch effective template (includes seller overrides), seller, and filtered listings
