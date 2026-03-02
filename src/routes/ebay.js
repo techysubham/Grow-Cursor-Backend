@@ -1517,7 +1517,7 @@ router.get('/order/:orderId', requireAuth, requireRole('fulfillmentadmin', 'supe
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, productName } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName } = req.query;
 
   try {
     let query = {};
@@ -1545,6 +1545,9 @@ router.get('/stored-orders', async (req, res) => {
       query.fulfillmentNotes = { $exists: true, $nin: ['', null] };
     }
 
+    const arrivalRangeStart = arrivalDateFrom || arrivalStartDate;
+    const arrivalRangeEnd = arrivalDateTo || arrivalEndDate;
+
     // --- Amazon Arrivals Filter ---
     if (amazonArriving === 'true') {
       // Only show orders with arrivingDate in ISO format (YYYY-MM-DD)
@@ -1559,10 +1562,16 @@ router.get('/stored-orders', async (req, res) => {
       query.remark = { $ne: 'Delivered' };
 
       // Optional arrival date range filter (string compare is safe for YYYY-MM-DD)
-      if (arrivalStartDate || arrivalEndDate) {
-        if (arrivalStartDate) query.arrivingDate.$gte = arrivalStartDate;
-        if (arrivalEndDate) query.arrivingDate.$lte = arrivalEndDate;
+      if (arrivalRangeStart || arrivalRangeEnd) {
+        if (arrivalRangeStart) query.arrivingDate.$gte = arrivalRangeStart;
+        if (arrivalRangeEnd) query.arrivingDate.$lte = arrivalRangeEnd;
       }
+    } else if (arrivalRangeStart || arrivalRangeEnd) {
+      // Arrival date range filter for non-Amazon-Arrivals views (e.g. Awaiting Shipment)
+      query.arrivingDate = {
+        ...(arrivalRangeStart ? { $gte: arrivalRangeStart } : {}),
+        ...(arrivalRangeEnd ? { $lte: arrivalRangeEnd } : {})
+      };
     }
 
     // Amazon Account Filter
@@ -7798,7 +7807,7 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
   const { orderId } = req.params;
   const updates = req.body;
 
-  const allowedFields = ['amazonAccount', 'arrivingDate', 'beforeTax', 'estimatedTax', 'azOrderId', 'amazonRefund', 'cardName', 'remark', 'alreadyInUse', 'remarkMessageSent'];
+  const allowedFields = ['amazonAccount', 'arrivingDate', 'beforeTax', 'estimatedTax', 'azOrderId', 'amazonRefund', 'cardName', 'resolution', 'remark', 'alreadyInUse', 'remarkMessageSent'];
   const updateData = {};
 
   Object.keys(updates).forEach(key => {

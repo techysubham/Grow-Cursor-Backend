@@ -93,6 +93,7 @@ const OrderSchema = new mongoose.Schema(
     azOrderId: String,
     amazonRefund: Number,
     cardName: String, // Reference to credit card name
+    resolution: { type: String, default: null },
     remark: {
       type: String,
       enum: [
