@@ -3104,7 +3104,10 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
       $or: [{ downloadBatchId: null }, { pendingRedownload: true }], // Active batch: not downloaded yet OR flagged for re-download
       status: 'active'       // Only active listings (exclude inactive/draft/sold/ended)
     };
-    if (sellerId) {
+    // When specific listingIds are provided, skip the sellerId filter — listings are
+    // already precisely identified by ID. sellerId is still used for template overrides,
+    // seller name in filename, and batch numbering.
+    if (sellerId && !listingIds) {
       filter.sellerId = sellerId;
     }
     // Optional: filter to specific listing IDs (used by "List Directly" flow)
