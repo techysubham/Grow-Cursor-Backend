@@ -2,7 +2,9 @@
 
 import express from 'express';
 import OpenAI from 'openai';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
+import AiFitmentUsage from '../models/AiFitmentUsage.js';
+import User from '../models/User.js';
 
 const router = express.Router();
 
@@ -89,6 +91,20 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
             return res.status(500).json({ error: 'AI returned unexpected format', raw });
         }
 
+        // Track AI usage
+        const now = new Date();
+        const dateStr = now.toISOString().slice(0, 10);
+        AiFitmentUsage.create({
+            userId: req.user.userId,
+            action: 'ai_suggest',
+            itemCount: 1,
+            hadData: allFitments.length > 0,
+            date: dateStr,
+            year: now.getFullYear(),
+            month: now.getMonth() + 1,
+            day: now.getDate()
+        }).catch(err => console.error('[AI Usage Track] Error:', err.message));
+
         if (allFitments.length === 0) {
             return res.json({ make: null, model: null, startYear: null, endYear: null, allFitments: [] });
         }
@@ -111,6 +127,108 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
     } catch (error) {
         console.error('[AI Suggest Fitment] Error:', error.message);
         res.status(500).json({ error: 'AI request failed', details: error.message });
+    }
+});
+
+// ============================================
+// TRACK SAVE & NEXT ACTION
+// POST /api/ai/track-save-next
+// Body: { hadData: boolean }
+// ============================================
+router.post('/track-save-next', requireAuth, async (req, res) => {
+    try {
+        const { hadData = false } = req.body;
+        const now = new Date();
+        const dateStr = now.toISOString().slice(0, 10);
+        await AiFitmentUsage.create({
+            userId: req.user.userId,
+            action: 'save_next',
+            itemCount: 1,
+            hadData,
+            date: dateStr,
+            year: now.getFullYear(),
+            month: now.getMonth() + 1,
+            day: now.getDate()
+        });
+        res.json({ ok: true });
+    } catch (error) {
+        console.error('[Track Save Next] Error:', error.message);
+        res.status(500).json({ error: 'Failed to track action' });
+    }
+});
+
+// ============================================
+// AI FITMENT USAGE STATS
+// GET /api/ai/fitment-usage-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+// Returns day-wise, user-wise stats
+// ============================================
+router.get('/fitment-usage-stats', requireAuth, requireRole('superadmin', 'compatibilityadmin'), async (req, res) => {
+    try {
+        const { startDate, endDate } = req.query;
+        const matchStage = {};
+        if (startDate) matchStage.date = { $gte: startDate };
+        if (endDate) matchStage.date = { ...matchStage.date, $lte: endDate };
+
+        const stats = await AiFitmentUsage.aggregate([
+            { $match: matchStage },
+            {
+                $group: {
+                    _id: { userId: '$userId', date: '$date', action: '$action' },
+                    totalCount: { $sum: '$itemCount' },
+                    withDataCount: { $sum: { $cond: ['$hadData', '$itemCount', 0] } }
+                }
+            },
+            {
+                $group: {
+                    _id: { userId: '$_id.userId', date: '$_id.date' },
+                    actions: {
+                        $push: {
+                            action: '$_id.action',
+                            totalCount: '$totalCount',
+                            withDataCount: '$withDataCount'
+                        }
+                    }
+                }
+            },
+            { $sort: { '_id.date': -1 } }
+        ]);
+
+        // Collect unique user IDs and fetch names
+        const userIds = [...new Set(stats.map(s => s._id.userId.toString()))];
+        const users = await User.find(
+            { _id: { $in: userIds } },
+            { username: 1, name: 1, role: 1 }
+        ).lean();
+        const userMap = {};
+        users.forEach(u => { userMap[u._id.toString()] = { username: u.username, name: u.name, role: u.role }; });
+
+        // Reshape into a friendly format
+        const result = stats.map(s => {
+            const uid = s._id.userId.toString();
+            const row = {
+                userId: uid,
+                username: userMap[uid]?.username || 'Unknown',
+                name: userMap[uid]?.name || '',
+                role: userMap[uid]?.role || '',
+                date: s._id.date,
+                aiSuggestCount: 0,
+                saveNextCount: 0,
+                saveNextWithDataCount: 0
+            };
+            s.actions.forEach(a => {
+                if (a.action === 'ai_suggest') row.aiSuggestCount = a.totalCount;
+                if (a.action === 'save_next') {
+                    row.saveNextCount = a.totalCount;
+                    row.saveNextWithDataCount = a.withDataCount;
+                }
+            });
+            return row;
+        });
+
+        res.json(result);
+    } catch (error) {
+        console.error('[AI Fitment Usage Stats] Error:', error.message);
+        res.status(500).json({ error: 'Failed to fetch usage stats' });
     }
 });
 
