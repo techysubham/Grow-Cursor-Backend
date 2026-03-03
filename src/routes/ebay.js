@@ -8205,6 +8205,54 @@ router.patch('/returns/:returnId/worksheet-status', requireAuth, async (req, res
   }
 });
 
+// Update manual eBay/Amazon statuses for a return
+router.patch('/returns/:returnId/marketplace-statuses', requireAuth, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const { ebayStatus, amazonStatus } = req.body;
+
+    const allowedEbayStatuses = [
+      '',
+      'Fully Refunded',
+      'Partially Refunded',
+      'To be returned',
+      'Received Item',
+      'Awaiting Return Shipment'
+    ];
+
+    const allowedAmazonStatuses = [
+      '',
+      'Received',
+      'Refund Issued',
+      'Replacement Delivered',
+      'Dropped Off'
+    ];
+
+    if (typeof ebayStatus !== 'string' || !allowedEbayStatuses.includes(ebayStatus)) {
+      return res.status(400).json({ error: 'Invalid eBay status' });
+    }
+
+    if (typeof amazonStatus !== 'string' || !allowedAmazonStatuses.includes(amazonStatus)) {
+      return res.status(400).json({ error: 'Invalid Amazon status' });
+    }
+
+    const returnDoc = await Return.findOneAndUpdate(
+      { returnId },
+      { ebayStatus, amazonStatus },
+      { new: true }
+    );
+
+    if (!returnDoc) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+
+    res.json({ success: true, return: returnDoc });
+  } catch (err) {
+    console.error('Error updating return marketplace statuses:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Update worksheet status for a case (INR)
 router.patch('/cases/:caseId/worksheet-status', requireAuth, async (req, res) => {
   try {
