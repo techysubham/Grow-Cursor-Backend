@@ -1,3 +1,5 @@
+
+
 import express from 'express';
 import OpenAI from 'openai';
 import { requireAuth } from '../middleware/auth.js';
@@ -8,7 +10,9 @@ const router = express.Router();
 let _openai = null;
 function getOpenAI() {
     if (!_openai) {
-        _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        // Use a dedicated key for fitment AI if configured, else fall back to the default
+        const apiKey = process.env.OPENAI_FITMENT_API_KEY;
+        _openai = new OpenAI({ apiKey });
     }
     return _openai;
 }
@@ -27,8 +31,24 @@ router.post('/suggest-fitment', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'title or description is required' });
         }
 
-        // Strip HTML tags from description for a cleaner prompt
-        const cleanDescription = description.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1000);
+        // Strip HTML tags, then cut at boilerplate phrases that appear mid-description
+        // (shipping promos, seller banners, store links — all irrelevant for fitment)
+        const BOILERPLATE_SIGNALS = [
+            'Top Seller', 'Fast, Reliable Shipping', 'Always Free', '1-Day Processing',
+            'Questions?', "We're Happy to Help", 'Buy with Confidence',
+            'Ship from USA', 'Free & Fast Shipping', '30 Days Return',
+            'PLEASE VISIT OUR STORE', 'Thank you for shopping',
+            'All communication is handled', 'eBay\'s messaging platform',
+            'Orders ship within', 'carefully inspected before shipping',
+        ];
+        let rawText = description.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        // Find the earliest boilerplate cut point
+        let cutAt = rawText.length;
+        for (const signal of BOILERPLATE_SIGNALS) {
+            const idx = rawText.indexOf(signal);
+            if (idx !== -1 && idx < cutAt) cutAt = idx;
+        }
+        const cleanDescription = rawText.slice(0, cutAt).trim().slice(0, 500);
 
         const prompt = `You are an automotive parts expert. Extract all vehicle fitments from this eBay listing.
 
