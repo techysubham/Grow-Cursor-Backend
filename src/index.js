@@ -64,6 +64,7 @@ import csvStorageRoutes from './routes/csvStorage.js';
 import attendanceRoutes from './routes/attendance.js';
 import userSellersRoutes from './routes/userSellers.js';
 import salaryRoutes from './routes/salary.js';
+import aiRoutes from './routes/ai.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
@@ -159,6 +160,7 @@ app.use('/api/csv-storage', csvStorageRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/user-sellers', userSellersRoutes);
 app.use('/api/salary', salaryRoutes);
+app.use('/api/ai', aiRoutes);
 
 const port = process.env.PORT || 5000;
 
