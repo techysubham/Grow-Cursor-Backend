@@ -386,7 +386,7 @@ router.get('/analytics', requireAuth, async (req, res) => {
 // Bulk preview with SSE streaming (real-time updates) - MUST be before /:id route
 router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, asins: asinsParam } = req.query;
+    const { templateId, sellerId, asins: asinsParam, region = 'US' } = req.query;
     
     if (!templateId || !sellerId || !asinsParam) {
       return res.status(400).json({ error: 'Template ID, Seller ID, and ASINs are required' });
@@ -559,7 +559,7 @@ router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
         }
         
         // Fetch and process ASIN (new listing case)
-        const amazonData = await fetchAmazonData(asin);
+        const amazonData = await fetchAmazonData(asin, region);
         const { coreFields, customFields, pricingCalculation } = 
           await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
         
@@ -1091,7 +1091,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
 // ASIN Autofill endpoint
 router.post('/autofill-from-asin', requireAuth, async (req, res) => {
   try {
-    const { asin, templateId, sellerId } = req.body;
+    const { asin, templateId, sellerId, region = 'US' } = req.body;
     
     if (!asin || !templateId) {
       return res.status(400).json({ 
@@ -1125,8 +1125,8 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
     }
     
     // 2. Fetch fresh Amazon data
-    console.log(`Fetching Amazon data for ASIN: ${asin}`);
-    const amazonData = await fetchAmazonData(asin);
+    console.log(`Fetching Amazon data for ASIN: ${asin} (${region})`);
+    const amazonData = await fetchAmazonData(asin, region);
     
     // 3. Apply field configurations (AI + direct mappings)
     console.log(`Processing ${template.asinAutomation.fieldConfigs.length} field configs`);
@@ -1164,7 +1164,7 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
 // Bulk auto-fill from multiple ASINs
 router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
   try {
-    const { asins, templateId, sellerId } = req.body;
+    const { asins, templateId, sellerId, region = 'US' } = req.body;
     
     if (!asins || !Array.isArray(asins) || asins.length === 0) {
       return res.status(400).json({ 
@@ -1350,7 +1350,7 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
         
         try {
           // Fetch Amazon data
-          const amazonData = await fetchAmazonData(asin);
+          const amazonData = await fetchAmazonData(asin, region);
           
           // Apply field configurations
           const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
@@ -1788,7 +1788,7 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
 // Bulk preview: Process ASINs and return preview data (no save to database)
 router.post('/bulk-preview', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, asins } = req.body;
+    const { templateId, sellerId, asins, region = 'US' } = req.body;
     
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
@@ -1979,7 +1979,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         }
         
         // Fetch Amazon data
-        const amazonData = await fetchAmazonData(asin);
+        const amazonData = await fetchAmazonData(asin, region);
         
         // Apply field configurations
         const { coreFields, customFields, pricingCalculation } = 
