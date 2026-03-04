@@ -4,11 +4,11 @@ import { requireAuth } from '../middleware/auth.js';
 import { fetchAmazonData } from '../utils/asinAutofill.js';
 
 // Scrape a batch of ASINs in parallel (max 5 at a time) and return enrichment map
-async function scrapeAsinsBatched(asinList, batchSize = 5) {
+async function scrapeAsinsBatched(asinList, region = 'US', batchSize = 5) {
   const enrichmentMap = new Map();
   for (let i = 0; i < asinList.length; i += batchSize) {
     const batch = asinList.slice(i, i + batchSize);
-    const results = await Promise.allSettled(batch.map(asin => fetchAmazonData(asin)));
+    const results = await Promise.allSettled(batch.map(asin => fetchAmazonData(asin, region)));
     results.forEach((result, idx) => {
       const asin = batch[idx];
       if (result.status === 'fulfilled') {
@@ -96,7 +96,7 @@ router.get('/stats', requireAuth, async (req, res) => {
 // Bulk add ASINs manually
 router.post('/bulk-manual', requireAuth, async (req, res) => {
   try {
-    const { asins } = req.body;
+    const { asins, region = 'US' } = req.body;
 
     if (!asins || !Array.isArray(asins)) {
       return res.status(400).json({ error: 'ASINs array is required' });
@@ -124,8 +124,8 @@ router.post('/bulk-manual', requireAuth, async (req, res) => {
     }
 
     // Scrape all valid ASINs in parallel batches
-    console.log(`🔍 Scraping ${validAsins.length} ASINs for directory enrichment...`);
-    const enrichmentMap = await scrapeAsinsBatched(validAsins);
+    console.log(`🔍 Scraping ${validAsins.length} ASINs for directory enrichment (${region})...`);
+    const enrichmentMap = await scrapeAsinsBatched(validAsins, region);
 
     // Insert ASINs with enrichment data
     for (const asin of validAsins) {
@@ -176,7 +176,7 @@ router.post('/bulk-manual', requireAuth, async (req, res) => {
 // Bulk add from CSV
 router.post('/bulk-csv', requireAuth, async (req, res) => {
   try {
-    const { csvData } = req.body;
+    const { csvData, region = 'US' } = req.body;
 
     if (!csvData) {
       return res.status(400).json({ error: 'CSV data is required' });
@@ -228,8 +228,8 @@ router.post('/bulk-csv', requireAuth, async (req, res) => {
 
     // Scrape all valid ASINs in parallel batches
     const asinStrings = asins.map(a => a.asin);
-    console.log(`🔍 Scraping ${asinStrings.length} ASINs for directory enrichment...`);
-    const enrichmentMap = await scrapeAsinsBatched(asinStrings);
+    console.log(`🔍 Scraping ${asinStrings.length} ASINs for directory enrichment (${region})...`);
+    const enrichmentMap = await scrapeAsinsBatched(asinStrings, region);
 
     // Insert ASINs with enrichment data
     for (const { asin, row } of asins) {
