@@ -28,6 +28,7 @@ import multer from 'multer';
 import FeedUpload from '../models/FeedUpload.js';
 import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import UserDailyQuantity from '../models/UserDailyQuantity.js';
+import User from '../models/User.js';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
@@ -8982,6 +8983,71 @@ router.get('/selling/summary', requireAuth, async (req, res) => {
 
 // Export for optional external schedulers
 export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDate };
+
+// ============================================
+// FEED UPLOAD SUCCESS STATS (aggregated day-wise by seller)
+// GET /api/ebay/feed/upload-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&sellerId=...
+// ============================================
+router.get('/feed/upload-stats', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+  try {
+    const { startDate, endDate, sellerId } = req.query;
+
+    const matchStage = {
+      status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
+      'uploadSummary.successCount': { $gt: 0 }
+    };
+    if (sellerId) matchStage.seller = new mongoose.Types.ObjectId(sellerId);
+    if (startDate || endDate) {
+      matchStage.creationDate = {};
+      if (startDate) matchStage.creationDate.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchStage.creationDate.$lte = end;
+      }
+    }
+
+    const rows = await FeedUpload.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: {
+            seller: '$seller',
+            date: { $dateToString: { format: '%Y-%m-%d', date: '$creationDate' } }
+          },
+          totalSuccess: { $sum: '$uploadSummary.successCount' },
+          totalFailure: { $sum: { $ifNull: ['$uploadSummary.failureCount', 0] } },
+          taskCount: { $sum: 1 }
+        }
+      },
+      { $sort: { '_id.date': -1, '_id.seller': 1 } }
+    ]);
+
+    // Collect unique seller IDs and populate usernames
+    const sellerIds = [...new Set(rows.map(r => r._id.seller.toString()))];
+    const sellers = await Seller.find({ _id: { $in: sellerIds } })
+      .populate('user', 'username')
+      .lean();
+    const sellerMap = {};
+    sellers.forEach(s => {
+      sellerMap[s._id.toString()] = s.user?.username || s._id.toString();
+    });
+
+    const result = rows.map(r => ({
+      sellerId: r._id.seller,
+      sellerName: sellerMap[r._id.seller.toString()] || r._id.seller.toString(),
+      date: r._id.date,
+      totalSuccess: r.totalSuccess,
+      totalFailure: r.totalFailure,
+      taskCount: r.taskCount
+    }));
+
+    res.json(result);
+  } catch (err) {
+    console.error('[Feed Upload Stats] Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch feed upload stats' });
+  }
+});
 
 export default router;
 
