@@ -9189,6 +9189,27 @@ router.get('/processing-transactions/:sellerId', requireAuth, requireRole('fulfi
       }
     }
 
+    // Fetch payout dates for all unique payoutIds
+    const payoutIds = [...new Set([...orderMap.values()].map(o => o.payoutId).filter(Boolean))];
+    const payoutMap = {};
+
+    for (const payoutId of payoutIds) {
+      try {
+        const payoutRes = await axios.get(`https://apiz.ebay.com/sell/finances/v1/payout/${payoutId}`, {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+          }
+        });
+        // payoutDate is when the payout will be completed
+        payoutMap[payoutId] = payoutRes.data.payoutDate || null;
+      } catch (err) {
+        console.error(`[Payout ${payoutId}] Error:`, err.response?.status, err.message);
+        payoutMap[payoutId] = null;
+      }
+    }
+
     // Try to match with local orders to get expected delivery dates
     const orderIds = [...orderMap.keys()];
     const localOrders = await Order.find({ orderId: { $in: orderIds }, seller: seller._id })
@@ -9205,6 +9226,7 @@ router.get('/processing-transactions/:sellerId', requireAuth, requireRole('fulfi
       return {
         ...o,
         amount: parseFloat(o.amount.toFixed(2)),
+        payoutCompletionDate: o.payoutId ? payoutMap[o.payoutId] : null,
         expectedDeliveryDate: local?.expectedDeliveryDate || null,
         shipByDate: local?.fulfillmentStartInstructions?.[0]?.shipByDate || null
       };
