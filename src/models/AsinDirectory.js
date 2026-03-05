@@ -39,6 +39,10 @@ const asinDirectorySchema = new mongoose.Schema({
   scrapedAt: { type: Date, default: null },
   scrapeError: { type: String, default: null },
 
+  // Manual edit tracking
+  manuallyEdited: { type: Boolean, default: false },
+  manuallyEditedAt: { type: Date, default: null },
+
   // Listing count — increments every time this ASIN is listed in any template/seller
   listingCount: {
     type: Number,

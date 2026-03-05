@@ -304,6 +304,38 @@ router.get('/export-csv', requireAuth, async (req, res) => {
   }
 });
 
+// Manually update price and/or description for a single ASIN
+router.patch('/:id', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { price, description } = req.body;
+
+    if (price === undefined && description === undefined) {
+      return res.status(400).json({ error: 'At least one of price or description must be provided' });
+    }
+
+    const update = { manuallyEdited: true, manuallyEditedAt: new Date() };
+    if (price !== undefined) update.price = String(price).trim();
+    if (description !== undefined) update.description = String(description).trim();
+
+    const doc = await AsinDirectory.findByIdAndUpdate(
+      id,
+      { $set: update },
+      { new: true, runValidators: false }
+    );
+
+    if (!doc) {
+      return res.status(404).json({ error: 'ASIN not found' });
+    }
+
+    console.log(`✏️ [ASIN Directory] Manually edited ${doc.asin} (price: ${update.price ?? '—'}, description: ${description !== undefined ? 'updated' : '—'})`);
+    res.json(doc);
+  } catch (error) {
+    console.error('Error updating ASIN:', error);
+    res.status(500).json({ error: 'Failed to update ASIN' });
+  }
+});
+
 // Delete single ASIN
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
