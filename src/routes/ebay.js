@@ -9055,6 +9055,174 @@ router.get('/feed/upload-stats', requireAuth, requireRole('superadmin', 'listing
     res.status(500).json({ error: 'Failed to fetch feed upload stats' });
   }
 });
+// ============================================
+// SELLER FUNDS SUMMARY (All connected sellers)
+// ============================================
+router.get('/seller-funds-summary', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  try {
+    // Get all sellers with eBay tokens
+    const sellers = await Seller.find({
+      'ebayTokens.access_token': { $exists: true, $ne: null },
+      'ebayTokens.refresh_token': { $exists: true, $ne: null }
+    }).populate('user', 'username email');
 
+    const results = [];
+
+    for (const seller of sellers) {
+      const sellerName = seller.user?.username || seller._id.toString();
+      try {
+        const accessToken = await ensureValidToken(seller);
+
+        const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/seller_funds_summary', {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+          }
+        });
+
+        results.push({
+          sellerId: seller._id,
+          sellerName,
+          totalFunds: response.data.totalFunds || { value: '0.00', currency: 'USD' },
+          availableFunds: response.data.availableFunds || { value: '0.00', currency: 'USD' },
+          processingFunds: response.data.processingFunds || { value: '0.00', currency: 'USD' },
+          fundsOnHold: response.data.fundsOnHold || { value: '0.00', currency: 'USD' },
+          error: null
+        });
+      } catch (err) {
+        // 204 No Content means no funds
+        if (err.response?.status === 204) {
+          results.push({
+            sellerId: seller._id,
+            sellerName,
+            totalFunds: { value: '0.00', currency: 'USD' },
+            availableFunds: { value: '0.00', currency: 'USD' },
+            processingFunds: { value: '0.00', currency: 'USD' },
+            fundsOnHold: { value: '0.00', currency: 'USD' },
+            error: null
+          });
+        } else {
+          console.error(`[Seller Funds] Error for ${sellerName}:`, err.response?.data || err.message);
+          results.push({
+            sellerId: seller._id,
+            sellerName,
+            totalFunds: null,
+            availableFunds: null,
+            processingFunds: null,
+            fundsOnHold: null,
+            error: err.response?.data?.errors?.[0]?.message || err.message
+          });
+        }
+      }
+    }
+
+    res.json(results);
+  } catch (err) {
+    console.error('[Seller Funds Summary] Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch seller funds summary' });
+  }
+});
+
+// ============================================
+// PROCESSING TRANSACTIONS for a specific seller
+// ============================================
+router.get('/processing-transactions/:sellerId', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.params.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
+
+    const accessToken = await ensureValidToken(seller);
+
+    let allTransactions = [];
+    let offset = 0;
+    const limit = 200;
+    let hasMore = true;
+
+    while (hasMore) {
+      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+        },
+        params: {
+          filter: 'transactionStatus:{FUNDS_PROCESSING}',
+          limit,
+          offset
+        }
+      });
+
+      const transactions = response.data?.transactions || [];
+      allTransactions = allTransactions.concat(transactions);
+
+      if (transactions.length < limit) {
+        hasMore = false;
+      } else {
+        offset += limit;
+      }
+    }
+
+    // Extract order-level info
+    const orderMap = new Map();
+    for (const txn of allTransactions) {
+      const orderId = txn.orderId || null;
+      const orderRef = txn.references?.find(r => r.referenceType === 'ORDER_ID');
+      const effectiveOrderId = orderId || orderRef?.referenceId || txn.transactionId;
+
+      if (!orderMap.has(effectiveOrderId)) {
+        orderMap.set(effectiveOrderId, {
+          orderId: effectiveOrderId,
+          amount: parseFloat(txn.amount?.value || 0),
+          currency: txn.amount?.currency || 'USD',
+          transactionDate: txn.transactionDate,
+          transactionType: txn.transactionType,
+          transactionStatus: txn.transactionStatus,
+          buyer: txn.buyer?.username || 'N/A',
+          payoutId: txn.payoutId || null
+        });
+      } else {
+        // Accumulate amounts for same order
+        const existing = orderMap.get(effectiveOrderId);
+        existing.amount += parseFloat(txn.amount?.value || 0);
+      }
+    }
+
+    // Try to match with local orders to get expected delivery dates
+    const orderIds = [...orderMap.keys()];
+    const localOrders = await Order.find({ orderId: { $in: orderIds }, seller: seller._id })
+      .select('orderId expectedDeliveryDate fulfillmentStartInstructions lineItems')
+      .lean();
+
+    const localOrderMap = {};
+    for (const lo of localOrders) {
+      localOrderMap[lo.orderId] = lo;
+    }
+
+    const result = [...orderMap.values()].map(o => {
+      const local = localOrderMap[o.orderId];
+      return {
+        ...o,
+        amount: parseFloat(o.amount.toFixed(2)),
+        expectedDeliveryDate: local?.expectedDeliveryDate || null,
+        shipByDate: local?.fulfillmentStartInstructions?.[0]?.shipByDate || null
+      };
+    });
+
+    // Sort by transaction date descending
+    result.sort((a, b) => new Date(b.transactionDate) - new Date(a.transactionDate));
+
+    res.json({
+      sellerId: seller._id,
+      sellerName: seller.user?.username || seller._id.toString(),
+      totalProcessingTransactions: result.length,
+      transactions: result
+    });
+  } catch (err) {
+    console.error('[Processing Transactions] Error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to fetch processing transactions' });
+  }
+});
 export default router;
 
