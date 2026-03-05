@@ -54,22 +54,27 @@ router.post('/suggest-fitment', requireAuth, async (req, res) => {
 
         const prompt = `You are an automotive parts expert. Extract all vehicle fitments from this eBay listing.
 
-Title: ${title}
+IMPORTANT: Focus PRIMARILY on the Description for extracting fitment data. The Title may contain SEO keywords that are not actual fitment info. Use the Title only as supplementary context when the Description lacks detail.
+
 Description: ${cleanDescription}
+Title: ${title}
 
 Return ONLY a valid JSON array (no markdown, no explanation) where each object has:
 - "make": string (e.g. "Toyota")
 - "model": string (e.g. "Camry")
-- "startYear": string (e.g. "2010")
-- "endYear": string (same as startYear if only one year)
+- "startYear": string or null (e.g. "2010")
+- "endYear": string or null (same as startYear if only one year)
 
 Rules:
-- If a year range is given like "2008-2013", use startYear="2008" endYear="2013"
-- If a single year is given like "2005", use startYear="2005" endYear="2005"
-- Only include entries where you are confident of all four fields
-- Do not invent data not present in the title or description
+- If a year range is EXPLICITLY stated like "2008-2013", use startYear="2008" endYear="2013"
+- If a single year is EXPLICITLY stated like "2005", use startYear="2005" endYear="2005"
+- CRITICAL: If NO year is explicitly mentioned in the description or title for a fitment, you MUST set startYear and endYear to null. Do NOT guess, infer, or assume years based on the vehicle generation or your knowledge.
+- Only include make and model entries where you are confident based on the text
+- Do not invent or assume any data not explicitly present in the description or title
+- Use the most specific model name mentioned (e.g. "F-150" not just "F-Series")
+- If the description lists a compatibility/fitment table, extract all entries from it
 
-Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013"},{"make":"Lexus","model":"IS250","startYear":"2006","endYear":"2015"}]`;
+Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013"},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null}]`;
 
         const completion = await getOpenAI().chat.completions.create({
             model: 'gpt-4o-mini',
