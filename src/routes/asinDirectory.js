@@ -41,6 +41,9 @@ router.get('/', requireAuth, async (req, res) => {
     }
     if (listProductId) {
       query.listProductId = listProductId;
+    } else if (req.query.showMoved !== 'true') {
+      // Default: hide ASINs already moved to a list
+      query.listProductId = null;
     }
 
     // Get total count
@@ -83,6 +86,7 @@ router.get('/by-asins', requireAuth, async (req, res) => {
 router.get('/stats', requireAuth, async (req, res) => {
   try {
     const total = await AsinDirectory.countDocuments();
+    const unassigned = await AsinDirectory.countDocuments({ listProductId: null });
 
     const now = new Date();
     const todayStart = new Date(now.setHours(0, 0, 0, 0));
@@ -95,6 +99,8 @@ router.get('/stats', requireAuth, async (req, res) => {
 
     res.json({
       total,
+      unassigned,
+      assigned: total - unassigned,
       recentlyAdded: {
         today,
         thisWeek,
