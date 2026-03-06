@@ -61,6 +61,7 @@ router.get('/', requireAuth, async (req, res) => {
     
     const [listings, total] = await Promise.all([
       TemplateListing.find(filter)
+        .select('+_asinReference')
         .populate('createdBy', 'name email')
         .populate({
           path: 'sellerId',
@@ -1051,6 +1052,45 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
+// Bulk update listings
+router.put('/bulk-update', requireAuth, async (req, res) => {
+  try {
+    const { listings } = req.body;
+
+    if (!listings || !Array.isArray(listings) || listings.length === 0) {
+      return res.status(400).json({ error: 'Listings array is required' });
+    }
+
+    const EDITABLE_FIELDS = [
+      'action', 'customLabel', 'title', 'startPrice',
+      'categoryId', 'categoryName', 'relationship', 'relationshipDetails',
+      'scheduleTime', 'customFields', 'description', 'condition',
+      'conditionDescription', 'quantity', 'format', 'duration',
+    ];
+
+    let updated = 0;
+    for (const listing of listings) {
+      const id = listing._existingListingId || listing._id;
+      if (!id) continue;
+
+      const patch = {};
+      for (const field of EDITABLE_FIELDS) {
+        if (listing[field] !== undefined) patch[field] = listing[field];
+      }
+
+      if (Object.keys(patch).length > 0) {
+        await TemplateListing.findByIdAndUpdate(id, { $set: patch });
+        updated++;
+      }
+    }
+
+    res.json({ updated });
+  } catch (error) {
+    console.error('Bulk update error:', error);
+    res.status(500).json({ error: error.message || 'Failed to bulk update listings' });
+  }
+});
+
 // Update listing
 router.put('/:id', requireAuth, async (req, res) => {
   try {
@@ -1459,6 +1499,7 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
   }
 });
 
+// Bulk update existing listings (used by Proof Read → List Directly flow)
 // Bulk delete listings
 router.post('/bulk-delete', requireAuth, async (req, res) => {
   try {
@@ -3109,25 +3150,22 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     const { templateId } = req.params;
     const { sellerId, listingIds } = req.query;
     
-    // Build filter for ACTIVE listings only that haven't been downloaded yet
-    // Inactive listings (deactivated by user) are excluded from CSV downloads
-    // even if they have downloadBatchId=null, ensuring consistency with UI
-    const filter = { 
-      templateId,
-      $or: [{ downloadBatchId: null }, { pendingRedownload: true }], // Active batch: not downloaded yet OR flagged for re-download
-      status: 'active'       // Only active listings (exclude inactive/draft/sold/ended)
-    };
-    // When specific listingIds are provided, skip the sellerId filter — listings are
-    // already precisely identified by ID. sellerId is still used for template overrides,
-    // seller name in filename, and batch numbering.
-    if (sellerId && !listingIds) {
-      filter.sellerId = sellerId;
-    }
-    // Optional: filter to specific listing IDs (used by "List Directly" flow)
+    // When specific listingIds are provided, filter only by those IDs —
+    // status, downloadBatchId, and sellerId filters are skipped since the
+    // user has explicitly chosen which listings to export.
+    // Otherwise, filter for ACTIVE listings that haven't been downloaded yet.
+    let filter;
     if (listingIds) {
       const ids = listingIds.split(',').map(id => id.trim()).filter(Boolean);
-      if (ids.length > 0) {
-        filter._id = { $in: ids };
+      filter = { _id: { $in: ids } };
+    } else {
+      filter = {
+        templateId,
+        $or: [{ downloadBatchId: null }, { pendingRedownload: true }], // not downloaded yet OR flagged for re-download
+        status: 'active',       // Only active listings (exclude inactive/draft/sold/ended)
+      };
+      if (sellerId) {
+        filter.sellerId = sellerId;
       }
     }
     
