@@ -41,6 +41,9 @@ router.get('/', requireAuth, async (req, res) => {
     }
     if (listProductId) {
       query.listProductId = listProductId;
+    } else if (req.query.showMoved !== 'true') {
+      // Default: hide ASINs already moved to a list
+      query.listProductId = null;
     }
 
     // Get total count
@@ -65,10 +68,25 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
+// Get multiple ASINs by exact ASIN list (used by Proof Read flow)
+router.get('/by-asins', requireAuth, async (req, res) => {
+  try {
+    const { asins } = req.query; // comma-separated ASIN strings
+    if (!asins) return res.status(400).json({ error: 'asins query param required' });
+    const asinList = asins.split(',').map(a => a.trim().toUpperCase()).filter(Boolean);
+    const docs = await AsinDirectory.find({ asin: { $in: asinList } }).lean();
+    res.json(docs);
+  } catch (error) {
+    console.error('Error fetching ASINs by list:', error);
+    res.status(500).json({ error: 'Failed to fetch ASINs' });
+  }
+});
+
 // Get statistics
 router.get('/stats', requireAuth, async (req, res) => {
   try {
     const total = await AsinDirectory.countDocuments();
+    const unassigned = await AsinDirectory.countDocuments({ listProductId: null });
 
     const now = new Date();
     const todayStart = new Date(now.setHours(0, 0, 0, 0));
@@ -81,6 +99,8 @@ router.get('/stats', requireAuth, async (req, res) => {
 
     res.json({
       total,
+      unassigned,
+      assigned: total - unassigned,
       recentlyAdded: {
         today,
         thisWeek,
