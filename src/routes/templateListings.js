@@ -16,7 +16,7 @@ const router = express.Router();
 // Get all listings for a template
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, page = 1, limit = 50, batchFilter = 'active', batchId, status = 'active' } = req.query;
+    const { templateId, sellerId, page = 1, limit = 50, batchFilter = 'active', batchId, status = 'active', minPrice, maxPrice, search } = req.query;
     
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
@@ -33,6 +33,19 @@ router.get('/', requireAuth, async (req, res) => {
     // Filter by status (default to 'active' to only show active listings)
     if (status && status !== 'all') {
       filter.status = status;
+    }
+    
+    // Price range filter
+    if (minPrice || maxPrice) {
+      filter.startPrice = {};
+      if (minPrice) filter.startPrice.$gte = parseFloat(minPrice);
+      if (maxPrice) filter.startPrice.$lte = parseFloat(maxPrice);
+    }
+    
+    // Keyword / ASIN search
+    if (search && search.trim()) {
+      const rx = { $regex: search.trim(), $options: 'i' };
+      filter.$or = [{ title: rx }, { customLabel: rx }];
     }
     
     // Apply batch filtering
