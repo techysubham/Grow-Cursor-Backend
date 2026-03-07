@@ -968,6 +968,54 @@ async function sendAutoWelcomeMessage(seller, order) {
   }
 }
 
+// HELPER: Extract clean text from HTML email bodies
+function extractTextFromHtml(html) {
+  if (!html) return '';
+  
+  // Check if it's actually HTML (contains tags)
+  if (!/<[^>]+>/.test(html)) {
+    return html.trim();
+  }
+
+  let cleanText = '';
+
+  // Strategy 1: Try to extract from UserInputtedText div (buyer's actual message)
+  const userInputMatch = html.match(/<div\s+id=["']UserInputtedText["'][^>]*>(.*?)<\/div>/is);
+  if (userInputMatch && userInputMatch[1]) {
+    cleanText = userInputMatch[1];
+  } else {
+    // Strategy 2: Try to extract from V4PrimaryMessage hidden div
+    const v4Match = html.match(/<div\s+id=["']V4PrimaryMessage["'][^>]*>.*?<strong>Dear[^<]*<\/strong>\s*(?:<br\s*\/?>)*\s*(.*?)\s*(?:<br\s*\/?>)*\s*<\/font>/is);
+    if (v4Match && v4Match[1]) {
+      cleanText = v4Match[1];
+    } else {
+      // Strategy 3: Strip all HTML tags
+      cleanText = html;
+    }
+  }
+
+  // Remove all HTML tags
+  cleanText = cleanText.replace(/<[^>]+>/g, ' ');
+  
+  // Decode common HTML entities
+  cleanText = cleanText
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+  
+  // Clean up whitespace
+  cleanText = cleanText
+    .replace(/\s+/g, ' ')  // Multiple spaces to single space
+    .replace(/\n\s*\n/g, '\n')  // Multiple newlines to single
+    .trim();
+
+  return cleanText;
+}
+
 // HELPER: Process a single eBay XML Message and save to DB
 async function processEbayMessage(msg, seller) {
   try {
@@ -977,7 +1025,8 @@ async function processEbayMessage(msg, seller) {
     const msgID = question.MessageID?.[0];
     const senderID = question.SenderID?.[0];
     const senderEmail = question.SenderEmail?.[0];
-    const body = question.Body?.[0];
+    const rawBody = question.Body?.[0];
+    const body = extractTextFromHtml(rawBody); // Clean HTML if present
     const subject = question.Subject?.[0];
     const itemID = msg.Item?.[0]?.ItemID?.[0];
     const itemTitle = msg.Item?.[0]?.Title?.[0];
@@ -5863,11 +5912,39 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         unreadCount: 1,
         buyerName: { $arrayElemAt: ["$orderDetails.buyer.buyerRegistrationAddress.fullName", 0] },
         // NEW: Get Marketplace ID from Order
-        orderMarketplaceId: { $arrayElemAt: ["$orderDetails.purchaseMarketplaceId", 0] }
+        orderMarketplaceId: { $arrayElemAt: ["$orderDetails.purchaseMarketplaceId", 0] },
+        // Extract image URL from order lineItems as fallback
+        orderImageUrl: {
+          $let: {
+            vars: {
+              lineItems: { $arrayElemAt: ["$orderDetails.lineItems", 0] },
+              currentItemId: "$_id.item"
+            },
+            in: {
+              $let: {
+                vars: {
+                  matchedItem: {
+                    $arrayElemAt: [
+                      {
+                        $filter: {
+                          input: { $ifNull: ["$$lineItems", []] },
+                          as: "item",
+                          cond: { $eq: ["$$item.legacyItemId", "$$currentItemId"] }
+                        }
+                      },
+                      0
+                    ]
+                  }
+                },
+                in: { $ifNull: ["$$matchedItem.imageUrl", null] }
+              }
+            }
+          }
+        }
       }
     });
 
-    // 5.0 LOOKUP LISTING DETAILS (For Currency -> Marketplace fallback)
+    // 5.0 LOOKUP LISTING DETAILS (For Currency -> Marketplace fallback AND Product Image)
     pipeline.push({
       $lookup: {
         from: 'listings',
@@ -5877,10 +5954,38 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       }
     });
 
-    // 5.1 COMPUTE MARKETPLACE ID
+    // 5.1 COMPUTE MARKETPLACE ID & EXTRACT IMAGE URL & FIX MESSAGE TYPE
     pipeline.push({
       $addFields: {
-        listingCurrency: { $arrayElemAt: ["$listingDetails.currency", 0] }
+        listingCurrency: { $arrayElemAt: ["$listingDetails.currency", 0] },
+        // Extract product thumbnail for display (try listing first, then order lineItem as fallback)
+        productImageUrl: {
+          $ifNull: [
+            { $arrayElemAt: ["$listingDetails.mainImageUrl", 0] },
+            "$orderImageUrl"
+          ]
+        },
+        // Compute actual message type based on current order existence (fixes mismatches)
+        // Logic: ORDER if orderId exists, DIRECT if no itemId, INQUIRY if itemId exists without order
+        actualMessageType: {
+          $cond: {
+            if: { $ne: ["$orderId", null] },
+            then: "ORDER",
+            else: {
+              $cond: {
+                if: {
+                  $or: [
+                    { $eq: ["$itemId", "DIRECT_MESSAGE"] },
+                    { $eq: ["$itemId", null] },
+                    { $eq: ["$itemId", ""] }
+                  ]
+                },
+                then: "DIRECT",
+                else: "INQUIRY"
+              }
+            }
+          }
+        }
       }
     });
 
@@ -6063,11 +6168,25 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       // For each matching order not already in threads, create a synthetic thread
       for (const order of matchingOrders) {
         if (!existingOrderIds.has(order.orderId)) {
+          const itemId = order.lineItems?.[0]?.legacyItemId || null;
+          
+          // Look up product image for this item (try listing first, then order lineItem)
+          let productImageUrl = null;
+          if (itemId) {
+            const listing = await Listing.findOne({ itemId }).select('mainImageUrl').lean();
+            productImageUrl = listing?.mainImageUrl || null;
+            
+            // Fallback: Check if order lineItem has imageUrl
+            if (!productImageUrl && order.lineItems?.[0]?.imageUrl) {
+              productImageUrl = order.lineItems[0].imageUrl;
+            }
+          }
+
           threads.push({
             orderId: order.orderId,
             buyerUsername: order.buyer?.username || '',
             buyerName: order.buyer?.buyerRegistrationAddress?.fullName || '',
-            itemId: order.lineItems?.[0]?.legacyItemId || null,
+            itemId: itemId,
             itemTitle: order.lineItems?.[0]?.title || order.productName || '',
             lastMessage: '(No messages yet)',
             lastDate: order.lastModifiedDate || order.creationDate,
@@ -6076,6 +6195,8 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
             sellerId: order.seller,
             orderMarketplaceId: order.purchaseMarketplaceId,
             computedMarketplaceId: order.purchaseMarketplaceId || 'Unknown',
+            productImageUrl: productImageUrl, // Add product image
+            actualMessageType: 'ORDER', // Synthetic threads are always orders
             _isSyntheticOrder: true
           });
           total += 1;
