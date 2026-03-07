@@ -69,6 +69,7 @@ import affiliateOrdersRoutes from './routes/affiliateOrders.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
+import imageCache from './lib/imageCache.js';
 
 const app = express();
 
@@ -183,6 +184,9 @@ connectToDatabase()
 
     // Initialize scheduled jobs (e.g., daily timer auto-stop)
     initializeScheduledJobs();
+
+    // Start image cache auto-cleanup (removes expired entries every 10 minutes)
+    imageCache.startAutoCleanup();
 
     app.listen(port, () => {
       console.log(`API listening on :${port}`);
