@@ -56,6 +56,14 @@ const asinDirectorySchema = new mongoose.Schema({
     ref: 'AsinListProduct',
     default: null,
     index: true
+  },
+
+  // Marketplace / region this ASIN was scraped from
+  region: {
+    type: String,
+    default: 'US',
+    enum: ['US', 'UK', 'CA', 'AU'],
+    index: true
   }
 });
 
