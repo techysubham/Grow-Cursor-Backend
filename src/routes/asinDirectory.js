@@ -46,6 +46,9 @@ router.get('/', requireAuth, async (req, res) => {
       query.listProductId = null;
     }
 
+    const region = req.query.region || '';
+    if (region) query.region = region;
+
     // Get total count
     const total = await AsinDirectory.countDocuments(query);
 
@@ -173,6 +176,7 @@ router.post('/bulk-manual', requireAuth, async (req, res) => {
           doc.scraped = false;
           doc.scrapeError = enrichment?.error || 'Scrape failed';
         }
+        doc.region = region;
 
         await AsinDirectory.create(doc);
         results.added++;
@@ -277,6 +281,7 @@ router.post('/bulk-csv', requireAuth, async (req, res) => {
           doc.scraped = false;
           doc.scrapeError = enrichment?.error || 'Scrape failed';
         }
+        doc.region = region;
 
         await AsinDirectory.create(doc);
         results.added++;
