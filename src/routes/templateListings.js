@@ -3173,7 +3173,7 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     const [template, seller, listings] = await Promise.all([
       getEffectiveTemplate(templateId, sellerId),
       sellerId ? Seller.findById(sellerId).populate('user', 'username email') : null,
-      TemplateListing.find(filter).sort({ createdAt: -1 })
+      TemplateListing.find(filter).select('+_asinReference').sort({ createdAt: -1 })
     ]);
     
     console.log('📊 Export CSV - Seller info:', seller?.user?.username || seller?.user?.email || 'No seller');
@@ -3374,6 +3374,77 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(csvContent);
+
+    // Snapshot: if this is a real (non-Testing) seller, upsert TemplateListing records
+    // for that seller so Template Directory can show what was listed for them.
+    // Fire-and-forget — any failure must not affect the already-sent CSV response.
+    try {
+      const isTestingSeller = seller?.user?.username?.toLowerCase() === 'testing';
+      if (sellerId && !isTestingSeller) {
+        const upsertOps = listings.map(listing => ({
+          updateOne: {
+            filter: { templateId, sellerId, customLabel: listing.customLabel },
+            update: {
+              $set: {
+                templateId,
+                sellerId,
+                action: listing.action || 'Add',
+                customLabel: listing.customLabel,
+                categoryId: listing.categoryId,
+                categoryName: listing.categoryName,
+                title: listing.title,
+                relationship: listing.relationship,
+                relationshipDetails: listing.relationshipDetails,
+                scheduleTime: listing.scheduleTime,
+                upc: listing.upc,
+                epid: listing.epid,
+                startPrice: listing.startPrice,
+                quantity: listing.quantity,
+                itemPhotoUrl: listing.itemPhotoUrl,
+                videoId: listing.videoId,
+                conditionId: listing.conditionId,
+                description: listing.description,
+                format: listing.format,
+                duration: listing.duration,
+                buyItNowPrice: listing.buyItNowPrice,
+                bestOfferEnabled: listing.bestOfferEnabled,
+                bestOfferAutoAcceptPrice: listing.bestOfferAutoAcceptPrice,
+                minimumBestOfferPrice: listing.minimumBestOfferPrice,
+                immediatePayRequired: listing.immediatePayRequired,
+                location: listing.location,
+                shippingService1Option: listing.shippingService1Option,
+                shippingService1Cost: listing.shippingService1Cost,
+                shippingService1Priority: listing.shippingService1Priority,
+                shippingService2Option: listing.shippingService2Option,
+                shippingService2Cost: listing.shippingService2Cost,
+                shippingService2Priority: listing.shippingService2Priority,
+                maxDispatchTime: listing.maxDispatchTime,
+                returnsAcceptedOption: listing.returnsAcceptedOption,
+                returnsWithinOption: listing.returnsWithinOption,
+                refundOption: listing.refundOption,
+                returnShippingCostPaidBy: listing.returnShippingCostPaidBy,
+                shippingProfileName: listing.shippingProfileName,
+                returnProfileName: listing.returnProfileName,
+                paymentProfileName: listing.paymentProfileName,
+                customFields: listing.customFields,
+                amazonLink: listing.amazonLink,
+                _asinReference: listing._asinReference,
+                status: 'active',
+                downloadBatchId: null,
+                pendingRedownload: false,
+                updatedAt: new Date(),
+              },
+              $setOnInsert: { createdAt: new Date() },
+            },
+            upsert: true,
+          },
+        }));
+        await TemplateListing.bulkWrite(upsertOps, { ordered: false });
+        console.log(`📋 Snapshot: upserted ${upsertOps.length} listing(s) for seller ${seller?.user?.username}`);
+      }
+    } catch (snapshotErr) {
+      console.error('Snapshot upsert failed (non-fatal):', snapshotErr.message);
+    }
     
   } catch (error) {
     console.error('Error exporting CSV:', error);
@@ -3524,6 +3595,92 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(csvContent);
+
+    // Snapshot: upsert TemplateListing records for the chosen real seller.
+    // Uses inline-edited field values (what actually went into the CSV).
+    try {
+      const isTestingSeller = seller?.user?.username?.toLowerCase() === 'testing';
+      if (sellerId && !isTestingSeller) {
+        const upsertOps = listings.map(listing => {
+          const getField = (name) => {
+            if (!listing.customFields) return undefined;
+            if (typeof listing.customFields.get === 'function') return listing.customFields.get(name);
+            return listing.customFields[name];
+          };
+          // Rebuild customFields as a plain object for storage
+          const customFieldsObj = {};
+          if (listing.customFields) {
+            if (typeof listing.customFields.get === 'function') {
+              for (const [k, v] of listing.customFields) customFieldsObj[k] = v;
+            } else {
+              Object.assign(customFieldsObj, listing.customFields);
+            }
+          }
+          return {
+            updateOne: {
+              filter: { templateId, sellerId, customLabel: listing.customLabel },
+              update: {
+                $set: {
+                  templateId,
+                  sellerId,
+                  action: listing.action || 'Add',
+                  customLabel: listing.customLabel,
+                  categoryId: listing.categoryId,
+                  categoryName: listing.categoryName,
+                  title: listing.title,
+                  relationship: listing.relationship,
+                  relationshipDetails: listing.relationshipDetails,
+                  scheduleTime: listing.scheduleTime,
+                  upc: listing.upc,
+                  epid: listing.epid,
+                  startPrice: listing.startPrice,
+                  quantity: listing.quantity,
+                  itemPhotoUrl: listing.itemPhotoUrl,
+                  videoId: listing.videoId,
+                  conditionId: listing.conditionId,
+                  description: listing.description,
+                  format: listing.format,
+                  duration: listing.duration,
+                  buyItNowPrice: listing.buyItNowPrice,
+                  bestOfferEnabled: listing.bestOfferEnabled,
+                  bestOfferAutoAcceptPrice: listing.bestOfferAutoAcceptPrice,
+                  minimumBestOfferPrice: listing.minimumBestOfferPrice,
+                  immediatePayRequired: listing.immediatePayRequired,
+                  location: listing.location,
+                  shippingService1Option: listing.shippingService1Option,
+                  shippingService1Cost: listing.shippingService1Cost,
+                  shippingService1Priority: listing.shippingService1Priority,
+                  shippingService2Option: listing.shippingService2Option,
+                  shippingService2Cost: listing.shippingService2Cost,
+                  shippingService2Priority: listing.shippingService2Priority,
+                  maxDispatchTime: listing.maxDispatchTime,
+                  returnsAcceptedOption: listing.returnsAcceptedOption,
+                  returnsWithinOption: listing.returnsWithinOption,
+                  refundOption: listing.refundOption,
+                  returnShippingCostPaidBy: listing.returnShippingCostPaidBy,
+                  shippingProfileName: listing.shippingProfileName,
+                  returnProfileName: listing.returnProfileName,
+                  paymentProfileName: listing.paymentProfileName,
+                  customFields: customFieldsObj,
+                  amazonLink: listing.amazonLink,
+                  _asinReference: listing._asinReference,
+                  status: 'active',
+                  downloadBatchId: null,
+                  pendingRedownload: false,
+                  updatedAt: new Date(),
+                },
+                $setOnInsert: { createdAt: new Date() },
+              },
+              upsert: true,
+            },
+          };
+        });
+        await TemplateListing.bulkWrite(upsertOps, { ordered: false });
+        console.log(`📋 Snapshot (direct): upserted ${upsertOps.length} listing(s) for seller ${seller?.user?.username}`);
+      }
+    } catch (snapshotErr) {
+      console.error('Snapshot upsert (direct) failed (non-fatal):', snapshotErr.message);
+    }
 
   } catch (error) {
     console.error('Error exporting CSV (direct):', error);
