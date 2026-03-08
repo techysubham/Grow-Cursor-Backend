@@ -3381,6 +3381,156 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
   }
 });
 
+// Export CSV using inline listing data (no DB read for field values — used by Proof Read → List Directly)
+// Edits made in the review modal are carried into the CSV without being persisted to the database.
+router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
+  try {
+    const { templateId } = req.params;
+    const { sellerId, listings } = req.body;
+
+    if (!listings || !Array.isArray(listings) || listings.length === 0) {
+      return res.status(400).json({ error: 'listings array is required' });
+    }
+
+    const [template, seller] = await Promise.all([
+      getEffectiveTemplate(templateId, sellerId),
+      sellerId ? Seller.findById(sellerId).populate('user', 'username email') : null,
+    ]);
+
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    // Generate batch ID and get next batch number
+    const crypto = await import('crypto');
+    const batchId = crypto.randomUUID();
+
+    const latestBatch = await TemplateListing.findOne({
+      templateId,
+      sellerId: sellerId || { $exists: true },
+      downloadBatchNumber: { $ne: null }
+    }).sort({ downloadBatchNumber: -1 });
+
+    const batchNumber = (latestBatch?.downloadBatchNumber || 0) + 1;
+
+    // Mark the underlying TemplateListing docs as downloaded (batch tracking only — field values are NOT updated)
+    const existingIds = listings.map(l => l._existingListingId).filter(Boolean);
+    if (existingIds.length > 0) {
+      await TemplateListing.updateMany(
+        { _id: { $in: existingIds } },
+        {
+          downloadBatchId: batchId,
+          downloadedAt: new Date(),
+          downloadBatchNumber: batchNumber,
+          pendingRedownload: false
+        }
+      );
+    }
+
+    // Build CSV — identical structure to GET /export-csv
+    const actionField = template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
+
+    const coreHeaders = [
+      actionField, 'Custom label (SKU)', 'Category ID', 'Category name', 'Title',
+      'Relationship', 'Relationship details', 'Schedule Time', 'P:UPC', 'P:EPID',
+      'Start price', 'Quantity', 'Item photo URL', 'VideoID', 'Condition ID',
+      'Description', 'Format', 'Duration', 'Buy It Now price', 'Best Offer Enabled',
+      'Best Offer Auto Accept Price', 'Minimum Best Offer Price', 'Immediate pay required',
+      'Location', 'Shipping service 1 option', 'Shipping service 1 cost',
+      'Shipping service 1 priority', 'Shipping service 2 option', 'Shipping service 2 cost',
+      'Shipping service 2 priority', 'Max dispatch time', 'Returns accepted option',
+      'Returns within option', 'Refund option', 'Return shipping cost paid by',
+      'Shipping profile name', 'Return profile name', 'Payment profile name'
+    ];
+
+    const customHeaders = template.customColumns
+      .sort((a, b) => a.order - b.order)
+      .map(col => col.name);
+
+    const allHeaders = [...coreHeaders, ...customHeaders];
+    const columnCount = allHeaders.length;
+
+    const infoLine1 = ['#INFO', `Created=${Date.now()}`, '', '', '', '',
+      ' Indicates missing required fields', '', '', '', '',
+      ' Indicates missing field that will be required soon',
+      ...new Array(columnCount - 12).fill('')];
+
+    const infoLine2 = ['#INFO', 'Version=1.0', '',
+      'Template=fx_category_template_EBAY_US', '', '',
+      ' Indicates missing recommended field', '', '', '', '',
+      ' Indicates field does not apply to this item/category',
+      ...new Array(columnCount - 12).fill('')];
+
+    const infoLine3 = new Array(columnCount).fill('');
+    infoLine3[0] = '#INFO';
+
+    const dataRows = listings.map(listing => {
+      let categoryName = listing.categoryName || '';
+      if (categoryName && !categoryName.startsWith('/')) {
+        categoryName = '/' + categoryName;
+      }
+
+      // customFields may be a plain object (from frontend) or a Map (from DB doc)
+      const getCustomField = (name) => {
+        if (!listing.customFields) return '';
+        if (typeof listing.customFields.get === 'function') return listing.customFields.get(name) || '';
+        return listing.customFields[name] || '';
+      };
+
+      const coreValues = [
+        listing.action || 'Add', listing.customLabel || '', listing.categoryId || '',
+        categoryName, listing.title || '', listing.relationship || '',
+        listing.relationshipDetails || '', listing.scheduleTime || '',
+        listing.upc || '', listing.epid || '', listing.startPrice || '',
+        listing.quantity || '', listing.itemPhotoUrl || '', listing.videoId || '',
+        listing.conditionId || '1000-New', listing.description || '',
+        listing.format || 'FixedPrice', listing.duration || 'GTC',
+        listing.buyItNowPrice || '', listing.bestOfferEnabled || '',
+        listing.bestOfferAutoAcceptPrice || '', listing.minimumBestOfferPrice || '',
+        listing.immediatePayRequired || '', listing.location || 'UnitedStates',
+        listing.shippingService1Option || '', listing.shippingService1Cost || '',
+        listing.shippingService1Priority || '', listing.shippingService2Option || '',
+        listing.shippingService2Cost || '', listing.shippingService2Priority || '',
+        listing.maxDispatchTime || '', listing.returnsAcceptedOption || '',
+        listing.returnsWithinOption || '', listing.refundOption || '',
+        listing.returnShippingCostPaidBy || '', listing.shippingProfileName || '',
+        listing.returnProfileName || '', listing.paymentProfileName || ''
+      ];
+
+      const customValues = template.customColumns
+        .sort((a, b) => a.order - b.order)
+        .map(col => getCustomField(col.name));
+
+      return [...coreValues, ...customValues];
+    });
+
+    const allRows = [infoLine1, infoLine2, infoLine3, allHeaders, ...dataRows];
+
+    const csvContent = allRows.map(row =>
+      row.map(cell => {
+        const value = String(cell || '');
+        if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+          return `"${value.replace(/"/g, '""')}"`;
+        }
+        return value;
+      }).join(',')
+    ).join('\n');
+
+    const dateStr = new Date().toISOString().split('T')[0];
+    const sellerName = seller?.user?.username || seller?.user?.email || 'seller';
+    const templateName = template.name.replace(/\s+/g, '_');
+    const filename = `${templateName}_${sellerName}_batch_${batchNumber}_${dateStr}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csvContent);
+
+  } catch (error) {
+    console.error('Error exporting CSV (direct):', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get download history for a template/seller
 router.get('/download-history/:templateId', requireAuth, async (req, res) => {
   try {
