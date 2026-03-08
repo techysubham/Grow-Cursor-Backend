@@ -33,12 +33,26 @@ function buildDayRange(dateStr) {
 // ---------------------------------------------------------------------------
 router.get('/daily', async (req, res) => {
     try {
-        const { date } = req.query;
+        const { date, excludeLowValue } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
         const { start, end } = buildDayRange(date);
 
-        const orders = await Order.find({ dateSold: { $gte: start, $lte: end } })
+        const query = { dateSold: { $gte: start, $lte: end } };
+
+        // Exclude low value orders (less than $3)
+        if (excludeLowValue === 'true') {
+            query.$and = query.$and || [];
+            query.$and.push({
+                $or: [
+                    { beforeTaxUSD: { $gte: 3 } },
+                    { beforeTaxUSD: { $exists: false } },
+                    { beforeTaxUSD: null }
+                ]
+            });
+        }
+
+        const orders = await Order.find(query)
             .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
             .sort({ dateSold: 1 })
             .lean();
@@ -100,7 +114,7 @@ router.patch('/:id/sourcing', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/balances', async (req, res) => {
     try {
-        const { date } = req.query;
+        const { date, excludeLowValue } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
         const { start, end } = buildDayRange(date);
@@ -108,9 +122,23 @@ router.get('/balances', async (req, res) => {
         // All Amazon accounts
         const accounts = await AmazonAccount.find().sort({ name: 1 }).lean();
 
+        // Build match query for orders
+        const matchQuery = { dateSold: { $gte: start, $lte: end }, amazonAccount: { $exists: true, $ne: '' } };
+        if (excludeLowValue === 'true') {
+            matchQuery.$and = [
+                {
+                    $or: [
+                        { beforeTaxUSD: { $gte: 3 } },
+                        { beforeTaxUSD: { $exists: false } },
+                        { beforeTaxUSD: null }
+                    ]
+                }
+            ];
+        }
+
         // Aggregate expense per account for this day from orders
         const expenseAgg = await Order.aggregate([
-            { $match: { dateSold: { $gte: start, $lte: end }, amazonAccount: { $exists: true, $ne: '' } } },
+            { $match: matchQuery },
             {
                 $group: {
                     _id: '$amazonAccount',
@@ -199,13 +227,27 @@ router.put('/balances', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/summary', async (req, res) => {
     try {
-        const { date } = req.query;
+        const { date, excludeLowValue } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
         const { start, end } = buildDayRange(date);
 
+        // Build query
+        const query = { dateSold: { $gte: start, $lte: end } };
+        if (excludeLowValue === 'true') {
+            query.$and = [
+                {
+                    $or: [
+                        { beforeTaxUSD: { $gte: 3 } },
+                        { beforeTaxUSD: { $exists: false } },
+                        { beforeTaxUSD: null }
+                    ]
+                }
+            ];
+        }
+
         // All orders that day
-        const orders = await Order.find({ dateSold: { $gte: start, $lte: end } })
+        const orders = await Order.find(query)
             .select('purchaser sourcingStatus beforeTaxUSD amazonExchangeRate')
             .lean();
 
