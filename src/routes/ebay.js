@@ -971,7 +971,7 @@ async function sendAutoWelcomeMessage(seller, order) {
 // HELPER: Extract clean text from HTML email bodies
 function extractTextFromHtml(html) {
   if (!html) return '';
-  
+
   // Check if it's actually HTML (contains tags)
   if (!/<[^>]+>/.test(html)) {
     return html.trim();
@@ -996,7 +996,7 @@ function extractTextFromHtml(html) {
 
   // Remove all HTML tags
   cleanText = cleanText.replace(/<[^>]+>/g, ' ');
-  
+
   // Decode common HTML entities
   cleanText = cleanText
     .replace(/&nbsp;/g, ' ')
@@ -1006,7 +1006,7 @@ function extractTextFromHtml(html) {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'");
-  
+
   // Clean up whitespace
   cleanText = cleanText
     .replace(/\s+/g, ' ')  // Multiple spaces to single space
@@ -1567,7 +1567,7 @@ router.get('/order/:orderId', requireAuth, requireRole('fulfillmentadmin', 'supe
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName } = req.query;
 
   try {
     let query = {};
@@ -1633,6 +1633,10 @@ router.get('/stored-orders', async (req, res) => {
     if (searchOrderId) {
       // Strict Order ID search (ignores legacyOrderId)
       query.orderId = { $regex: searchOrderId, $options: 'i' };
+    }
+
+    if (searchAzOrderId) {
+      query.azOrderId = { $regex: searchAzOrderId, $options: 'i' };
     }
 
     if (searchBuyerName) {
@@ -6181,13 +6185,13 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       for (const order of matchingOrders) {
         if (!existingOrderIds.has(order.orderId)) {
           const itemId = order.lineItems?.[0]?.legacyItemId || null;
-          
+
           // Look up product image for this item (try listing first, then order lineItem)
           let productImageUrl = null;
           if (itemId) {
             const listing = await Listing.findOne({ itemId }).select('mainImageUrl').lean();
             productImageUrl = listing?.mainImageUrl || null;
-            
+
             // Fallback: Check if order lineItem has imageUrl
             if (!productImageUrl && order.lineItems?.[0]?.imageUrl) {
               productImageUrl = order.lineItems[0].imageUrl;
@@ -9442,7 +9446,7 @@ router.get('/upcoming-payouts/:sellerId', requireAuth, requireRole('fulfillmenta
     });
 
     const allPayouts = payoutsRes.data?.payouts || [];
-    
+
     // Filter for upcoming and recent payouts (INITIATED, or recent SUCCEEDED within 30 days)
     const now = new Date();
     const thirtyDaysAgo = new Date(now);
