@@ -86,7 +86,19 @@ router.get('/day-wise-counts', requireAuth, async (req, res) => {
               }
             }
           },
-          count: { $sum: 1 }
+          count: { $sum: 1 },
+          emptyCompatibilityCount: {
+            $sum: {
+              $cond: [
+                { $or: [
+                  { $eq: [{ $size: { $ifNull: ['$compatibility', []] } }, 0] },
+                  { $eq: ['$compatibility', null] }
+                ]},
+                1,
+                0
+              ]
+            }
+          }
         }
       },
       {
@@ -123,7 +135,8 @@ router.get('/day-wise-counts', requireAuth, async (req, res) => {
           sellerId: '$_id.seller',
           sellerName: '$userInfo.username',
           date: '$_id.date',
-          count: 1
+          count: 1,
+          emptyCompatibilityCount: 1
         }
       },
       {
