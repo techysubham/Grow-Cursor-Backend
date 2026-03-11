@@ -28,6 +28,7 @@ import multer from 'multer';
 import FeedUpload from '../models/FeedUpload.js';
 import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import UserDailyQuantity from '../models/UserDailyQuantity.js';
+import CompatibilityBatchLog from '../models/CompatibilityBatchLog.js';
 import User from '../models/User.js';
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -7210,6 +7211,173 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
 
     res.json({ success: true, warning: warningMessage });
 
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// BULK UPDATE COMPATIBILITY (Batch Send)
+// POST /api/ebay/bulk-update-compatibility
+// Body: { sellerId, items: [{ itemId, title, sku, compatibilityList }] }
+// Processes items sequentially to avoid rate limits.
+// Returns per-item results and creates a CompatibilityBatchLog.
+// ============================================
+router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
+  const { sellerId, items, totalItems: clientTotalItems, skippedCount: clientSkippedCount } = req.body;
+  if (!sellerId || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'sellerId and non-empty items array required' });
+  }
+
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    const token = await ensureValidToken(seller);
+
+    const results = [];
+    let successCount = 0;
+    let failureCount = 0;
+
+    // Process items sequentially to respect eBay rate limits
+    for (const entry of items) {
+      const { itemId, title, sku, compatibilityList } = entry;
+      try {
+        let itemInnerContent = `<ItemID>${itemId}</ItemID>`;
+
+        if (!compatibilityList || compatibilityList.length === 0) {
+          itemInnerContent += `<ItemCompatibilityList><ReplaceAll>true</ReplaceAll></ItemCompatibilityList>`;
+        } else {
+          let compatXml = '<ItemCompatibilityList><ReplaceAll>true</ReplaceAll>';
+          compatibilityList.forEach(c => {
+            compatXml += '<Compatibility>';
+            if (c.notes) compatXml += `<CompatibilityNotes>${escapeXml(c.notes)}</CompatibilityNotes>`;
+            c.nameValueList.forEach(nv => {
+              compatXml += `<NameValueList><Name>${escapeXml(nv.name)}</Name><Value>${escapeXml(nv.value)}</Value></NameValueList>`;
+            });
+            compatXml += '</Compatibility>';
+          });
+          compatXml += '</ItemCompatibilityList>';
+          itemInnerContent += compatXml;
+        }
+
+        const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+          <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+            <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+            <ErrorLanguage>en_US</ErrorLanguage>
+            <WarningLevel>High</WarningLevel>
+            <Item>${itemInnerContent}</Item>
+          </ReviseFixedPriceItemRequest>`;
+
+        const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+          headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
+        });
+
+        const result = await parseStringPromise(response.data);
+        const ack = result.ReviseFixedPriceItemResponse.Ack[0];
+
+        if (ack === 'Failure') {
+          const errors = result.ReviseFixedPriceItemResponse.Errors || [];
+          const errorMessage = errors.map(e => e.LongMessage[0]).join('; ');
+
+          // If rate limited, stop processing remaining items
+          const isRateLimitError = errorMessage.includes('exceeded usage limit') || errorMessage.includes('call limit');
+          if (isRateLimitError) {
+            results.push({ itemId, title, sku, status: 'failure', error: 'Rate limit reached', compatibilityCount: compatibilityList?.length || 0 });
+            failureCount++;
+            // Mark all remaining items as failed due to rate limit
+            const currentIdx = items.indexOf(entry);
+            for (let i = currentIdx + 1; i < items.length; i++) {
+              results.push({ itemId: items[i].itemId, title: items[i].title, sku: items[i].sku, status: 'failure', error: 'Skipped - rate limit reached on earlier item', compatibilityCount: items[i].compatibilityList?.length || 0 });
+              failureCount++;
+            }
+            break;
+          }
+
+          results.push({ itemId, title, sku, status: 'failure', error: errorMessage, compatibilityCount: compatibilityList?.length || 0 });
+          failureCount++;
+        } else {
+          // Success or Warning — update local DB
+          await Listing.findOneAndUpdate({ itemId }, { compatibility: compatibilityList });
+          let warning = null;
+          if (ack === 'Warning') {
+            const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
+            const meaningful = warnings.filter(err => {
+              const msg = err.LongMessage[0];
+              return !msg.includes("If this item sells by a Best Offer") && !msg.includes("Funds from your sales may be unavailable");
+            });
+            if (meaningful.length > 0) warning = meaningful.map(e => e.LongMessage[0]).join('; ');
+          }
+          results.push({ itemId, title, sku, status: 'success', error: warning || null, compatibilityCount: compatibilityList?.length || 0 });
+          successCount++;
+        }
+      } catch (itemErr) {
+        results.push({ itemId, title, sku, status: 'failure', error: itemErr.message, compatibilityCount: compatibilityList?.length || 0 });
+        failureCount++;
+      }
+    }
+
+    // Save batch log
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10);
+    const batchLog = await CompatibilityBatchLog.create({
+      user: req.user.userId,
+      seller: sellerId,
+      totalItems: clientTotalItems || items.length,
+      correctCount: items.length,
+      skippedCount: clientSkippedCount || 0,
+      successCount,
+      failureCount,
+      status: 'completed',
+      items: results,
+      date: dateStr,
+    });
+
+    res.json({ success: true, batchLogId: batchLog._id, successCount, failureCount, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// COMPATIBILITY BATCH HISTORY
+// GET /api/ebay/compatibility-batch-history
+// Query: ?sellerId=...&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&page=1&limit=20
+// ============================================
+router.get('/compatibility-batch-history', requireAuth, async (req, res) => {
+  try {
+    const { sellerId, startDate, endDate, page = 1, limit = 20 } = req.query;
+    const filter = {};
+    if (sellerId) filter.seller = sellerId;
+    if (startDate || endDate) {
+      filter.date = {};
+      if (startDate) filter.date.$gte = startDate;
+      if (endDate) filter.date.$lte = endDate;
+    }
+
+    const total = await CompatibilityBatchLog.countDocuments(filter);
+    const logs = await CompatibilityBatchLog.find(filter)
+      .sort({ createdAt: -1 })
+      .skip((Number(page) - 1) * Number(limit))
+      .limit(Number(limit))
+      .populate('user', 'username name')
+      .populate('seller')
+      .lean();
+
+    // Populate seller username via seller.user
+    const sellerUserIds = logs.filter(l => l.seller?.user).map(l => l.seller.user);
+    let sellerUserMap = {};
+    if (sellerUserIds.length > 0) {
+      const User = mongoose.model('User');
+      const users = await User.find({ _id: { $in: sellerUserIds } }, { username: 1 }).lean();
+      users.forEach(u => { sellerUserMap[u._id.toString()] = u.username; });
+    }
+
+    const enriched = logs.map(log => ({
+      ...log,
+      sellerUsername: log.seller?.user ? (sellerUserMap[log.seller.user.toString()] || 'Unknown') : 'Unknown',
+    }));
+
+    res.json({ logs: enriched, total, pages: Math.ceil(total / Number(limit)) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
