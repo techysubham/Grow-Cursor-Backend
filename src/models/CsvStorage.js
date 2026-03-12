@@ -71,6 +71,20 @@ const csvStorageSchema = new mongoose.Schema({
     createdAt: {
         type: Date,
         default: Date.now
+    },
+    scheduledUploadAt: {
+        type: Date,
+        default: null
+    },
+    scheduledSellerId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Seller',
+        default: null
+    },
+    scheduledUploadStatus: {
+        type: String,
+        enum: ['pending', 'processing', 'done', 'failed', null],
+        default: null
     }
 });
 

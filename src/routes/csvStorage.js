@@ -52,6 +52,7 @@ router.get('/', requireAuth, async (req, res) => {
             .select('-csvData') // Exclude binary data from list response
             .populate('seller', 'storeName')
             .populate('feedUploadId', 'status uploadSummary taskId')
+            .populate('scheduledSellerId', 'storeName')
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limitNum);
@@ -165,6 +166,57 @@ router.get('/:id/download', requireAuth, async (req, res) => {
     } catch (err) {
         console.error('[CSV Storage] Download Error:', err.message);
         res.status(500).json({ error: 'Failed to download CSV', details: err.message });
+    }
+});
+
+// ============================================
+// POST /csv-storage/:id/schedule-upload — Set or update scheduled auto-upload
+// ============================================
+router.post('/:id/schedule-upload', requireAuth, async (req, res) => {
+    try {
+        const { scheduledAt, sellerId } = req.body;
+        if (!scheduledAt) return res.status(400).json({ error: 'Missing scheduledAt' });
+        if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
+
+        const scheduledDate = new Date(scheduledAt);
+        if (isNaN(scheduledDate.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt date' });
+        if (scheduledDate <= new Date()) return res.status(400).json({ error: 'Scheduled time must be in the future' });
+
+        const record = await CsvStorage.findByIdAndUpdate(
+            req.params.id,
+            { scheduledUploadAt: scheduledDate, scheduledSellerId: sellerId, scheduledUploadStatus: 'pending' },
+            { new: true }
+        ).select('-csvData').populate('seller', 'storeName').populate('feedUploadId', 'status uploadSummary taskId');
+
+        if (!record) return res.status(404).json({ error: 'CSV record not found' });
+        res.json({ success: true, record });
+    } catch (err) {
+        console.error('[CSV Storage] schedule-upload Error:', err.message);
+        res.status(500).json({ error: 'Failed to schedule upload', details: err.message });
+    }
+});
+
+// ============================================
+// DELETE /csv-storage/:id/schedule-upload — Cancel scheduled auto-upload
+// ============================================
+router.delete('/:id/schedule-upload', requireAuth, async (req, res) => {
+    try {
+        const existing = await CsvStorage.findById(req.params.id).select('scheduledUploadStatus');
+        if (!existing) return res.status(404).json({ error: 'CSV record not found' });
+        if (existing.scheduledUploadStatus === 'processing') {
+            return res.status(400).json({ error: 'Cannot cancel — upload is already processing' });
+        }
+
+        const record = await CsvStorage.findByIdAndUpdate(
+            req.params.id,
+            { scheduledUploadAt: null, scheduledSellerId: null, scheduledUploadStatus: null },
+            { new: true }
+        ).select('-csvData').populate('seller', 'storeName').populate('feedUploadId', 'status uploadSummary taskId');
+
+        res.json({ success: true, record });
+    } catch (err) {
+        console.error('[CSV Storage] cancel schedule-upload Error:', err.message);
+        res.status(500).json({ error: 'Failed to cancel scheduled upload', details: err.message });
     }
 });
 
