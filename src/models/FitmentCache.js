@@ -7,7 +7,13 @@ const FitmentCacheSchema = new mongoose.Schema({
   // The actual list of values (e.g., ["Ford", "BMW", ...])
   values: [{ type: String }],
   
-  lastUpdated: { type: Date, default: Date.now }
+  lastUpdated: { type: Date, default: Date.now },
+
+  // TTL: MongoDB will auto-delete this document after expireAt
+  expireAt: { type: Date, required: true }
 });
+
+// MongoDB TTL index — deletes docs when current time >= expireAt
+FitmentCacheSchema.index({ expireAt: 1 }, { expireAfterSeconds: 0 });
 
 export default mongoose.model('FitmentCache', FitmentCacheSchema);

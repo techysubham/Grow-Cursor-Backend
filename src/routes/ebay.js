@@ -7089,11 +7089,71 @@ async function getCachedUsageStats(sellerId, token) {
 }
 
 // 4. UPDATE COMPATIBILITY (Using ReplaceAll Strategy)
+// Helper: sanitize compatibility entries before sending to eBay
+// - Removes entries with '--' as engine value
+// - Strips empty engine NameValueList entries
+const sanitizeCompatibilityList = (list) => {
+  if (!list || list.length === 0) return list;
+  return list.map(c => ({
+    ...c,
+    nameValueList: c.nameValueList.filter(nv => {
+      // Remove Engine entries with '--' or empty/whitespace-only values
+      if (nv.name === 'Engine' && (!nv.value || nv.value.trim() === '' || nv.value.trim() === '--')) {
+        return false;
+      }
+      return true;
+    })
+  }));
+};
+
+// Helper: parse eBay's <Invalid> tags into human-readable messages
+// Supports both 4-element [Year][Make][Model][Trim] and 5-element [Year][Make][Model][Trim][Engine]
+const parseInvalidCombos = (errorMessage) => {
+  const invalidMatches = errorMessage.match(/<Invalid>\[[^\]]*\](\[[^\]]*\]){2,4}<\/Invalid>/g);
+  if (!invalidMatches || invalidMatches.length === 0) return errorMessage;
+  const parsed = invalidMatches.map(m => {
+    const parts = m.match(/\[([^\]]*)\]/g)?.map(p => p.slice(1, -1)) || [];
+    if (parts.length >= 5) {
+      return `${parts[0]} ${parts[1]} ${parts[2]} — Trim: "${parts[3]}" Engine: "${parts[4]}"`;
+    }
+    return `${parts[0]} ${parts[1]} ${parts[2]} — Trim: "${parts[3] || ''}"`;
+  });
+  return `${parsed.length} invalid combo(s) rejected by eBay:\n${parsed.join('\n')}`;
+};
+
+// Helper: extract structured invalid combo data from eBay error message
+// Returns array of { year, make, model, trim, engine? }
+const extractInvalidCombos = (errorMessage) => {
+  const invalidMatches = errorMessage.match(/<Invalid>\[[^\]]*\](\[[^\]]*\]){2,4}<\/Invalid>/g);
+  if (!invalidMatches || invalidMatches.length === 0) return [];
+  return invalidMatches.map(m => {
+    const parts = m.match(/\[([^\]]*)\]/g)?.map(p => p.slice(1, -1)) || [];
+    return { year: parts[0], make: parts[1], model: parts[2], trim: parts[3] || null, engine: parts[4] || null };
+  });
+};
+
+// Helper: remove entries that eBay flagged as invalid from a compatibility list
+// This keeps the local DB in sync with what eBay actually accepted
+const filterOutInvalidCombos = (compatibilityList, errorMessage) => {
+  const invalids = extractInvalidCombos(errorMessage);
+  if (invalids.length === 0) return compatibilityList;
+  return compatibilityList.filter(c => {
+    const nvMap = {};
+    c.nameValueList.forEach(nv => { nvMap[nv.name] = nv.value; });
+    return !invalids.some(inv =>
+      inv.year === nvMap.Year && inv.make === nvMap.Make && inv.model === nvMap.Model &&
+      (!inv.trim || inv.trim === nvMap.Trim) &&
+      (!inv.engine || inv.engine === nvMap.Engine)
+    );
+  });
+};
+
 router.post('/update-compatibility', requireAuth, async (req, res) => {
-  const { sellerId, itemId, compatibilityList } = req.body;
+  const { sellerId, itemId, compatibilityList: rawCompatibilityList } = req.body;
   try {
     const seller = await Seller.findById(sellerId);
     const token = await ensureValidToken(seller);
+    const compatibilityList = sanitizeCompatibilityList(rawCompatibilityList);
 
     let itemInnerContent = `<ItemID>${itemId}</ItemID>`;
 
@@ -7182,34 +7242,39 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
         }
       }
 
-      throw new Error(`eBay Failed: ${errorMessage}`);
+      throw new Error(parseInvalidCombos(errorMessage));
     }
 
     // 2. Handle Warnings
     let warningMessage = null;
+    let filteredCompatibilityList = compatibilityList;
     if (ack === 'Warning') {
       const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
 
       const meaningfulWarnings = warnings.filter(err => {
         const msg = err.LongMessage[0];
         if (msg.includes("If this item sells by a Best Offer")) return false;
-        if (msg.includes("Funds from your sales may be unavailable")) return false; // <--- ADD THIS
+        if (msg.includes("Funds from your sales may be unavailable")) return false;
         return true;
       });
 
       if (meaningfulWarnings.length > 0) {
-        warningMessage = meaningfulWarnings.map(e => e.LongMessage[0]).join('; ');
+        const rawWarning = meaningfulWarnings.map(e => e.LongMessage[0]).join('; ');
+        warningMessage = meaningfulWarnings.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
         console.warn(`eBay Update Warning: ${warningMessage}`);
+        // Strip entries that eBay rejected so local DB matches what eBay actually accepted
+        filteredCompatibilityList = filterOutInvalidCombos(compatibilityList, rawWarning);
       }
     }
 
-    // 3. Update DB
+    // 3. Update DB (only save entries eBay actually accepted)
     await Listing.findOneAndUpdate(
       { itemId: itemId },
-      { compatibility: compatibilityList }
+      { compatibility: filteredCompatibilityList }
     );
 
-    res.json({ success: true, warning: warningMessage });
+    const strippedCount = (compatibilityList?.length || 0) - (filteredCompatibilityList?.length || 0);
+    res.json({ success: true, warning: warningMessage, strippedCount });
 
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -7240,7 +7305,8 @@ router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
 
     // Process items sequentially to respect eBay rate limits
     for (const entry of items) {
-      const { itemId, title, sku, compatibilityList } = entry;
+      const { itemId, title, sku, compatibilityList: rawCompatList } = entry;
+      const compatibilityList = sanitizeCompatibilityList(rawCompatList);
       try {
         let itemInnerContent = `<ItemID>${itemId}</ItemID>`;
 
@@ -7293,11 +7359,11 @@ router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
             break;
           }
 
-          results.push({ itemId, title, sku, status: 'failure', error: errorMessage, compatibilityCount: compatibilityList?.length || 0 });
+          results.push({ itemId, title, sku, status: 'failure', error: parseInvalidCombos(errorMessage), compatibilityCount: compatibilityList?.length || 0 });
           failureCount++;
         } else {
           // Success or Warning — update local DB
-          await Listing.findOneAndUpdate({ itemId }, { compatibility: compatibilityList });
+          let savedList = compatibilityList;
           let warning = null;
           if (ack === 'Warning') {
             const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
@@ -7305,9 +7371,16 @@ router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
               const msg = err.LongMessage[0];
               return !msg.includes("If this item sells by a Best Offer") && !msg.includes("Funds from your sales may be unavailable");
             });
-            if (meaningful.length > 0) warning = meaningful.map(e => e.LongMessage[0]).join('; ');
+            if (meaningful.length > 0) {
+              const rawWarning = meaningful.map(e => e.LongMessage[0]).join('; ');
+              warning = meaningful.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
+              // Strip entries that eBay rejected so local DB matches what eBay actually accepted
+              savedList = filterOutInvalidCombos(compatibilityList, rawWarning);
+            }
           }
-          results.push({ itemId, title, sku, status: 'success', error: warning || null, compatibilityCount: compatibilityList?.length || 0 });
+          await Listing.findOneAndUpdate({ itemId }, { compatibility: savedList });
+          const strippedCount = (compatibilityList?.length || 0) - (savedList?.length || 0);
+          results.push({ itemId, title, sku, status: 'success', error: warning || null, compatibilityCount: savedList?.length || 0, strippedCount });
           successCount++;
         }
       } catch (itemErr) {
@@ -7794,7 +7867,7 @@ router.post('/compatibility/values', requireAuth, async (req, res) => {
       cacheKey = `${propertyName}_${sortedParams}`;
     }
 
-    // 2. CHECK DB CACHE
+    // 2. CHECK DB CACHE (TTL-managed — expired docs are auto-deleted by MongoDB)
     const cachedData = await FitmentCache.findOne({ cacheKey });
     if (cachedData) {
       return res.json({ values: cachedData.values });
@@ -7839,9 +7912,14 @@ router.post('/compatibility/values', requireAuth, async (req, res) => {
     const rawValues = response.data.compatibilityPropertyValues || [];
     const values = rawValues.map(item => item.value);
 
-    // 4. SAVE TO DB
+    // 4. SAVE TO DB (cache for 7 days, then MongoDB TTL auto-deletes)
     if (values.length > 0) {
-      await FitmentCache.create({ cacheKey, values });
+      const expireAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+      await FitmentCache.findOneAndUpdate(
+        { cacheKey },
+        { cacheKey, values, lastUpdated: new Date(), expireAt },
+        { upsert: true }
+      );
     }
 
     res.json({ values });
