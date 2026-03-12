@@ -1683,17 +1683,17 @@ router.get('/stored-orders', async (req, res) => {
         // Parse the date and determine if it falls in DST period
         const refDate = new Date(startDate + 'T12:00:00Z'); // noon UTC as reference
         const year = refDate.getUTCFullYear();
-        
+
         // DST in US: Second Sunday in March to First Sunday in November
         // For simplification, check if month is March-November
         const month = refDate.getUTCMonth(); // 0-indexed: 0=Jan, 2=Mar, 10=Nov
         const isDST = month >= 2 && month <= 10; // March(2) through November(10)
-        
+
         // But need more precision for March and November
         // For now, use simple logic: if March and day >= 8, use PDT
         const day = refDate.getUTCDate();
         const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-        
+
         // Midnight PT = 07:00 UTC (PDT) or 08:00 UTC (PST)
         const startUTC = new Date(startDate + 'T00:00:00Z');
         startUTC.setUTCHours(usePDT ? 7 : 8, 0, 0, 0);
@@ -1706,7 +1706,7 @@ router.get('/stored-orders', async (req, res) => {
         const month = refDate.getUTCMonth();
         const day = refDate.getUTCDate();
         const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-        
+
         // End of day PT: 06:59:59.999 UTC next day (PDT) or 07:59:59.999 UTC next day (PST)
         const endUTC = new Date(endDate + 'T00:00:00Z');
         endUTC.setUTCDate(endUTC.getUTCDate() + 1);
@@ -1727,7 +1727,7 @@ router.get('/stored-orders', async (req, res) => {
     // Ship By Date Filter (Pacific Time - handles DST)
     if (req.query.shipByDate) {
       const shipByDate = req.query.shipByDate;
-      
+
       const refDate = new Date(shipByDate + 'T12:00:00Z');
       const month = refDate.getUTCMonth();
       const day = refDate.getUTCDate();
@@ -1749,7 +1749,7 @@ router.get('/stored-orders', async (req, res) => {
     // This is different from startDate/endDate range, it targets a single specific day
     if (req.query.dateSold) {
       const dateSold = req.query.dateSold;
-      
+
       const refDate = new Date(dateSold + 'T12:00:00Z');
       const month = refDate.getUTCMonth();
       const day = refDate.getUTCDate();
@@ -1898,7 +1898,7 @@ router.get('/all-orders-usd', async (req, res) => {
         const month = refDate.getUTCMonth();
         const day = refDate.getUTCDate();
         const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-        
+
         const startUTC = new Date(startDate + 'T00:00:00Z');
         startUTC.setUTCHours(usePDT ? 7 : 8, 0, 0, 0);
         query.dateSold.$gte = startUTC;
@@ -1909,7 +1909,7 @@ router.get('/all-orders-usd', async (req, res) => {
         const month = refDate.getUTCMonth();
         const day = refDate.getUTCDate();
         const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-        
+
         const endUTC = new Date(endDate + 'T00:00:00Z');
         endUTC.setUTCDate(endUTC.getUTCDate() + 1);
         endUTC.setUTCHours(usePDT ? 6 : 7, 59, 59, 999);
@@ -6854,6 +6854,233 @@ router.post('/sync-listings', requireAuth, async (req, res) => {
   }
 });
 
+// 1B. POLL ALL SELLERS — Background sync with status tracking
+// In-memory status object (resets on server restart, which is fine for this use case)
+let syncAllStatus = {
+  running: false,
+  sellersTotal: 0,
+  sellersComplete: 0,
+  currentSeller: '',
+  currentPage: 0,
+  currentTotalPages: 0,
+  results: [],
+  errors: [],
+  totalProcessed: 0,
+  totalSkipped: 0,
+  startedAt: null,
+  completedAt: null
+};
+
+router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
+  // Prevent duplicate runs
+  if (syncAllStatus.running) {
+    return res.status(409).json({
+      success: false,
+      message: `Sync already in progress — currently on seller "${syncAllStatus.currentSeller}" (${syncAllStatus.sellersComplete}/${syncAllStatus.sellersTotal})`,
+    });
+  }
+
+  try {
+    const allSellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+      .populate('user', 'username email');
+
+    if (allSellers.length === 0) {
+      return res.json({ success: true, message: 'No sellers with eBay tokens found', results: [] });
+    }
+
+    // Reset status and mark as running
+    syncAllStatus = {
+      running: true,
+      sellersTotal: allSellers.length,
+      sellersComplete: 0,
+      currentSeller: '',
+      currentPage: 0,
+      currentTotalPages: 0,
+      results: [],
+      errors: [],
+      totalProcessed: 0,
+      totalSkipped: 0,
+      startedAt: new Date().toISOString(),
+      completedAt: null
+    };
+
+    // Respond immediately — sync runs in background
+    res.json({
+      success: true,
+      message: `Sync started for ${allSellers.length} seller(s). Poll GET /ebay/sync-all-sellers-status for progress.`,
+      sellersTotal: allSellers.length
+    });
+
+    // --- BACKGROUND PROCESSING (not awaited by the request) ---
+    const VALID_MOTORS_CATEGORIES = ["eBay Motors", "Parts & Accessories", "Automotive Tools", "Tools & Supplies"];
+
+    (async () => {
+      for (const seller of allSellers) {
+        const sellerName = seller.user?.username || seller.user?.email || seller._id;
+        syncAllStatus.currentSeller = sellerName;
+        syncAllStatus.currentPage = 0;
+        syncAllStatus.currentTotalPages = 0;
+        console.log(`[Sync All] Starting sync for seller: ${sellerName}`);
+
+        try {
+          const token = await ensureValidToken(seller);
+
+          // --- DATE LOGIC (same as single-seller sync) ---
+          const hardStartDate = new Date('2025-11-26T23:30:00Z');
+          const nov11StartDate = new Date('2025-11-11T09:00:00Z');
+          const listingCount = await Listing.countDocuments({ seller: seller._id, listingStatus: 'Active' });
+
+          let startTimeFrom;
+          if (listingCount === 0) {
+            startTimeFrom = nov11StartDate;
+          } else {
+            startTimeFrom = seller.lastListingPolledAt || hardStartDate;
+            if (new Date(startTimeFrom) < hardStartDate) {
+              startTimeFrom = hardStartDate;
+            }
+          }
+
+          const startTimeTo = new Date();
+          let page = 1;
+          let totalPages = 1;
+          let processedCount = 0;
+          let skippedCount = 0;
+
+          do {
+            syncAllStatus.currentPage = page;
+            console.log(`[Sync All] ${sellerName} — Fetching Page ${page}...`);
+
+            const xmlRequest = `
+              <?xml version="1.0" encoding="utf-8"?>
+              <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+                <ErrorLanguage>en_US</ErrorLanguage>
+                <WarningLevel>High</WarningLevel>
+                <DetailLevel>ItemReturnDescription</DetailLevel>
+                <StartTimeFrom>${new Date(startTimeFrom).toISOString()}</StartTimeFrom>
+                <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
+                <IncludeWatchCount>true</IncludeWatchCount>
+                <Pagination>
+                  <EntriesPerPage>100</EntriesPerPage>
+                  <PageNumber>${page}</PageNumber>
+                </Pagination>
+                <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
+                <OutputSelector>ItemArray.Item.Title</OutputSelector>
+                <OutputSelector>ItemArray.Item.SKU</OutputSelector>
+                <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
+                <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
+                <OutputSelector>ItemArray.Item.Description</OutputSelector>
+                <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
+                <OutputSelector>ItemArray.Item.ItemCompatibilityList</OutputSelector>
+                <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
+                <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
+                <OutputSelector>PaginationResult</OutputSelector>
+              </GetSellerListRequest>
+            `;
+
+            const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+              headers: {
+                'X-EBAY-API-SITEID': '100',
+                'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+                'X-EBAY-API-CALL-NAME': 'GetSellerList',
+                'Content-Type': 'text/xml'
+              }
+            });
+
+            const result = await parseStringPromise(response.data);
+            if (result.GetSellerListResponse.Ack[0] === 'Failure') {
+              throw new Error(result.GetSellerListResponse.Errors[0].LongMessage[0]);
+            }
+
+            const pagination = result.GetSellerListResponse.PaginationResult[0];
+            totalPages = parseInt(pagination.TotalNumberOfPages[0]);
+            syncAllStatus.currentTotalPages = totalPages;
+            const items = result.GetSellerListResponse.ItemArray?.[0]?.Item || [];
+
+            for (const item of items) {
+              const status = item.SellingStatus?.[0]?.ListingStatus?.[0];
+              if (status !== 'Active') continue;
+
+              // Filter by Category — eBay Motors only
+              const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
+              const isMotorsItem = VALID_MOTORS_CATEGORIES.some(keyword => categoryName.includes(keyword));
+              if (!isMotorsItem) {
+                skippedCount++;
+                continue;
+              }
+
+              const rawHtml = item.Description ? item.Description[0] : '';
+              const cleanHtml = extractCleanDescription(rawHtml);
+
+              let parsedCompatibility = [];
+              if (item.ItemCompatibilityList && item.ItemCompatibilityList[0].Compatibility) {
+                parsedCompatibility = item.ItemCompatibilityList[0].Compatibility.map(comp => ({
+                  notes: comp.CompatibilityNotes ? comp.CompatibilityNotes[0] : '',
+                  nameValueList: comp.NameValueList.map(nv => ({
+                    name: nv.Name[0],
+                    value: nv.Value[0]
+                  }))
+                }));
+              }
+
+              await Listing.findOneAndUpdate(
+                { itemId: item.ItemID[0] },
+                {
+                  seller: seller._id,
+                  title: item.Title[0],
+                  sku: item.SKU ? item.SKU[0] : '',
+                  currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
+                  currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
+                  listingStatus: status,
+                  mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
+                  categoryName: categoryName,
+                  descriptionPreview: cleanHtml,
+                  compatibility: parsedCompatibility,
+                  startTime: item.ListingDetails?.[0]?.StartTime?.[0]
+                },
+                { upsert: true }
+              );
+              processedCount++;
+            }
+            page++;
+          } while (page <= totalPages);
+
+          seller.lastListingPolledAt = startTimeTo;
+          await seller.save();
+
+          console.log(`[Sync All] ${sellerName} — Done: ${processedCount} processed, ${skippedCount} skipped`);
+          syncAllStatus.results.push({ sellerName, processedCount, skippedCount });
+          syncAllStatus.totalProcessed += processedCount;
+          syncAllStatus.totalSkipped += skippedCount;
+
+        } catch (sellerErr) {
+          console.error(`[Sync All] Error for seller ${sellerName}:`, sellerErr.message);
+          syncAllStatus.errors.push(`${sellerName}: ${sellerErr.message}`);
+          syncAllStatus.results.push({ sellerName, processedCount: 0, skippedCount: 0, error: sellerErr.message });
+        }
+
+        syncAllStatus.sellersComplete++;
+      }
+
+      // Mark as done
+      syncAllStatus.running = false;
+      syncAllStatus.currentSeller = '';
+      syncAllStatus.completedAt = new Date().toISOString();
+      console.log(`[Sync All] All done: ${syncAllStatus.totalProcessed} processed, ${syncAllStatus.totalSkipped} skipped, ${syncAllStatus.errors.length} errors`);
+    })();
+
+  } catch (err) {
+    console.error('[Sync All] Error:', err.message);
+    syncAllStatus.running = false;
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 1C. STATUS ENDPOINT for Poll All Sellers
+router.get('/sync-all-sellers-status', requireAuth, async (req, res) => {
+  res.json(syncAllStatus);
+});
+
 // 2. GET LISTINGS (With Search & Sort) - For Compatibility Dashboard (Uses Listing collection)
 router.get('/listings', requireAuth, async (req, res) => {
   const { sellerId, page = 1, limit = 50, search } = req.query;
@@ -8562,7 +8789,7 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
     const startMonth = startRefDate.getUTCMonth();
     const startDay = startRefDate.getUTCDate();
     const startUsePDT = (startMonth > 2 && startMonth < 10) || (startMonth === 2 && startDay >= 8) || (startMonth === 10 && startDay < 2);
-    
+
     const start = new Date(startDate + 'T00:00:00Z');
     start.setUTCHours(startUsePDT ? 7 : 8, 0, 0, 0);
     matchQuery.dateSold.$gte = start;
@@ -8571,7 +8798,7 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
     const endMonth = endRefDate.getUTCMonth();
     const endDay = endRefDate.getUTCDate();
     const endUsePDT = (endMonth > 2 && endMonth < 10) || (endMonth === 2 && endDay >= 8) || (endMonth === 10 && endDay < 2);
-    
+
     const end = new Date(endDate + 'T00:00:00Z');
     end.setUTCDate(end.getUTCDate() + 1);
     end.setUTCHours(endUsePDT ? 6 : 7, 59, 59, 999);
