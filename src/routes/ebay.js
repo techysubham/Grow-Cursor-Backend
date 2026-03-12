@@ -7148,6 +7148,51 @@ const filterOutInvalidCombos = (compatibilityList, errorMessage) => {
   });
 };
 
+// Helper: purge rejected trim/engine values from FitmentCache
+// so they no longer appear in the frontend dropdowns
+const purgeInvalidFromCache = async (errorMessage) => {
+  const invalids = extractInvalidCombos(errorMessage);
+  if (invalids.length === 0) return;
+
+  // Group by (make, model, year) → set of rejected trims
+  // Group by (make, model, trim, year) → set of rejected engines
+  const trimRejections = {};  // cacheKey → Set of trim values
+  const engineRejections = {}; // cacheKey → Set of engine values
+
+  for (const inv of invalids) {
+    if (inv.trim) {
+      const trimKey = `Trim_Make_${inv.make}_Model_${inv.model}_Year_${inv.year}`;
+      if (!trimRejections[trimKey]) trimRejections[trimKey] = new Set();
+      trimRejections[trimKey].add(inv.trim);
+    }
+    if (inv.engine) {
+      const engineKey = `Engine_Make_${inv.make}_Model_${inv.model}_Trim_${inv.trim}_Year_${inv.year}`;
+      if (!engineRejections[engineKey]) engineRejections[engineKey] = new Set();
+      engineRejections[engineKey].add(inv.engine);
+    }
+  }
+
+  // Pull rejected values from cached arrays
+  const ops = [];
+  for (const [cacheKey, rejectedSet] of Object.entries(trimRejections)) {
+    ops.push(FitmentCache.updateOne(
+      { cacheKey },
+      { $pull: { values: { $in: [...rejectedSet] } } }
+    ));
+  }
+  for (const [cacheKey, rejectedSet] of Object.entries(engineRejections)) {
+    ops.push(FitmentCache.updateOne(
+      { cacheKey },
+      { $pull: { values: { $in: [...rejectedSet] } } }
+    ));
+  }
+
+  if (ops.length > 0) {
+    await Promise.all(ops);
+    console.log(`[FitmentCache] Purged rejected values from ${ops.length} cache entries`);
+  }
+};
+
 router.post('/update-compatibility', requireAuth, async (req, res) => {
   const { sellerId, itemId, compatibilityList: rawCompatibilityList } = req.body;
   try {
@@ -7242,6 +7287,8 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
         }
       }
 
+      // Also purge rejected trims/engines from cache on full failure
+      purgeInvalidFromCache(errorMessage).catch(e => console.error('[FitmentCache] Purge error:', e.message));
       throw new Error(parseInvalidCombos(errorMessage));
     }
 
@@ -7264,6 +7311,8 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
         console.warn(`eBay Update Warning: ${warningMessage}`);
         // Strip entries that eBay rejected so local DB matches what eBay actually accepted
         filteredCompatibilityList = filterOutInvalidCombos(compatibilityList, rawWarning);
+        // Also remove rejected trims/engines from FitmentCache so they don't show in dropdowns
+        purgeInvalidFromCache(rawWarning).catch(e => console.error('[FitmentCache] Purge error:', e.message));
       }
     }
 
@@ -7361,6 +7410,8 @@ router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
 
           results.push({ itemId, title, sku, status: 'failure', error: parseInvalidCombos(errorMessage), compatibilityCount: compatibilityList?.length || 0 });
           failureCount++;
+          // Purge rejected trims/engines from cache
+          purgeInvalidFromCache(errorMessage).catch(e => console.error('[FitmentCache] Purge error:', e.message));
         } else {
           // Success or Warning — update local DB
           let savedList = compatibilityList;
@@ -7376,6 +7427,8 @@ router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
               warning = meaningful.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
               // Strip entries that eBay rejected so local DB matches what eBay actually accepted
               savedList = filterOutInvalidCombos(compatibilityList, rawWarning);
+              // Also remove rejected trims/engines from FitmentCache so they don't show in dropdowns
+              purgeInvalidFromCache(rawWarning).catch(e => console.error('[FitmentCache] Purge error:', e.message));
             }
           }
           await Listing.findOneAndUpdate({ itemId }, { compatibility: savedList });
@@ -7912,16 +7965,17 @@ router.post('/compatibility/values', requireAuth, async (req, res) => {
     const rawValues = response.data.compatibilityPropertyValues || [];
     const values = rawValues.map(item => item.value);
 
-    // 4. SAVE TO DB (cache for 7 days, then MongoDB TTL auto-deletes)
+    // 4. SAVE TO DB — Make/Model/Year cached 30 days, Trim/Engine cached 7 days
     if (values.length > 0) {
-      const expireAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+      const isLongLived = ['Make', 'Model', 'Year'].includes(propertyName);
+      const ttlMs = isLongLived ? 60 * 24 * 60 * 60 * 1000 : 10 * 24 * 60 * 60 * 1000;
+      const expireAt = new Date(Date.now() + ttlMs);
       await FitmentCache.findOneAndUpdate(
         { cacheKey },
         { cacheKey, values, lastUpdated: new Date(), expireAt },
         { upsert: true }
       );
     }
-
     res.json({ values });
 
   } catch (err) {
