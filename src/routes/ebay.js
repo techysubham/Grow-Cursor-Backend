@@ -9715,6 +9715,77 @@ router.get('/selling/summary', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================
+// END ITEM
+// ============================================
+router.post('/end-item', requireAuth, async (req, res) => {
+  try {
+    const { sellerId, itemId, endingReason = 'NotAvailable' } = req.body;
+
+    if (!sellerId || !itemId) {
+      return res.status(400).json({ error: 'Missing sellerId or itemId' });
+    }
+
+    // 1. Get Seller & Token
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+
+    // 2. Prepare Trading API Request
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<EndItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>${accessToken}</eBayAuthToken>
+  </RequesterCredentials>
+  <ItemID>${itemId}</ItemID>
+  <EndingReason>${endingReason}</EndingReason>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+</EndItemRequest>`;
+
+    // 3. Call eBay Trading API
+    const response = await axios.post(
+      'https://api.ebay.com/ws/api.dll',
+      xmlRequest,
+      {
+        headers: {
+          'X-EBAY-API-CALL-NAME': 'EndItem',
+          'X-EBAY-API-SITEID': '0',
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1173',
+          'Content-Type': 'text/xml'
+        }
+      }
+    );
+
+    // 4. Parse XML Response
+    const result = await parseStringPromise(response.data, { explicitArray: false });
+
+    if (result.EndItemResponse.Ack === 'Failure') {
+      const errors = result.EndItemResponse.Errors;
+      const errorMsg = Array.isArray(errors) ? errors[0].LongMessage : errors.LongMessage;
+      throw new Error(`eBay API Error: ${errorMsg}`);
+    }
+
+    res.json({
+      success: true,
+      endTime: result.EndItemResponse.EndTime
+    });
+
+  } catch (error) {
+    console.error('[End Item] Error:', error.message);
+    if (error.response) {
+      console.error('[End Item] eBay Response:', error.response.data);
+    }
+    res.status(500).json({
+      error: 'Failed to end item',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
 // Export for optional external schedulers
 export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDate };
 
