@@ -11,6 +11,9 @@ router.use(requireAuth);
 
 // PST offset used throughout the platform
 const PST_OFFSET_HOURS = 8;
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const CARRY_OVER_START_DATE = '2026-03-10';
+const MAX_ORDERS_PER_AMAZON_ACCOUNT = 9;
 
 /**
  * Builds a UTC date range for a given YYYY-MM-DD string (PST day boundaries)
@@ -26,6 +29,51 @@ function buildDayRange(dateStr) {
     return { start, end };
 }
 
+function getPlatformDayString(dateValue) {
+    const shifted = new Date(new Date(dateValue).getTime() - PST_OFFSET_HOURS * 60 * 60 * 1000);
+    return shifted.toISOString().slice(0, 10);
+}
+
+function getCarryOverLabel(carryOverDays) {
+    if (carryOverDays <= 0) return '';
+    if (carryOverDays === 1) return 'Yesterday';
+    return `${carryOverDays} days ago`;
+}
+
+function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = []) {
+    const { start, end } = buildDayRange(dateStr);
+    const carryOverStart = buildDayRange(CARRY_OVER_START_DATE).start;
+    const queueScopes = [{ dateSold: { $gte: start, $lte: end } }];
+
+    if (start.getTime() > carryOverStart.getTime()) {
+        queueScopes.push({
+            dateSold: { $gte: carryOverStart, $lt: start },
+            sourcingStatus: 'Not Yet',
+        });
+    }
+
+    const filters = [
+        { $or: queueScopes },
+        ...extraFilters.filter(Boolean),
+    ];
+
+    if (excludeLowValue === 'true') {
+        filters.push({
+            $or: [
+                { beforeTaxUSD: { $gte: 3 } },
+                { beforeTaxUSD: { $exists: false } },
+                { beforeTaxUSD: null }
+            ]
+        });
+    }
+
+    return {
+        start,
+        end,
+        query: filters.length === 1 ? filters[0] : { $and: filters },
+    };
+}
+
 // ---------------------------------------------------------------------------
 // TAB 1 — Daily Orders
 // GET /api/affiliate-orders/daily?date=YYYY-MM-DD
@@ -36,28 +84,39 @@ router.get('/daily', async (req, res) => {
         const { date, excludeLowValue } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
-        const { start, end } = buildDayRange(date);
-
-        const query = { dateSold: { $gte: start, $lte: end } };
-
-        // Exclude low value orders (less than $3)
-        if (excludeLowValue === 'true') {
-            query.$and = query.$and || [];
-            query.$and.push({
-                $or: [
-                    { beforeTaxUSD: { $gte: 3 } },
-                    { beforeTaxUSD: { $exists: false } },
-                    { beforeTaxUSD: null }
-                ]
-            });
-        }
+        const { query } = buildAffiliateQueueQuery(date, excludeLowValue);
 
         const orders = await Order.find(query)
             .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
             .sort({ dateSold: 1 })
             .lean();
 
-        res.json(orders);
+        const selectedDayUtc = Date.parse(`${date}T00:00:00Z`);
+        const enrichedOrders = orders
+            .map((order) => {
+                const sourceDay = getPlatformDayString(order.dateSold || order.creationDate || new Date());
+                const sourceDayUtc = Date.parse(`${sourceDay}T00:00:00Z`);
+                const carryOverDays = Math.max(0, Math.round((selectedDayUtc - sourceDayUtc) / DAY_IN_MS));
+                const sellerName = order.seller?.user?.username || order.sellerId || 'Unknown Seller';
+
+                return {
+                    ...order,
+                    sellerGroupName: sellerName,
+                    isCarryOver: carryOverDays > 0 && order.sourcingStatus === 'Not Yet',
+                    carryOverDays,
+                    sourceDate: sourceDay,
+                    carryOverLabel: getCarryOverLabel(carryOverDays),
+                };
+            })
+            .sort((left, right) => {
+                if (left.sellerGroupName !== right.sellerGroupName) {
+                    return left.sellerGroupName.localeCompare(right.sellerGroupName);
+                }
+
+                return new Date(left.dateSold || left.creationDate || 0) - new Date(right.dateSold || right.creationDate || 0);
+            });
+
+        res.json(enrichedOrders);
     } catch (err) {
         console.error('GET /affiliate-orders/daily error:', err);
         res.status(500).json({ error: err.message });
@@ -118,24 +177,12 @@ router.get('/balances', async (req, res) => {
         const { date, excludeLowValue } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
-        const { start, end } = buildDayRange(date);
-
         // All Amazon accounts
         const accounts = await AmazonAccount.find().sort({ name: 1 }).lean();
 
-        // Build match query for orders
-        const matchQuery = { dateSold: { $gte: start, $lte: end }, amazonAccount: { $exists: true, $ne: '' } };
-        if (excludeLowValue === 'true') {
-            matchQuery.$and = [
-                {
-                    $or: [
-                        { beforeTaxUSD: { $gte: 3 } },
-                        { beforeTaxUSD: { $exists: false } },
-                        { beforeTaxUSD: null }
-                    ]
-                }
-            ];
-        }
+        const { query: matchQuery } = buildAffiliateQueueQuery(date, excludeLowValue, [
+            { amazonAccount: { $exists: true, $ne: '' } },
+        ]);
 
         // Aggregate expense per account for this day from orders
         const expenseAgg = await Order.aggregate([
@@ -231,25 +278,11 @@ router.get('/summary', async (req, res) => {
         const { date, excludeLowValue } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
-        const { start, end } = buildDayRange(date);
+        const { start, end, query } = buildAffiliateQueueQuery(date, excludeLowValue);
 
-        // Build query
-        const query = { dateSold: { $gte: start, $lte: end } };
-        if (excludeLowValue === 'true') {
-            query.$and = [
-                {
-                    $or: [
-                        { beforeTaxUSD: { $gte: 3 } },
-                        { beforeTaxUSD: { $exists: false } },
-                        { beforeTaxUSD: null }
-                    ]
-                }
-            ];
-        }
-
-        // All orders that day
+        // All orders in the active sourcing queue for the selected day
         const orders = await Order.find(query)
-            .select('purchaser sourcingStatus beforeTaxUSD amazonExchangeRate')
+            .select('purchaser sourcingStatus beforeTaxUSD amazonExchangeRate amazonAccount dateSold creationDate')
             .lean();
 
         const totalOrders = orders.length;
@@ -270,6 +303,53 @@ router.get('/summary', async (req, res) => {
         }
         const byPurchaser = Object.entries(purchaserMap).map(([name, count]) => ({ name, count }));
 
+        const amazonAccountMap = {};
+        for (const o of orders) {
+            const name = o.amazonAccount || '(Unassigned)';
+            const orderDate = new Date(o.dateSold || o.creationDate || 0);
+            const isSelectedDayOrder = orderDate >= start && orderDate <= end;
+
+            if (!amazonAccountMap[name]) {
+                amazonAccountMap[name] = {
+                    queueCount: 0,
+                    count: 0,
+                    carryOverCount: 0,
+                };
+            }
+
+            amazonAccountMap[name].queueCount += 1;
+            if (isSelectedDayOrder) {
+                amazonAccountMap[name].count += 1;
+            } else {
+                amazonAccountMap[name].carryOverCount += 1;
+            }
+        }
+        const byAmazonAccount = Object.entries(amazonAccountMap)
+            .map(([name, stats]) => {
+                if (name === '(Unassigned)') {
+                    return {
+                        name,
+                        count: stats.count,
+                        queueCount: stats.queueCount,
+                        carryOverCount: stats.carryOverCount,
+                        remaining: null,
+                        max: null,
+                        isFull: false,
+                    };
+                }
+
+                return {
+                    name,
+                    count: stats.count,
+                    queueCount: stats.queueCount,
+                    carryOverCount: stats.carryOverCount,
+                    remaining: Math.max(MAX_ORDERS_PER_AMAZON_ACCOUNT - stats.count, 0),
+                    max: MAX_ORDERS_PER_AMAZON_ACCOUNT,
+                    isFull: stats.count >= MAX_ORDERS_PER_AMAZON_ACCOUNT,
+                };
+            })
+            .sort((left, right) => left.name.localeCompare(right.name));
+
         // Total added balance across all accounts that day
         const balances = await AmazonAccountDailyBalance.find({ date }).lean();
         const totalAmountAdded = balances.reduce((s, b) => s + (b.addedBalance || 0), 0);
@@ -283,6 +363,8 @@ router.get('/summary', async (req, res) => {
             ordersNotDone,
             totalAmountAdded,
             byPurchaser,
+            byAmazonAccount,
+            maxOrdersPerAmazonAccount: MAX_ORDERS_PER_AMAZON_ACCOUNT,
         });
     } catch (err) {
         console.error('GET /affiliate-orders/summary error:', err);
