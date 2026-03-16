@@ -5915,6 +5915,12 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
     // Build the aggregation pipeline
     const pipeline = [];
 
+    // 0. ALWAYS limit to recent messages to prevent sort memory overflow
+    //    (MongoDB free-tier has a 32MB sort limit and no allowDiskUse)
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - 45);
+    pipeline.push({ $match: { messageDate: { $gte: cutoffDate } } });
+
     // 1. FILTER BY SELLER
     if (sellerId) {
       pipeline.push({
@@ -6193,7 +6199,7 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       }
     ];
 
-    const result = await Message.aggregate(facetedPipeline);
+    const result = await Message.aggregate(facetedPipeline).allowDiskUse(true);
 
     let threads = result[0].data;
     let total = result[0].metadata[0] ? result[0].metadata[0].total : 0;

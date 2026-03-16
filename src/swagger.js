@@ -238,7 +238,7 @@ export const swaggerSpec = {
                     },
                     {
                         name: 'filterMarketplace', in: 'query',
-                        schema: { type: 'string', enum: ['', 'EBAY_US', 'EBAY_CA', 'EBAY_AU'] },
+                        schema: { type: 'string', enum: ['', 'EBAY_US', 'EBAY_CA', 'EBAY_AU', 'EBAY_GB'] },
                         description: 'Restrict to a single marketplace (empty = all)'
                     },
                     {
