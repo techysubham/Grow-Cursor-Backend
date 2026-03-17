@@ -87,6 +87,11 @@ const OrderSchema = new mongoose.Schema(
     notes: String, // Notes field for internal use
     fulfillmentNotes: String,
     amazonAccount: String,
+    amazonAccountAssignmentSource: {
+      type: String,
+      enum: ['affiliate', 'fulfillment'],
+      default: null
+    },
     arrivingDate: String,
     beforeTax: Number,
     estimatedTax: Number,
@@ -161,6 +166,7 @@ const OrderSchema = new mongoose.Schema(
       enum: ['Done', 'Not Yet', 'Added to cart', 'Cancelled order'],
       default: 'Not Yet'
     },
+    sourcingCompletedAt: { type: Date, default: null },
     purchaser: { type: String, default: '' },
     sourcingMessageStatus: {
       type: String,

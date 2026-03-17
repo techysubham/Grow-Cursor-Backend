@@ -8574,10 +8574,34 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
+    const previousAmazonAccount = order.amazonAccount;
+    const previousAmazonAccountAssignmentSource = order.amazonAccountAssignmentSource;
+
     // Apply manual updates to order object
     Object.keys(updateData).forEach(key => {
       order[key] = updateData[key];
     });
+
+    if (Object.prototype.hasOwnProperty.call(updateData, 'amazonAccount')) {
+      if (updateData.amazonAccount) {
+        order.amazonAccountAssignmentSource = 'fulfillment';
+
+        if (order.sourcingStatus !== 'Done') {
+          order.sourcingStatus = 'Done';
+        }
+
+        if (!order.sourcingCompletedAt) {
+          order.sourcingCompletedAt = new Date();
+        }
+      } else if (previousAmazonAccount && previousAmazonAccountAssignmentSource === 'fulfillment') {
+        order.amazonAccountAssignmentSource = null;
+
+        if (order.sourcingStatus === 'Done') {
+          order.sourcingStatus = 'Not Yet';
+          order.sourcingCompletedAt = null;
+        }
+      }
+    }
 
     // Check if any monetary fields were updated
     const monetaryFields = ['beforeTax', 'estimatedTax', 'amazonRefund'];
