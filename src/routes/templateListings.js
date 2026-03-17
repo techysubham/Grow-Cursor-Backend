@@ -1061,7 +1061,7 @@ router.post('/', requireAuth, async (req, res) => {
 // ============================================
 router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, startDateTime, stepMinutes } = req.body;
+    const { templateId, sellerId, startDateTime, stepMinutes, batchFilter, batchId } = req.body;
 
     if (!templateId || !sellerId || !startDateTime || stepMinutes == null) {
       return res.status(400).json({ error: 'templateId, sellerId, startDateTime, and stepMinutes are required' });
@@ -1072,20 +1072,30 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'stepMinutes must be a positive integer' });
     }
 
-    // Parse "YYYY-MM-DD HH:MM:SS" by extracting components and using Date.UTC explicitly.
-    // This avoids any Date.parse timezone ambiguity entirely.
+    // Parse "YYYY-MM-DD HH:MM:SS" — pure string arithmetic, no Date objects.
+    // This ensures the stored value exactly matches what the user entered (IST wall-clock).
     const dtMatch = startDateTime.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
     if (!dtMatch) {
       return res.status(400).json({ error: 'Invalid startDateTime format. Expected YYYY-MM-DD HH:MM:SS' });
     }
-    const [, yr, mo, dy, hr, mn, sc] = dtMatch.map(Number);
-    const startMs = Date.UTC(yr, mo - 1, dy, hr, mn, sc);
-    if (isNaN(startMs)) {
-      return res.status(400).json({ error: 'Invalid startDateTime format. Expected YYYY-MM-DD HH:MM:SS' });
+    const baseYear = parseInt(dtMatch[1]);
+    const baseMonth = parseInt(dtMatch[2]);
+    const baseDay = parseInt(dtMatch[3]);
+    const baseHour = parseInt(dtMatch[4]);
+    const baseMinute = parseInt(dtMatch[5]);
+    const baseSec = parseInt(dtMatch[6]);
+
+    // Fetch listings matching the same filter the user is currently viewing
+    const listingFilter = { templateId, sellerId };
+    if (batchId) {
+      listingFilter.downloadBatchId = batchId;
+    } else if (!batchFilter || batchFilter === 'active') {
+      listingFilter.$or = [{ downloadBatchId: null }, { pendingRedownload: true }];
     }
+    // batchFilter === 'all' → no additional filter
 
     // Fetch all listings for this template + seller, sorted by creation order
-    const listings = await TemplateListing.find({ templateId, sellerId })
+    const listings = await TemplateListing.find(listingFilter)
       .sort({ createdAt: 1 })
       .select('_id')
       .lean();
@@ -1094,19 +1104,39 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
       return res.json({ updated: 0, firstTime: null, lastTime: null });
     }
 
-    // Helper: format a ms timestamp as "YYYY-MM-DD HH:MM:SS" (24h, zero-padded, UTC)
-    function formatScheduleTime(ms) {
-      const d = new Date(ms);
-      const pad = n => String(n).padStart(2, '0');
-      return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
-             `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+    // Pure arithmetic: add totalMinutes to the base time and return "YYYY-MM-DD HH:MM:SS"
+    const pad = n => String(n).padStart(2, '0');
+    const daysInMonth = (y, m) => new Date(y, m, 0).getDate(); // m is 1-based
+
+    function addMinutesAndFormat(addMin) {
+      let totalMin = baseHour * 60 + baseMinute + addMin;
+      let extraDays = Math.floor(totalMin / 1440); // 1440 = 24*60
+      totalMin = totalMin % 1440;
+      if (totalMin < 0) { totalMin += 1440; extraDays--; }
+
+      const hh = Math.floor(totalMin / 60);
+      const mm = totalMin % 60;
+
+      // Add extra days to date
+      let y = baseYear, m = baseMonth, d = baseDay + extraDays;
+      while (d > daysInMonth(y, m)) {
+        d -= daysInMonth(y, m);
+        m++;
+        if (m > 12) { m = 1; y++; }
+      }
+      while (d < 1) {
+        m--;
+        if (m < 1) { m = 12; y--; }
+        d += daysInMonth(y, m);
+      }
+
+      return `${y}-${pad(m)}-${pad(d)} ${pad(hh)}:${pad(mm)}:${pad(baseSec)}`;
     }
 
-    const stepMs = step * 60 * 1000;
     const bulkOps = listings.map((listing, i) => ({
       updateOne: {
         filter: { _id: listing._id },
-        update: { $set: { scheduleTime: formatScheduleTime(startMs + i * stepMs) } }
+        update: { $set: { scheduleTime: addMinutesAndFormat(i * step) } }
       }
     }));
 
@@ -1114,8 +1144,8 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
 
     res.json({
       updated: listings.length,
-      firstTime: formatScheduleTime(startMs),
-      lastTime: formatScheduleTime(startMs + (listings.length - 1) * stepMs)
+      firstTime: addMinutesAndFormat(0),
+      lastTime: addMinutesAndFormat((listings.length - 1) * step)
     });
   } catch (error) {
     console.error('[Bulk Apply Schedule] Error:', error.message);
