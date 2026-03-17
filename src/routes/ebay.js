@@ -7704,10 +7704,17 @@ router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
 // ============================================
 router.get('/compatibility-batch-history', requireAuth, async (req, res) => {
   try {
-    const { sellerId, startDate, endDate, page = 1, limit = 20 } = req.query;
+    const { sellerId, userId, date, startDate, endDate, page = 1, limit = 20 } = req.query;
     const filter = {};
     if (sellerId) filter.seller = sellerId;
-    if (startDate || endDate) {
+    if (userId) filter.user = userId;
+    if (date) {
+      // Single date filter: convert selected IST date to UTC timestamp range
+      // IST is UTC+5:30, so midnight IST = previous day 18:30 UTC
+      const dayStart = new Date(date + 'T00:00:00+05:30'); // midnight IST
+      const dayEnd = new Date(date + 'T23:59:59.999+05:30'); // end of day IST
+      filter.createdAt = { $gte: dayStart, $lte: dayEnd };
+    } else if (startDate || endDate) {
       filter.date = {};
       if (startDate) filter.date.$gte = startDate;
       if (endDate) filter.date.$lte = endDate;
