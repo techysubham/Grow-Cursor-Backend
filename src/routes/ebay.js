@@ -7465,9 +7465,9 @@ const retryCompatWithTitleDiff = async (token, itemId, compatibilityList) => {
   }
   const newPrice = (parseFloat(currentPrice) + 0.01).toFixed(2);
 
-  // Append " |" to make the title distinct (eBay max 80 chars)
+  // Append "." to make the title distinct — always guaranteed to appear (eBay max 80 chars)
   const baseTitle = (listing.title || '').trim();
-  const newTitle = (baseTitle + '.').slice(0, 80);
+  const newTitle = baseTitle.slice(0, 79) + '.';
 
   const itemInnerContent = `<ItemID>${itemId}</ItemID><StartPrice>${newPrice}</StartPrice><Title>${escapeXml(newTitle)}</Title>${buildCompatXml(compatibilityList)}`;
   const xml = `<?xml version="1.0" encoding="utf-8"?>
