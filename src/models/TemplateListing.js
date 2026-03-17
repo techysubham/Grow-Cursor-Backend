@@ -34,7 +34,7 @@ const templateListingSchema = new mongoose.Schema({
   },
   relationship: String,
   relationshipDetails: String,
-  scheduleTime: Date,
+  scheduleTime: String,
   upc: String,
   epid: String,
   startPrice: {

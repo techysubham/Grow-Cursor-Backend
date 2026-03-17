@@ -1072,9 +1072,14 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'stepMinutes must be a positive integer' });
     }
 
-    // Parse the start time — input is local "YYYY-MM-DD HH:MM:SS"
-    // Replace space with T so Date.parse() works universally
-    const startMs = Date.parse(startDateTime.replace(' ', 'T'));
+    // Parse "YYYY-MM-DD HH:MM:SS" by extracting components and using Date.UTC explicitly.
+    // This avoids any Date.parse timezone ambiguity entirely.
+    const dtMatch = startDateTime.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+    if (!dtMatch) {
+      return res.status(400).json({ error: 'Invalid startDateTime format. Expected YYYY-MM-DD HH:MM:SS' });
+    }
+    const [, yr, mo, dy, hr, mn, sc] = dtMatch.map(Number);
+    const startMs = Date.UTC(yr, mo - 1, dy, hr, mn, sc);
     if (isNaN(startMs)) {
       return res.status(400).json({ error: 'Invalid startDateTime format. Expected YYYY-MM-DD HH:MM:SS' });
     }
@@ -1089,12 +1094,12 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
       return res.json({ updated: 0, firstTime: null, lastTime: null });
     }
 
-    // Helper: format a ms timestamp as "YYYY-MM-DD HH:MM:SS" (24h, zero-padded)
+    // Helper: format a ms timestamp as "YYYY-MM-DD HH:MM:SS" (24h, zero-padded, UTC)
     function formatScheduleTime(ms) {
       const d = new Date(ms);
       const pad = n => String(n).padStart(2, '0');
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
-             `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+             `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
     }
 
     const stepMs = step * 60 * 1000;
