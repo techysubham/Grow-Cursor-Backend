@@ -1052,6 +1052,77 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================
+// BULK APPLY SCHEDULE TIMES
+// POST /template-listings/bulk-apply-schedule
+// Body: { templateId, sellerId, startDateTime (YYYY-MM-DD HH:MM:SS), stepMinutes }
+// Assigns sequential scheduleTime values to all listings for the template+seller,
+// ordered by createdAt ASC, spaced by stepMinutes.
+// ============================================
+router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, startDateTime, stepMinutes } = req.body;
+
+    if (!templateId || !sellerId || !startDateTime || stepMinutes == null) {
+      return res.status(400).json({ error: 'templateId, sellerId, startDateTime, and stepMinutes are required' });
+    }
+
+    const step = parseInt(stepMinutes, 10);
+    if (isNaN(step) || step < 1) {
+      return res.status(400).json({ error: 'stepMinutes must be a positive integer' });
+    }
+
+    // Parse "YYYY-MM-DD HH:MM:SS" by extracting components and using Date.UTC explicitly.
+    // This avoids any Date.parse timezone ambiguity entirely.
+    const dtMatch = startDateTime.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+    if (!dtMatch) {
+      return res.status(400).json({ error: 'Invalid startDateTime format. Expected YYYY-MM-DD HH:MM:SS' });
+    }
+    const [, yr, mo, dy, hr, mn, sc] = dtMatch.map(Number);
+    const startMs = Date.UTC(yr, mo - 1, dy, hr, mn, sc);
+    if (isNaN(startMs)) {
+      return res.status(400).json({ error: 'Invalid startDateTime format. Expected YYYY-MM-DD HH:MM:SS' });
+    }
+
+    // Fetch all listings for this template + seller, sorted by creation order
+    const listings = await TemplateListing.find({ templateId, sellerId })
+      .sort({ createdAt: 1 })
+      .select('_id')
+      .lean();
+
+    if (listings.length === 0) {
+      return res.json({ updated: 0, firstTime: null, lastTime: null });
+    }
+
+    // Helper: format a ms timestamp as "YYYY-MM-DD HH:MM:SS" (24h, zero-padded, UTC)
+    function formatScheduleTime(ms) {
+      const d = new Date(ms);
+      const pad = n => String(n).padStart(2, '0');
+      return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+             `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+    }
+
+    const stepMs = step * 60 * 1000;
+    const bulkOps = listings.map((listing, i) => ({
+      updateOne: {
+        filter: { _id: listing._id },
+        update: { $set: { scheduleTime: formatScheduleTime(startMs + i * stepMs) } }
+      }
+    }));
+
+    await TemplateListing.bulkWrite(bulkOps);
+
+    res.json({
+      updated: listings.length,
+      firstTime: formatScheduleTime(startMs),
+      lastTime: formatScheduleTime(startMs + (listings.length - 1) * stepMs)
+    });
+  } catch (error) {
+    console.error('[Bulk Apply Schedule] Error:', error.message);
+    res.status(500).json({ error: error.message || 'Failed to apply schedule times' });
+  }
+});
+
 // Bulk update listings
 router.put('/bulk-update', requireAuth, async (req, res) => {
   try {
