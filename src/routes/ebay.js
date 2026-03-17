@@ -7426,8 +7426,75 @@ const purgeInvalidFromCache = async (errorMessage) => {
   }
 };
 
+// Helper: detect eBay's duplicate-listing error
+const isDuplicateListingError = (msg) =>
+  msg.includes('already have on eBay') ||
+  msg.includes('identical items') ||
+  msg.includes('duplicate listing') ||
+  msg.includes('DuplicateItem');
+
+// Helper: build the ItemCompatibilityList XML block (reused across retry calls)
+const buildCompatXml = (compatibilityList) => {
+  if (!compatibilityList || compatibilityList.length === 0) {
+    return '<ItemCompatibilityList><ReplaceAll>true</ReplaceAll></ItemCompatibilityList>';
+  }
+  let xml = '<ItemCompatibilityList><ReplaceAll>true</ReplaceAll>';
+  compatibilityList.forEach(c => {
+    xml += '<Compatibility>';
+    if (c.notes) xml += `<CompatibilityNotes>${escapeXml(c.notes)}</CompatibilityNotes>`;
+    c.nameValueList.forEach(nv => {
+      xml += `<NameValueList><Name>${escapeXml(nv.name)}</Name><Value>${escapeXml(nv.value)}</Value></NameValueList>`;
+    });
+    xml += '</Compatibility>';
+  });
+  xml += '</ItemCompatibilityList>';
+  return xml;
+};
+
+// Helper: retry by differentiating the title with a vehicle fitment suffix + minor price bump.
+// Strategy: eBay requires 2+ SIGNIFICANTLY different attributes to not flag as duplicate.
+// $0.01 price alone is not "significant". Title + fitment suffix IS significant.
+// We append "| Fits YYYY-YYYY Make/Make" to the title using the first few makes in the compat list.
+const retryCompatWithTitleDiff = async (token, itemId, compatibilityList) => {
+  const listing = await Listing.findOne({ itemId }).select('title currentPrice').lean();
+  if (!listing) throw new Error('Listing not found in DB for title-diff retry');
+
+  const currentPrice = listing.currentPrice;
+  if (!currentPrice || isNaN(currentPrice)) {
+    throw new Error('Could not read current price from DB for title-diff retry');
+  }
+  const newPrice = (parseFloat(currentPrice) + 0.01).toFixed(2);
+
+  // Append " |" to make the title distinct (eBay max 80 chars)
+  const baseTitle = (listing.title || '').trim();
+  const newTitle = (baseTitle + '.').slice(0, 80);
+
+  const itemInnerContent = `<ItemID>${itemId}</ItemID><StartPrice>${newPrice}</StartPrice><Title>${escapeXml(newTitle)}</Title>${buildCompatXml(compatibilityList)}`;
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+    <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+      <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+      <ErrorLanguage>en_US</ErrorLanguage>
+      <WarningLevel>High</WarningLevel>
+      <Item>${itemInnerContent}</Item>
+    </ReviseFixedPriceItemRequest>`;
+
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xml, {
+    headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
+  });
+  const result = await parseStringPromise(response.data);
+  const ack = result.ReviseFixedPriceItemResponse.Ack[0];
+  if (ack === 'Failure') {
+    const errors = result.ReviseFixedPriceItemResponse.Errors || [];
+    throw new Error(errors.map(e => e.LongMessage[0]).join('; '));
+  }
+  const warnings = (result.ReviseFixedPriceItemResponse.Errors || [])
+    .filter(e => !e.LongMessage[0].includes('Best Offer') && !e.LongMessage[0].includes('Funds from your sales'))
+    .map(e => e.LongMessage[0]).join('; ');
+  return { newPrice: parseFloat(newPrice), newTitle, warning: warnings || null };
+};
+
 router.post('/update-compatibility', requireAuth, async (req, res) => {
-  const { sellerId, itemId, compatibilityList: rawCompatibilityList } = req.body;
+  const { sellerId, itemId, sku, compatibilityList: rawCompatibilityList } = req.body;
   try {
     const seller = await Seller.findById(sellerId);
     const token = await ensureValidToken(seller);
@@ -7519,6 +7586,24 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
           return res.status(429).json({ error: errorMessage });
         }
       }
+
+      // --- Duplicate listing: differentiate title with fitment suffix + minor price bump, retry with compat ---
+      if (isDuplicateListingError(errorMessage)) {
+        try {
+          console.log(`[Compat] Duplicate listing blocked item ${itemId}. Retrying with title+fitment differentiation...`);
+          const { newPrice, newTitle, warning: retryWarning } = await retryCompatWithTitleDiff(token, itemId, compatibilityList);
+          await Listing.findOneAndUpdate({ itemId }, { compatibility: compatibilityList, currentPrice: newPrice, title: newTitle });
+          console.log(`[Compat] Title-diff retry succeeded for item ${itemId}. New title: "${newTitle}"`);
+          return res.json({
+            success: true,
+            warning: retryWarning || `Title updated to "${newTitle}" and compatibility applied (duplicate listing resolved).`
+          });
+        } catch (retryErr) {
+          console.error(`[Compat] Title-diff retry failed for item ${itemId}:`, retryErr.message);
+          throw new Error(`eBay blocked as duplicate listing. Title-differentiation retry also failed: ${retryErr.message}`);
+        }
+      }
+      // --- End duplicate listing fallback ---
 
       // Also purge rejected trims/engines from cache on full failure
       purgeInvalidFromCache(errorMessage).catch(e => console.error('[FitmentCache] Purge error:', e.message));
@@ -7641,10 +7726,27 @@ router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
             break;
           }
 
-          results.push({ itemId, title, sku, status: 'failure', error: parseInvalidCombos(errorMessage), compatibilityCount: compatibilityList?.length || 0 });
-          failureCount++;
-          // Purge rejected trims/engines from cache
-          purgeInvalidFromCache(errorMessage).catch(e => console.error('[FitmentCache] Purge error:', e.message));
+          // --- Duplicate listing: differentiate title with fitment suffix + minor price bump, retry with compat ---
+          if (isDuplicateListingError(errorMessage)) {
+            try {
+              console.log(`[BulkCompat] Duplicate listing blocked item ${itemId}. Retrying with title+fitment differentiation...`);
+              const { newPrice, newTitle, warning: retryWarning } = await retryCompatWithTitleDiff(token, itemId, compatibilityList);
+              await Listing.findOneAndUpdate({ itemId }, { compatibility: compatibilityList, currentPrice: newPrice, title: newTitle });
+              console.log(`[BulkCompat] Title-diff retry succeeded for item ${itemId}. New title: "${newTitle}"`);
+              results.push({ itemId, title: newTitle, sku, status: 'success', error: retryWarning || `Title updated to differentiate (duplicate listing)`, compatibilityCount: compatibilityList?.length || 0, strippedCount: 0 });
+              successCount++;
+            } catch (retryErr) {
+              console.error(`[BulkCompat] Title-diff retry failed for item ${itemId}:`, retryErr.message);
+              results.push({ itemId, title, sku, status: 'failure', error: `Duplicate listing — title-diff retry failed: ${retryErr.message}`, compatibilityCount: compatibilityList?.length || 0 });
+              failureCount++;
+            }
+          } else {
+            results.push({ itemId, title, sku, status: 'failure', error: parseInvalidCombos(errorMessage), compatibilityCount: compatibilityList?.length || 0 });
+            failureCount++;
+            // Purge rejected trims/engines from cache
+            purgeInvalidFromCache(errorMessage).catch(e => console.error('[FitmentCache] Purge error:', e.message));
+          }
+          // --- End duplicate listing fallback ---
         } else {
           // Success or Warning — update local DB
           let savedList = compatibilityList;
