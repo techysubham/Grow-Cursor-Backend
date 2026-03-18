@@ -40,6 +40,11 @@ function getCarryOverLabel(carryOverDays) {
     return `${carryOverDays} days ago`;
 }
 
+function getEffectiveSpendAmount(order) {
+    const amount = order?.beforeTaxUSD ?? order?.beforeTax;
+    return Number(amount) || 0;
+}
+
 function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = []) {
     const { start, end } = buildDayRange(dateStr);
     const carryOverStart = buildDayRange(CARRY_OVER_START_DATE).start;
@@ -62,8 +67,8 @@ function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = []) {
             $or: [
                 { beforeTaxUSD: { $gte: 3 } },
                 { beforeTaxUSD: { $exists: false } },
-                { beforeTaxUSD: null }
-            ]
+                { beforeTaxUSD: null },
+            ],
         });
     }
 
@@ -71,6 +76,43 @@ function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = []) {
         start,
         end,
         query: filters.length === 1 ? filters[0] : { $and: filters },
+    };
+}
+
+function buildAffiliateSpendQuery(dateStr, excludeLowValue, extraFilters = []) {
+    const { start, end } = buildDayRange(dateStr);
+    const filters = [
+        { sourcingStatus: 'Done' },
+        {
+            $or: [
+                { sourcingCompletedAt: { $gte: start, $lte: end } },
+                {
+                    sourcingCompletedAt: { $exists: false },
+                    dateSold: { $gte: start, $lte: end },
+                },
+                {
+                    sourcingCompletedAt: null,
+                    dateSold: { $gte: start, $lte: end },
+                },
+            ],
+        },
+        ...extraFilters.filter(Boolean),
+    ];
+
+    if (excludeLowValue === 'true') {
+        filters.push({
+            $or: [
+                { beforeTaxUSD: { $gte: 3 } },
+                { beforeTaxUSD: { $exists: false } },
+                { beforeTaxUSD: null },
+            ],
+        });
+    }
+
+    return {
+        start,
+        end,
+        query: { $and: filters },
     };
 }
 
@@ -84,7 +126,9 @@ router.get('/daily', async (req, res) => {
         const { date, excludeLowValue } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
-        const { query } = buildAffiliateQueueQuery(date, excludeLowValue);
+        const { query } = buildAffiliateQueueQuery(date, excludeLowValue, [
+            { sourcingStatus: { $ne: 'Done' } },
+        ]);
 
         const orders = await Order.find(query)
             .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
@@ -124,6 +168,49 @@ router.get('/daily', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// TAB 4 — Actual Spend
+// GET /api/affiliate-orders/spend?date=YYYY-MM-DD
+// Returns orders whose spend should be recognized on the selected day
+// ---------------------------------------------------------------------------
+router.get('/spend', async (req, res) => {
+    try {
+        const { date, excludeLowValue } = req.query;
+        if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
+
+        const { query } = buildAffiliateSpendQuery(date, excludeLowValue);
+
+        const orders = await Order.find(query)
+            .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+            .sort({ sourcingCompletedAt: 1, dateSold: 1 })
+            .lean();
+
+        const enrichedOrders = orders
+            .map((order) => {
+                const sellerName = order.seller?.user?.username || order.sellerId || 'Unknown Seller';
+
+                return {
+                    ...order,
+                    sellerGroupName: sellerName,
+                    sourceDate: getPlatformDayString(order.dateSold || order.creationDate || new Date()),
+                    spendDate: getPlatformDayString(order.sourcingCompletedAt || order.dateSold || order.creationDate || new Date()),
+                };
+            })
+            .sort((left, right) => {
+                if (left.sellerGroupName !== right.sellerGroupName) {
+                    return left.sellerGroupName.localeCompare(right.sellerGroupName);
+                }
+
+                return new Date(left.sourcingCompletedAt || left.dateSold || left.creationDate || 0) - new Date(right.sourcingCompletedAt || right.dateSold || right.creationDate || 0);
+            });
+
+        res.json(enrichedOrders);
+    } catch (err) {
+        console.error('GET /affiliate-orders/spend error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
 // PATCH /api/affiliate-orders/:id/sourcing
 // Update the sourcing-specific fields on an order
 // ---------------------------------------------------------------------------
@@ -151,13 +238,36 @@ router.patch('/:id/sourcing', async (req, res) => {
             return res.status(400).json({ error: 'No valid fields provided' });
         }
 
+        const existingOrder = await Order.findById(req.params.id)
+            .select('sourcingStatus amazonAccount')
+            .lean();
+
+        if (!existingOrder) return res.status(404).json({ error: 'Order not found' });
+
+        if (update.sourcingStatus !== undefined) {
+            const movingToDone = existingOrder.sourcingStatus !== 'Done' && update.sourcingStatus === 'Done';
+            const movingAwayFromDone = existingOrder.sourcingStatus === 'Done' && update.sourcingStatus !== 'Done';
+
+            if (movingToDone) {
+                update.sourcingCompletedAt = new Date();
+            } else if (movingAwayFromDone) {
+                update.sourcingCompletedAt = null;
+            }
+        }
+
+        if (update.amazonAccount !== undefined) {
+            if (update.amazonAccount) {
+                update.amazonAccountAssignmentSource = 'affiliate';
+            } else if (existingOrder.amazonAccount) {
+                update.amazonAccountAssignmentSource = null;
+            }
+        }
+
         const order = await Order.findByIdAndUpdate(
             req.params.id,
             { $set: update },
             { new: true, runValidators: true }
         ).lean();
-
-        if (!order) return res.status(404).json({ error: 'Order not found' });
 
         res.json(order);
     } catch (err) {
@@ -180,7 +290,7 @@ router.get('/balances', async (req, res) => {
         // All Amazon accounts
         const accounts = await AmazonAccount.find().sort({ name: 1 }).lean();
 
-        const { query: matchQuery } = buildAffiliateQueueQuery(date, excludeLowValue, [
+        const { query: matchQuery } = buildAffiliateSpendQuery(date, excludeLowValue, [
             { amazonAccount: { $exists: true, $ne: '' } },
         ]);
 
@@ -190,7 +300,7 @@ router.get('/balances', async (req, res) => {
             {
                 $group: {
                     _id: '$amazonAccount',
-                    totalExpense: { $sum: { $ifNull: ['$beforeTaxUSD', 0] } },
+                    totalExpense: { $sum: { $ifNull: ['$beforeTaxUSD', { $ifNull: ['$beforeTax', 0] }] } },
                     orderCount: { $sum: 1 },
                 },
             },
@@ -278,20 +388,27 @@ router.get('/summary', async (req, res) => {
         const { date, excludeLowValue } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
-        const { start, end, query } = buildAffiliateQueueQuery(date, excludeLowValue);
+        const { start, end, query: queueQuery } = buildAffiliateQueueQuery(date, excludeLowValue);
+        const { query: spendQuery } = buildAffiliateSpendQuery(date, excludeLowValue);
 
         // All orders in the active sourcing queue for the selected day
-        const orders = await Order.find(query)
-            .select('purchaser sourcingStatus beforeTaxUSD amazonExchangeRate amazonAccount dateSold creationDate')
-            .lean();
+        const [orders, spendOrders, balances] = await Promise.all([
+            Order.find(queueQuery)
+                .select('purchaser sourcingStatus beforeTaxUSD beforeTax amazonExchangeRate amazonAccount dateSold creationDate')
+                .lean(),
+            Order.find(spendQuery)
+                .select('beforeTaxUSD beforeTax amazonExchangeRate')
+                .lean(),
+            AmazonAccountDailyBalance.find({ date }).lean(),
+        ]);
 
         const totalOrders = orders.length;
-        const totalUSD = orders.reduce((s, o) => s + (o.beforeTaxUSD || 0), 0);
+        const totalUSD = spendOrders.reduce((sum, order) => sum + getEffectiveSpendAmount(order), 0);
         const ordersDone = orders.filter((o) => o.sourcingStatus === 'Done').length;
         const ordersNotDone = totalOrders - ordersDone;
 
         // INR: use the most recent amazonExchangeRate stored on any order that day, or 0
-        const rateOrder = orders.find((o) => o.amazonExchangeRate);
+        const rateOrder = spendOrders.find((o) => o.amazonExchangeRate) || orders.find((o) => o.amazonExchangeRate);
         const exchangeRate = rateOrder?.amazonExchangeRate || 0;
         const totalINR = totalUSD * exchangeRate;
 
@@ -351,7 +468,6 @@ router.get('/summary', async (req, res) => {
             .sort((left, right) => left.name.localeCompare(right.name));
 
         // Total added balance across all accounts that day
-        const balances = await AmazonAccountDailyBalance.find({ date }).lean();
         const totalAmountAdded = balances.reduce((s, b) => s + (b.addedBalance || 0), 0);
 
         res.json({
