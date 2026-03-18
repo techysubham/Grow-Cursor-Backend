@@ -7451,26 +7451,30 @@ const buildCompatXml = (compatibilityList) => {
   return xml;
 };
 
-// Helper: retry by differentiating the title with a vehicle fitment suffix + minor price bump.
-// Strategy: eBay requires 2+ SIGNIFICANTLY different attributes to not flag as duplicate.
-// $0.01 price alone is not "significant". Title + fitment suffix IS significant.
-// We append "| Fits YYYY-YYYY Make/Make" to the title using the first few makes in the compat list.
+// Helper: retry by differentiating the title with a period suffix + minor price bump.
+// Each attempt adds one more period to the title and $0.01 to the price.
+// Up to 5 attempts — if eBay keeps rejecting as duplicate on each attempt, we keep retrying.
 const retryCompatWithTitleDiff = async (token, itemId, compatibilityList) => {
   const listing = await Listing.findOne({ itemId }).select('title currentPrice').lean();
   if (!listing) throw new Error('Listing not found in DB for title-diff retry');
 
-  const currentPrice = listing.currentPrice;
-  if (!currentPrice || isNaN(currentPrice)) {
+  const dbPrice = parseFloat(listing.currentPrice);
+  if (!listing.currentPrice || isNaN(dbPrice)) {
     throw new Error('Could not read current price from DB for title-diff retry');
   }
-  const newPrice = (parseFloat(currentPrice) + 0.01).toFixed(2);
 
-  // Append "." to make the title distinct — always guaranteed to appear (eBay max 80 chars)
-  const baseTitle = (listing.title || '').trim();
-  const newTitle = baseTitle.slice(0, 79) + '.';
+  const originalTitle = (listing.title || '').trim();
+  const maxRetries = 5;
+  let lastError = null;
 
-  const itemInnerContent = `<ItemID>${itemId}</ItemID><StartPrice>${newPrice}</StartPrice><Title>${escapeXml(newTitle)}</Title>${buildCompatXml(compatibilityList)}`;
-  const xml = `<?xml version="1.0" encoding="utf-8"?>
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const newPrice = (dbPrice + attempt * 0.01).toFixed(2);
+    // Each attempt appends one more period — ensuring every attempt produces a unique title
+    const suffix = '.'.repeat(attempt);
+    const newTitle = originalTitle.slice(0, 80 - suffix.length) + suffix;
+
+    const itemInnerContent = `<ItemID>${itemId}</ItemID><StartPrice>${newPrice}</StartPrice><Title>${escapeXml(newTitle)}</Title>${buildCompatXml(compatibilityList)}`;
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
     <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
       <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
       <ErrorLanguage>en_US</ErrorLanguage>
@@ -7478,19 +7482,30 @@ const retryCompatWithTitleDiff = async (token, itemId, compatibilityList) => {
       <Item>${itemInnerContent}</Item>
     </ReviseFixedPriceItemRequest>`;
 
-  const response = await axios.post('https://api.ebay.com/ws/api.dll', xml, {
-    headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
-  });
-  const result = await parseStringPromise(response.data);
-  const ack = result.ReviseFixedPriceItemResponse.Ack[0];
-  if (ack === 'Failure') {
-    const errors = result.ReviseFixedPriceItemResponse.Errors || [];
-    throw new Error(errors.map(e => e.LongMessage[0]).join('; '));
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', xml, {
+      headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
+    });
+    const result = await parseStringPromise(response.data);
+    const ack = result.ReviseFixedPriceItemResponse.Ack[0];
+
+    if (ack === 'Failure') {
+      const errors = result.ReviseFixedPriceItemResponse.Errors || [];
+      const errMsg = errors.map(e => e.LongMessage[0]).join('; ');
+      if (isDuplicateListingError(errMsg) && attempt < maxRetries) {
+        console.log(`[Compat] Duplicate still detected on attempt ${attempt} for item ${itemId}. Retrying with ${attempt + 1} period(s) and +$${(attempt + 1) * 0.01} price...`);
+        lastError = new Error(errMsg);
+        continue;
+      }
+      throw new Error(errMsg);
+    }
+
+    const warnings = (result.ReviseFixedPriceItemResponse.Errors || [])
+      .filter(e => !e.LongMessage[0].includes('Best Offer') && !e.LongMessage[0].includes('Funds from your sales'))
+      .map(e => e.LongMessage[0]).join('; ');
+    return { newPrice: parseFloat(newPrice), newTitle, warning: warnings || null };
   }
-  const warnings = (result.ReviseFixedPriceItemResponse.Errors || [])
-    .filter(e => !e.LongMessage[0].includes('Best Offer') && !e.LongMessage[0].includes('Funds from your sales'))
-    .map(e => e.LongMessage[0]).join('; ');
-  return { newPrice: parseFloat(newPrice), newTitle, warning: warnings || null };
+
+  throw lastError || new Error('Max duplicate-listing retries exceeded');
 };
 
 router.post('/update-compatibility', requireAuth, async (req, res) => {
