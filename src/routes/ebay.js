@@ -1852,7 +1852,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 
 // NEW ENDPOINT: All Orders with USD conversion
 router.get('/all-orders-usd', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue } = req.query;
 
   try {
     let query = {};
@@ -1919,6 +1919,17 @@ router.get('/all-orders-usd', async (req, res) => {
 
     if (searchMarketplace && searchMarketplace !== '') {
       query.purchaseMarketplaceId = searchMarketplace === 'EBAY_ENCA' ? 'EBAY_CA' : searchMarketplace;
+    }
+
+    // Exclude Low Value Orders (less than $3)
+    if (excludeLowValue === 'true') {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { subtotalUSD: { $gte: 3 } },
+          { subtotal: { $gte: 3 } }
+        ]
+      });
     }
 
     // Calculate pagination
