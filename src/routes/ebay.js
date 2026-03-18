@@ -2168,13 +2168,11 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
     // Recalculate earnings if not FULLY_REFUNDED or PARTIALLY_REFUNDED
     const paymentStatus = order.paymentSummary?.payments?.[0]?.paymentStatus;
     if (paymentStatus !== 'FULLY_REFUNDED' && paymentStatus !== 'PARTIALLY_REFUNDED') {
-      // Recalculate earnings: Subtotal + Shipping - Transaction Fees - Ad Fees
-      const subtotal = parseFloat(order.subtotalUSD) || 0;
-      const shipping = parseFloat(order.shippingUSD) || 0;
-      const transactionFees = parseFloat(order.transactionFeesUSD) || 0;
+      // Recalculate earnings: totalDueSeller.value - adFeeGeneral
+      const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
       const adFee = parseFloat(adFeeGeneral) || 0;
 
-      order.orderEarnings = parseFloat((subtotal + shipping - transactionFees - adFee).toFixed(2));
+      order.orderEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
 
       // Recalculate financial fields based on new earnings
       const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -2403,14 +2401,9 @@ router.post('/backfill-ad-fees', requireAuth, requireRole('fulfillmentadmin', 's
           const updates = { adFeeGeneral: adFee };
 
           if (order.orderPaymentStatus === 'PAID') {
-            // Recalculate earnings with new ad fee
-            const subtotal = parseFloat(order.subtotalUSD || 0);
-            const discount = parseFloat(order.discountUSD || 0);
-            const salesTax = parseFloat(order.salesTaxUSD || 0);
-            const transactionFees = parseFloat(order.transactionFeesUSD || 0);
-            const shipping = parseFloat(order.shippingUSD || 0);
-
-            const newEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
+            // Recalculate earnings: totalDueSeller.value - adFeeGeneral
+            const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
+            const newEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
             updates.orderEarnings = newEarnings;
 
             // Recalculate financial fields
@@ -2443,6 +2436,82 @@ router.post('/backfill-ad-fees', requireAuth, requireRole('fulfillmentadmin', 's
 
   } catch (err) {
     console.error('[Backfill Ad Fees] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Backfill / recalculate orderEarnings for existing orders using totalDueSeller.value - adFeeGeneral
+// Supports single seller (sellerId) or all sellers (allSellers: true)
+router.post('/backfill-earnings', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  const { sellerId, sinceDate, allSellers } = req.body;
+
+  if (!sellerId && !allSellers) {
+    return res.status(400).json({ error: 'sellerId or allSellers:true is required' });
+  }
+
+  try {
+    // Resolve seller IDs to process
+    let sellerIds;
+    if (allSellers) {
+      const allSellerDocs = await Seller.find({}, '_id').lean();
+      sellerIds = allSellerDocs.map(s => s._id);
+      console.log(`[Backfill Earnings] All-sellers mode: ${sellerIds.length} sellers`);
+    } else {
+      sellerIds = [sellerId];
+    }
+
+    const totals = { total: 0, success: 0, failed: 0, errors: [] };
+
+    for (const sid of sellerIds) {
+      let query = { seller: sid };
+      if (sinceDate) {
+        query.creationDate = { $gte: new Date(sinceDate) };
+      }
+      // Skip PARTIALLY_REFUNDED — user enters those manually
+      query.orderPaymentStatus = { $nin: ['PARTIALLY_REFUNDED'] };
+
+      const orders = await Order.find(query).sort({ creationDate: -1 });
+      console.log(`[Backfill Earnings] Seller ${sid}: ${orders.length} orders`);
+      totals.total += orders.length;
+
+      for (let i = 0; i < orders.length; i++) {
+        const order = orders[i];
+        try {
+          if (order.orderPaymentStatus === 'FULLY_REFUNDED') {
+            await Order.findByIdAndUpdate(order._id, { orderEarnings: 0 });
+            totals.success++;
+          } else {
+            const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
+            const adFee = parseFloat(order.adFeeGeneral || 0);
+            const newEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
+
+            const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+              order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+            const financials = await calculateFinancials({ orderEarnings: newEarnings }, marketplace);
+
+            await Order.findByIdAndUpdate(order._id, { orderEarnings: newEarnings, ...financials });
+            totals.success++;
+
+            if ((i + 1) % 50 === 0) {
+              console.log(`[Backfill Earnings] Seller ${sid} progress: ${i + 1}/${orders.length}`);
+            }
+          }
+        } catch (orderErr) {
+          totals.failed++;
+          if (totals.errors.length < 20) {
+            totals.errors.push({ orderId: order.orderId, error: orderErr.message });
+          }
+        }
+      }
+    }
+
+    res.json({
+      message: `Earnings recalculated across ${sellerIds.length} seller(s): ${totals.success} updated, ${totals.failed} failed`,
+      results: totals
+    });
+
+  } catch (err) {
+    console.error('[Backfill Earnings] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -4434,17 +4503,13 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
   }
 
   // Auto-calculate orderEarnings for normal (non-refunded) orders
-  // For PAID orders, calculate: subtotal + discount - salesTax - transactionFees - adFee - shipping
+  // For PAID orders, calculate: paymentSummary.totalDueSeller.value - adFeeGeneral
   if (orderData.orderPaymentStatus === 'PAID') {
-    const subtotal = parseFloat(orderData.subtotalUSD || 0);
-    const discount = parseFloat(orderData.discountUSD || 0); // Already negative
-    const salesTax = parseFloat(orderData.salesTaxUSD || 0);
-    const transactionFees = parseFloat(orderData.transactionFeesUSD || 0);
+    const totalDueSeller = parseFloat(ebayOrder.paymentSummary?.totalDueSeller?.value || 0);
     const adFee = parseFloat(orderData.adFeeGeneralUSD || orderData.adFee || 0);
-    const shipping = parseFloat(orderData.shippingUSD || 0);
 
-    // Order earnings = subtotal + discount - salesTax - transactionFees - adFee - shipping
-    orderData.orderEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
+    // Order earnings = totalDueSeller (already in USD) - adFeeGeneral
+    orderData.orderEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
 
     // Calculate financial fields (TDS, TID, NET, P.Balance INR)
     const marketplace = purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
