@@ -498,24 +498,9 @@ async function calculateFinancials(order, marketplace = 'EBAY') {
 async function calculateAmazonFinancials(order) {
   const updates = {};
 
-  // For US orders, if USD fields are missing, fall back to base currency fields
-  const isUSOrder = order.purchaseMarketplaceId === 'EBAY_US' || order.conversionRate === 1;
-  let beforeTaxUSD = parseFloat(order.beforeTaxUSD);
-  let estimatedTaxUSD = parseFloat(order.estimatedTaxUSD);
-
-  if (isUSOrder) {
-    if (!beforeTaxUSD && order.beforeTax !== undefined) {
-      beforeTaxUSD = parseFloat(order.beforeTax) || 0;
-      updates.beforeTaxUSD = beforeTaxUSD; // Update the missing field
-    }
-    if (!estimatedTaxUSD && order.estimatedTax !== undefined) {
-      estimatedTaxUSD = parseFloat(order.estimatedTax) || 0;
-      updates.estimatedTaxUSD = estimatedTaxUSD; // Update the missing field
-    }
-  }
-
-  const beforeTax = beforeTaxUSD || 0;
-  const estimatedTax = estimatedTaxUSD || 0;
+  // Always use raw beforeTax / estimatedTax fields directly
+  const beforeTax = parseFloat(order.beforeTax) || 0;
+  const estimatedTax = parseFloat(order.estimatedTax) || 0;
 
   // Amazon Total = Before Tax + Estimated Tax
   updates.amazonTotal = parseFloat((beforeTax + estimatedTax).toFixed(2));
@@ -2523,6 +2508,66 @@ router.post('/backfill-earnings', requireAuth, requireRole('fulfillmentadmin', '
 
   } catch (err) {
     console.error('[Backfill Earnings] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Backfill Amazon financials (amazonTotal, amazonTotalINR, marketplaceFee, igst, totalCC, profit) from raw beforeTax / estimatedTax
+router.post('/backfill-amazon-financials', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  const { sellerId, sinceDate, allSellers } = req.body;
+
+  if (!sellerId && !allSellers) {
+    return res.status(400).json({ error: 'sellerId or allSellers:true is required' });
+  }
+
+  try {
+    let sellerIds;
+    if (allSellers) {
+      const allSellerDocs = await Seller.find({}, '_id').lean();
+      sellerIds = allSellerDocs.map(s => s._id);
+      console.log(`[Backfill Amazon] All-sellers mode: ${sellerIds.length} sellers`);
+    } else {
+      sellerIds = [sellerId];
+    }
+
+    const totals = { total: 0, success: 0, failed: 0, errors: [] };
+
+    for (const sid of sellerIds) {
+      const query = { seller: sid };
+      if (sinceDate) {
+        query.creationDate = { $gte: new Date(sinceDate) };
+      }
+
+      const orders = await Order.find(query).sort({ creationDate: -1 });
+      console.log(`[Backfill Amazon] Seller ${sid}: ${orders.length} orders`);
+      totals.total += orders.length;
+
+      for (let i = 0; i < orders.length; i++) {
+        const order = orders[i];
+        try {
+          const amazonFinancials = await calculateAmazonFinancials(order);
+          await Order.findByIdAndUpdate(order._id, amazonFinancials);
+          totals.success++;
+
+          if ((i + 1) % 50 === 0) {
+            console.log(`[Backfill Amazon] Seller ${sid} progress: ${i + 1}/${orders.length}`);
+          }
+        } catch (orderErr) {
+          totals.failed++;
+          if (totals.errors.length < 20) {
+            totals.errors.push({ orderId: order.orderId, error: orderErr.message });
+          }
+        }
+      }
+    }
+
+    res.json({
+      message: `Amazon financials recalculated across ${sellerIds.length} seller(s): ${totals.success} updated, ${totals.failed} failed`,
+      results: totals
+    });
+
+  } catch (err) {
+    console.error('[Backfill Amazon] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -9044,6 +9089,15 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
       matchQuery.purchaseMarketplaceId = marketplaceId;
     }
 
+    // Always exclude low-value orders (subtotal < $3) from analytics
+    matchQuery.$and = matchQuery.$and || [];
+    matchQuery.$and.push({
+      $or: [
+        { subtotal: { $gte: 3 } },
+        { subtotalUSD: { $gte: 3 } }
+      ]
+    });
+
     // Determine grouping format with PST timezone
     let dateGroupFormat;
     if (groupBy === 'day') {
@@ -9063,17 +9117,25 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
         $group: {
           _id: dateGroupFormat,
           totalOrders: { $sum: 1 },
-          totalSubtotal: { $sum: { $ifNull: ['$subtotalUSD', 0] } },
-          totalShipping: { $sum: { $ifNull: ['$shippingUSD', 0] } },
-          totalSalesTax: { $sum: { $ifNull: ['$salesTaxUSD', 0] } },
-          totalDiscount: { $sum: { $ifNull: ['$discountUSD', 0] } },
-          totalTransactionFees: { $sum: { $ifNull: ['$transactionFeesUSD', 0] } },
+          totalSubtotal: { $sum: { $ifNull: ['$subtotal', 0] } },
+          totalShipping: { $sum: { $ifNull: ['$shipping', 0] } },
+          totalSalesTax: { $sum: { $ifNull: ['$salesTax', 0] } },
+          totalDiscount: { $sum: { $ifNull: ['$discount', 0] } },
+          totalTransactionFees: { $sum: { $ifNull: ['$transactionFees', 0] } },
           totalAdFees: { $sum: { $ifNull: ['$adFeeGeneral', 0] } },
           totalEarnings: { $sum: { $ifNull: ['$orderEarnings', 0] } },
           totalPBalanceINR: { $sum: { $ifNull: ['$pBalanceINR', 0] } },
           totalAmazonCosts: { $sum: { $ifNull: ['$amazonTotalINR', 0] } },
           totalCreditCardFees: { $sum: { $ifNull: ['$totalCC', 0] } },
-          totalProfit: { $sum: { $ifNull: ['$profit', 0] } }
+          // Compute profit on-the-fly so stale stored values don't affect results
+          totalProfit: {
+            $sum: {
+              $subtract: [
+                { $subtract: [{ $ifNull: ['$pBalanceINR', 0] }, { $ifNull: ['$amazonTotalINR', 0] }] },
+                { $ifNull: ['$totalCC', 0] }
+              ]
+            }
+          }
         }
       },
       {
