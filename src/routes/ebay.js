@@ -3215,15 +3215,6 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
                   // If refund handling returned data, merge it
                   if (refundData) {
                     orderData = { ...orderData, ...refundData };
-
-                    // Also calculate and add refund breakdown for partially refunded orders
-                    if (ebayOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                      const refundBreakdown = calculateRefundBreakdown(ebayOrder);
-                      orderData.refundItemAmount = refundBreakdown.refundItemAmount;
-                      orderData.refundTaxAmount = refundBreakdown.refundTaxAmount;
-                      orderData.refundTotalToBuyer = refundBreakdown.refundTotalToBuyer;
-                      orderData.ebayPaidTaxRefund = refundBreakdown.ebayPaidTaxRefund;
-                    }
                   }
 
                   Object.assign(existingOrder, orderData);
@@ -3309,15 +3300,6 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
                   // If refund handling returned data, merge it with orderData
                   if (refundData) {
                     orderData = { ...orderData, ...refundData };
-
-                    // Also calculate and add refund breakdown for partially refunded orders
-                    if (ebayOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                      const refundBreakdown = calculateRefundBreakdown(ebayOrder);
-                      orderData.refundItemAmount = refundBreakdown.refundItemAmount;
-                      orderData.refundTaxAmount = refundBreakdown.refundTaxAmount;
-                      orderData.refundTotalToBuyer = refundBreakdown.refundTotalToBuyer;
-                      orderData.ebayPaidTaxRefund = refundBreakdown.ebayPaidTaxRefund;
-                    }
                   }
 
                   // Define fields that should trigger notifications
