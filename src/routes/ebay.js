@@ -2229,7 +2229,7 @@ router.get('/backfill-ad-fees/count', requireAuth, requireRole('fulfillmentadmin
   }
 });
 
-// Update order earnings for partially refunded orders
+// Update order earnings (user-entered from Fulfillment Dashboard)
 router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -2244,20 +2244,22 @@ router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfil
       return res.status(404).json({ error: 'Order not found' });
     }
 
-    // Update order earnings
+    // Update order earnings with the user-provided value
     order.orderEarnings = parseFloat(orderEarnings);
 
-    // Recalculate financial fields (TDS, TID, NET, P.Balance INR)
+    // Recalculate all downstream financial fields (TDS, TID, NET, P.Balance INR, Profit)
+    // Pass the full order object so profit uses correct amazonTotalINR and totalCC from DB
     const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
       order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-    const financials = await calculateFinancials({ orderEarnings: order.orderEarnings }, marketplace);
+    const financials = await calculateFinancials(order, marketplace);
 
-    // Apply financial calculations
+    // Apply all recalculated fields
     order.tds = financials.tds;
     order.tid = financials.tid;
     order.net = financials.net;
     order.pBalanceINR = financials.pBalanceINR;
     order.ebayExchangeRate = financials.ebayExchangeRate;
+    order.profit = financials.profit;
 
     await order.save();
 
@@ -2269,7 +2271,8 @@ router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfil
       tid: order.tid,
       net: order.net,
       pBalanceINR: order.pBalanceINR,
-      ebayExchangeRate: order.ebayExchangeRate
+      ebayExchangeRate: order.ebayExchangeRate,
+      profit: order.profit
     });
   } catch (err) {
     console.error('Error updating order earnings:', err);
@@ -4558,25 +4561,9 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
     orderData.conversionRate = parseFloat(conversionRate.toFixed(5)); // Store rate with 5 decimal precision
   }
 
-  // Auto-calculate orderEarnings for normal (non-refunded) orders
-  // For PAID orders, calculate: paymentSummary.totalDueSeller.value - adFeeGeneral
-  if (orderData.orderPaymentStatus === 'PAID') {
-    const totalDueSeller = parseFloat(ebayOrder.paymentSummary?.totalDueSeller?.value || 0);
-    const adFee = parseFloat(orderData.adFeeGeneralUSD || orderData.adFee || 0);
-
-    // Order earnings = totalDueSeller (already in USD) - adFeeGeneral
-    orderData.orderEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
-
-    // Calculate financial fields (TDS, TID, NET, P.Balance INR)
-    const marketplace = purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-      purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-    const financials = await calculateFinancials({ orderEarnings: orderData.orderEarnings }, marketplace);
-    Object.assign(orderData, financials);
-
-    // Calculate Amazon-side financial fields
-    const amazonFinancials = await calculateAmazonFinancials(orderData);
-    Object.assign(orderData, amazonFinancials);
-  }
+  // NOTE: orderEarnings is NOT auto-calculated. It must be entered manually by the user
+  // from the Fulfillment Dashboard. The only exception is FULLY_REFUNDED orders which
+  // are handled by handleOrderPaymentStatusChange (sets orderEarnings to 0).
 
   return orderData;
 }
