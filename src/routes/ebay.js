@@ -382,6 +382,64 @@ const EBAY_OAUTH_SCOPES = [
 imageCache.startAutoCleanup();
 
 // ============================================
+// HELPER: Pacific Time Day Bounds (DST-accurate)
+// ============================================
+/**
+ * Returns the exact UTC start/end for a calendar date in America/Los_Angeles.
+ * Uses Node's built-in Intl API instead of an approximated month/day DST check,
+ * which correctly handles transition days like March 8 (DST starts at 2 AM, not midnight).
+ *
+ * Example for March 8 2026 (DST transition day):
+ *   Midnight PST  = 08:00 UTC  (correct start - first 2 hrs are still PST)
+ *   23:59:59 PDT  = 06:59:59 UTC next day (correct end - rest of day is PDT)
+ *
+ * @param {string} dateStr - 'YYYY-MM-DD'
+ * @returns {{ start: Date, end: Date }}
+ */
+function getPTDayBoundsUTC(dateStr) {
+  function getPTHour(d) {
+    return parseInt(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Los_Angeles',
+        hour: 'numeric',
+        hour12: false,
+        hourCycle: 'h23'
+      }).format(d),
+      10
+    );
+  }
+  function getPTDateStr(d) {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(d);
+  }
+
+  // Find which UTC hour (7 or 8) is midnight in PT for this date
+  // PST = UTC-8 → midnight = T08:00Z; PDT = UTC-7 → midnight = T07:00Z
+  function findMidnightUTC(ds) {
+    const pst = new Date(`${ds}T08:00:00.000Z`);
+    if (getPTDateStr(pst) === ds && getPTHour(pst) === 0) return pst;
+    const pdt = new Date(`${ds}T07:00:00.000Z`);
+    if (getPTDateStr(pdt) === ds && getPTHour(pdt) === 0) return pdt;
+    return pst; // fallback to PST
+  }
+
+  const start = findMidnightUTC(dateStr);
+
+  // End = 1ms before midnight of the next day in PT
+  const tmp = new Date(`${dateStr}T12:00:00.000Z`);
+  tmp.setUTCDate(tmp.getUTCDate() + 1);
+  const nextDateStr = tmp.toISOString().split('T')[0];
+  const nextStart = findMidnightUTC(nextDateStr);
+  const end = new Date(nextStart.getTime() - 1); // 23:59:59.999 PT
+
+  return { start, end };
+}
+
+// ============================================
 // HELPER: Recalculate USD Fields
 // ============================================
 function recalculateUSDFields(order) {
@@ -498,24 +556,9 @@ async function calculateFinancials(order, marketplace = 'EBAY') {
 async function calculateAmazonFinancials(order) {
   const updates = {};
 
-  // For US orders, if USD fields are missing, fall back to base currency fields
-  const isUSOrder = order.purchaseMarketplaceId === 'EBAY_US' || order.conversionRate === 1;
-  let beforeTaxUSD = parseFloat(order.beforeTaxUSD);
-  let estimatedTaxUSD = parseFloat(order.estimatedTaxUSD);
-
-  if (isUSOrder) {
-    if (!beforeTaxUSD && order.beforeTax !== undefined) {
-      beforeTaxUSD = parseFloat(order.beforeTax) || 0;
-      updates.beforeTaxUSD = beforeTaxUSD; // Update the missing field
-    }
-    if (!estimatedTaxUSD && order.estimatedTax !== undefined) {
-      estimatedTaxUSD = parseFloat(order.estimatedTax) || 0;
-      updates.estimatedTaxUSD = estimatedTaxUSD; // Update the missing field
-    }
-  }
-
-  const beforeTax = beforeTaxUSD || 0;
-  const estimatedTax = estimatedTaxUSD || 0;
+  // Always use raw beforeTax / estimatedTax fields directly
+  const beforeTax = parseFloat(order.beforeTax) || 0;
+  const estimatedTax = parseFloat(order.estimatedTax) || 0;
 
   // Amazon Total = Before Tax + Estimated Tax
   updates.amazonTotal = parseFloat((beforeTax + estimatedTax).toFixed(2));
@@ -1672,46 +1715,18 @@ router.get('/stored-orders', async (req, res) => {
       }
     }
 
-    // Timezone-Aware Date Range Logic (Pacific Time)
-    // Note: Pacific Time observes DST, so it's UTC-8 (PST) or UTC-7 (PDT)
-    // In March 2026, DST starts March 8, so after that date it's PDT (UTC-7)
+    // Timezone-Aware Date Range Logic (Pacific Time - exact DST handling via Intl)
     if (startDate || endDate) {
       query.dateSold = {};
 
       if (startDate) {
-        // Midnight PT on start date
-        // Parse the date and determine if it falls in DST period
-        const refDate = new Date(startDate + 'T12:00:00Z'); // noon UTC as reference
-        const year = refDate.getUTCFullYear();
-
-        // DST in US: Second Sunday in March to First Sunday in November
-        // For simplification, check if month is March-November
-        const month = refDate.getUTCMonth(); // 0-indexed: 0=Jan, 2=Mar, 10=Nov
-        const isDST = month >= 2 && month <= 10; // March(2) through November(10)
-
-        // But need more precision for March and November
-        // For now, use simple logic: if March and day >= 8, use PDT
-        const day = refDate.getUTCDate();
-        const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-
-        // Midnight PT = 07:00 UTC (PDT) or 08:00 UTC (PST)
-        const startUTC = new Date(startDate + 'T00:00:00Z');
-        startUTC.setUTCHours(usePDT ? 7 : 8, 0, 0, 0);
-        query.dateSold.$gte = startUTC;
+        const { start } = getPTDayBoundsUTC(startDate);
+        query.dateSold.$gte = start;
       }
 
       if (endDate) {
-        // 23:59:59.999 PT on end date
-        const refDate = new Date(endDate + 'T12:00:00Z');
-        const month = refDate.getUTCMonth();
-        const day = refDate.getUTCDate();
-        const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-
-        // End of day PT: 06:59:59.999 UTC next day (PDT) or 07:59:59.999 UTC next day (PST)
-        const endUTC = new Date(endDate + 'T00:00:00Z');
-        endUTC.setUTCDate(endUTC.getUTCDate() + 1);
-        endUTC.setUTCHours(usePDT ? 6 : 7, 59, 59, 999);
-        query.dateSold.$lte = endUTC;
+        const { end } = getPTDayBoundsUTC(endDate);
+        query.dateSold.$lte = end;
       }
     }
 
@@ -1852,7 +1867,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 
 // NEW ENDPOINT: All Orders with USD conversion
 router.get('/all-orders-usd', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue } = req.query;
 
   try {
     let query = {};
@@ -1889,36 +1904,34 @@ router.get('/all-orders-usd', async (req, res) => {
       query['buyer.buyerRegistrationAddress.fullName'] = { $regex: searchBuyerName, $options: 'i' };
     }
 
-    // Timezone-Aware Date Range Logic (Pacific Time - handles DST)
+    // Timezone-Aware Date Range Logic (Pacific Time - exact DST handling via Intl)
     if (startDate || endDate) {
       query.dateSold = {};
 
       if (startDate) {
-        const refDate = new Date(startDate + 'T12:00:00Z');
-        const month = refDate.getUTCMonth();
-        const day = refDate.getUTCDate();
-        const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-
-        const startUTC = new Date(startDate + 'T00:00:00Z');
-        startUTC.setUTCHours(usePDT ? 7 : 8, 0, 0, 0);
-        query.dateSold.$gte = startUTC;
+        const { start } = getPTDayBoundsUTC(startDate);
+        query.dateSold.$gte = start;
       }
 
       if (endDate) {
-        const refDate = new Date(endDate + 'T12:00:00Z');
-        const month = refDate.getUTCMonth();
-        const day = refDate.getUTCDate();
-        const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-
-        const endUTC = new Date(endDate + 'T00:00:00Z');
-        endUTC.setUTCDate(endUTC.getUTCDate() + 1);
-        endUTC.setUTCHours(usePDT ? 6 : 7, 59, 59, 999);
-        query.dateSold.$lte = endUTC;
+        const { end } = getPTDayBoundsUTC(endDate);
+        query.dateSold.$lte = end;
       }
     }
 
     if (searchMarketplace && searchMarketplace !== '') {
       query.purchaseMarketplaceId = searchMarketplace === 'EBAY_ENCA' ? 'EBAY_CA' : searchMarketplace;
+    }
+
+    // Exclude Low Value Orders (less than $3)
+    if (excludeLowValue === 'true') {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { subtotalUSD: { $gte: 3 } },
+          { subtotal: { $gte: 3 } }
+        ]
+      });
     }
 
     // Calculate pagination
@@ -2168,13 +2181,11 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
     // Recalculate earnings if not FULLY_REFUNDED or PARTIALLY_REFUNDED
     const paymentStatus = order.paymentSummary?.payments?.[0]?.paymentStatus;
     if (paymentStatus !== 'FULLY_REFUNDED' && paymentStatus !== 'PARTIALLY_REFUNDED') {
-      // Recalculate earnings: Subtotal + Shipping - Transaction Fees - Ad Fees
-      const subtotal = parseFloat(order.subtotalUSD) || 0;
-      const shipping = parseFloat(order.shippingUSD) || 0;
-      const transactionFees = parseFloat(order.transactionFeesUSD) || 0;
+      // Recalculate earnings: totalDueSeller.value - adFeeGeneral
+      const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
       const adFee = parseFloat(adFeeGeneral) || 0;
 
-      order.orderEarnings = parseFloat((subtotal + shipping - transactionFees - adFee).toFixed(2));
+      order.orderEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
 
       // Recalculate financial fields based on new earnings
       const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -2199,14 +2210,17 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
 
 // Get count of orders needing ad fee backfill
 router.get('/backfill-ad-fees/count', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
-  const { sellerId, sinceDate } = req.query;
+  const { sellerId, sinceDate, allSellers } = req.query;
 
-  if (!sellerId) {
-    return res.status(400).json({ error: 'sellerId is required' });
+  if (!sellerId && allSellers !== 'true') {
+    return res.status(400).json({ error: 'sellerId or allSellers=true is required' });
   }
 
   try {
-    let query = { seller: sellerId };
+    let query = {};
+    if (sellerId) {
+      query.seller = sellerId;
+    }
 
     if (sinceDate) {
       query.creationDate = { $gte: new Date(sinceDate) };
@@ -2235,7 +2249,7 @@ router.get('/backfill-ad-fees/count', requireAuth, requireRole('fulfillmentadmin
   }
 });
 
-// Update order earnings for partially refunded orders
+// Update order earnings (user-entered from Fulfillment Dashboard)
 router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -2250,20 +2264,22 @@ router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfil
       return res.status(404).json({ error: 'Order not found' });
     }
 
-    // Update order earnings
+    // Update order earnings with the user-provided value
     order.orderEarnings = parseFloat(orderEarnings);
 
-    // Recalculate financial fields (TDS, TID, NET, P.Balance INR)
+    // Recalculate all downstream financial fields (TDS, TID, NET, P.Balance INR, Profit)
+    // Pass the full order object so profit uses correct amazonTotalINR and totalCC from DB
     const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
       order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-    const financials = await calculateFinancials({ orderEarnings: order.orderEarnings }, marketplace);
+    const financials = await calculateFinancials(order, marketplace);
 
-    // Apply financial calculations
+    // Apply all recalculated fields
     order.tds = financials.tds;
     order.tid = financials.tid;
     order.net = financials.net;
     order.pBalanceINR = financials.pBalanceINR;
     order.ebayExchangeRate = financials.ebayExchangeRate;
+    order.profit = financials.profit;
 
     await order.save();
 
@@ -2275,7 +2291,8 @@ router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfil
       tid: order.tid,
       net: order.net,
       pBalanceINR: order.pBalanceINR,
-      ebayExchangeRate: order.ebayExchangeRate
+      ebayExchangeRate: order.ebayExchangeRate,
+      profit: order.profit
     });
   } catch (err) {
     console.error('Error updating order earnings:', err);
@@ -2327,122 +2344,264 @@ router.post('/orders/:orderId/amazon-refund-received', requireAuth, requireRole(
 });
 
 // Backfill ad fees from eBay Finances API for orders since a given date
+// Supports single seller (sellerId) or all sellers (allSellers: true)
 router.post('/backfill-ad-fees', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
-  const { sellerId, sinceDate, skipAlreadySet = true } = req.body;
+  const { sellerId, sinceDate, skipAlreadySet = true, allSellers } = req.body;
 
-  if (!sellerId) {
-    return res.status(400).json({ error: 'sellerId is required' });
+  if (!sellerId && !allSellers) {
+    return res.status(400).json({ error: 'sellerId or allSellers:true is required' });
   }
 
   try {
-    const seller = await Seller.findById(sellerId);
-    if (!seller) {
-      return res.status(404).json({ error: 'Seller not found' });
-    }
-
-    if (!seller.ebayTokens || !seller.ebayTokens.access_token) {
-      return res.status(400).json({ error: 'Seller not connected to eBay' });
-    }
-
-    // Ensure we have a valid token
-    const accessToken = await ensureValidToken(seller);
-
-    // Build query for orders
-    let query = { seller: sellerId };
-    const effectiveSinceDate = sinceDate ? new Date(sinceDate) : new Date('2025-11-01');
-    query.creationDate = { $gte: effectiveSinceDate };
-
-    // Optionally skip orders that already have adFeeGeneral set
-    if (skipAlreadySet) {
-      query.$or = [
-        { adFeeGeneral: { $exists: false } },
-        { adFeeGeneral: null },
-        { adFeeGeneral: 0 }
-      ];
-    }
-
-    // Get ALL orders to process (no limit)
-    const orders = await Order.find(query).sort({ creationDate: -1 });
-
-    console.log(`[Backfill Ad Fees] Found ${orders.length} orders to process for seller ${seller.username || seller._id}`);
-
-    if (orders.length === 0) {
-      return res.json({
-        message: 'No orders found to backfill',
-        results: { total: 0, success: 0, failed: 0, skipped: 0, errors: [] }
+    // Resolve sellers to process
+    let sellersToProcess;
+    if (allSellers) {
+      sellersToProcess = await Seller.find({
+        'ebayTokens.access_token': { $exists: true, $ne: null }
       });
+      console.log(`[Backfill Ad Fees] All-sellers mode: ${sellersToProcess.length} sellers with eBay tokens`);
+    } else {
+      const seller = await Seller.findById(sellerId);
+      if (!seller) {
+        return res.status(404).json({ error: 'Seller not found' });
+      }
+      if (!seller.ebayTokens || !seller.ebayTokens.access_token) {
+        return res.status(400).json({ error: 'Seller not connected to eBay' });
+      }
+      sellersToProcess = [seller];
     }
 
-    // STEP 1: Fetch ALL ad fees from eBay in one batch (much more efficient!)
-    console.log(`[Backfill Ad Fees] Fetching all ad fees since ${effectiveSinceDate.toISOString()}...`);
-    const adFeeResult = await fetchAllAdFees(accessToken, effectiveSinceDate);
+    const effectiveSinceDate = sinceDate ? new Date(sinceDate) : new Date('2025-11-01');
+    const totals = { total: 0, success: 0, failed: 0, skipped: 0, sellerErrors: [], errors: [] };
 
-    if (!adFeeResult.success) {
-      return res.status(500).json({ error: `Failed to fetch ad fees: ${adFeeResult.error}` });
-    }
-
-    const adFeeMap = adFeeResult.adFeeMap;
-    console.log(`[Backfill Ad Fees] Found ${adFeeMap.size} ad fee transactions from eBay`);
-
-    const results = {
-      total: orders.length,
-      success: 0,
-      failed: 0,
-      skipped: 0,
-      errors: []
-    };
-
-    // STEP 2: Match orders to ad fees and update
-    for (let i = 0; i < orders.length; i++) {
-      const order = orders[i];
+    for (const seller of sellersToProcess) {
       try {
-        const adFee = adFeeMap.get(order.orderId);
+        // Ensure we have a valid token
+        const accessToken = await ensureValidToken(seller);
 
-        if (adFee && adFee > 0) {
-          // Update ad fee and recalculate earnings if it's a PAID order
-          const updates = { adFeeGeneral: adFee };
+        // Build query for orders
+        let query = { seller: seller._id };
+        query.creationDate = { $gte: effectiveSinceDate };
 
-          if (order.orderPaymentStatus === 'PAID') {
-            // Recalculate earnings with new ad fee
-            const subtotal = parseFloat(order.subtotalUSD || 0);
-            const discount = parseFloat(order.discountUSD || 0);
-            const salesTax = parseFloat(order.salesTaxUSD || 0);
-            const transactionFees = parseFloat(order.transactionFeesUSD || 0);
-            const shipping = parseFloat(order.shippingUSD || 0);
+        // Optionally skip orders that already have adFeeGeneral set
+        if (skipAlreadySet) {
+          query.$or = [
+            { adFeeGeneral: { $exists: false } },
+            { adFeeGeneral: null },
+            { adFeeGeneral: 0 }
+          ];
+        }
 
-            const newEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
-            updates.orderEarnings = newEarnings;
+        // Get ALL orders to process (no limit)
+        const orders = await Order.find(query).sort({ creationDate: -1 });
 
-            // Recalculate financial fields
-            const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-              order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-            const financials = await calculateFinancials({ orderEarnings: newEarnings }, marketplace);
-            Object.assign(updates, financials);
+        console.log(`[Backfill Ad Fees] Found ${orders.length} orders to process for seller ${seller.username || seller._id}`);
+
+        if (orders.length === 0) {
+          continue;
+        }
+
+        // STEP 1: Fetch ALL ad fees from eBay in one batch
+        console.log(`[Backfill Ad Fees] Fetching all ad fees since ${effectiveSinceDate.toISOString()} for ${seller.username || seller._id}...`);
+        const adFeeResult = await fetchAllAdFees(accessToken, effectiveSinceDate);
+
+        if (!adFeeResult.success) {
+          totals.sellerErrors.push({ seller: seller.username || seller._id.toString(), error: adFeeResult.error });
+          console.error(`[Backfill Ad Fees] Failed to fetch ad fees for ${seller.username || seller._id}: ${adFeeResult.error}`);
+          continue;
+        }
+
+        const adFeeMap = adFeeResult.adFeeMap;
+        console.log(`[Backfill Ad Fees] Found ${adFeeMap.size} ad fee transactions from eBay for ${seller.username || seller._id}`);
+
+        totals.total += orders.length;
+
+        // STEP 2: Match orders to ad fees and update
+        for (let i = 0; i < orders.length; i++) {
+          const order = orders[i];
+          try {
+            const adFee = adFeeMap.get(order.orderId);
+
+            if (adFee && adFee > 0) {
+              // Update ad fee and recalculate earnings if it's a PAID order
+              const updates = { adFeeGeneral: adFee };
+
+              if (order.orderPaymentStatus === 'PAID') {
+                // Recalculate earnings: totalDueSeller.value - adFeeGeneral
+                const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
+                const newEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
+                updates.orderEarnings = newEarnings;
+
+                // Recalculate financial fields — pass full order so profit uses correct amazonTotalINR/totalCC
+                const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                  order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                const financials = await calculateFinancials({ ...order.toObject(), orderEarnings: newEarnings }, marketplace);
+                Object.assign(updates, financials);
+              }
+
+              await Order.findByIdAndUpdate(order._id, updates);
+              totals.success++;
+              console.log(`[Backfill ${i + 1}/${orders.length}] Order ${order.orderId}: Ad Fee = $${adFee}`);
+            } else {
+              totals.skipped++;
+            }
+          } catch (orderErr) {
+            totals.failed++;
+            if (totals.errors.length < 20) {
+              totals.errors.push({ orderId: order.orderId, error: orderErr.message });
+            }
           }
-
-          await Order.findByIdAndUpdate(order._id, updates);
-          results.success++;
-          console.log(`[Backfill ${i + 1}/${orders.length}] Order ${order.orderId}: Ad Fee = $${adFee}`);
-        } else {
-          results.skipped++;
-          console.log(`[Backfill ${i + 1}/${orders.length}] Order ${order.orderId}: No ad fee found`);
         }
-      } catch (orderErr) {
-        results.failed++;
-        if (results.errors.length < 10) {
-          results.errors.push({ orderId: order.orderId, error: orderErr.message });
-        }
-        console.log(`[Backfill ${i + 1}/${orders.length}] Order ${order.orderId}: Exception - ${orderErr.message}`);
+      } catch (sellerErr) {
+        totals.sellerErrors.push({ seller: seller.username || seller._id.toString(), error: sellerErr.message });
+        console.error(`[Backfill Ad Fees] Seller ${seller.username || seller._id} error: ${sellerErr.message}`);
       }
     }
 
     res.json({
-      message: `Backfill complete: ${results.success} updated, ${results.skipped} no ad fee, ${results.failed} failed`,
-      results
+      message: `Backfill complete across ${sellersToProcess.length} seller(s): ${totals.success} updated, ${totals.skipped} no ad fee, ${totals.failed} failed`,
+      results: totals
     });
 
   } catch (err) {
     console.error('[Backfill Ad Fees] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Backfill / recalculate orderEarnings for existing orders using totalDueSeller.value - adFeeGeneral
+// Supports single seller (sellerId) or all sellers (allSellers: true)
+router.post('/backfill-earnings', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  const { sellerId, sinceDate, allSellers } = req.body;
+
+  if (!sellerId && !allSellers) {
+    return res.status(400).json({ error: 'sellerId or allSellers:true is required' });
+  }
+
+  try {
+    // Resolve seller IDs to process
+    let sellerIds;
+    if (allSellers) {
+      const allSellerDocs = await Seller.find({}, '_id').lean();
+      sellerIds = allSellerDocs.map(s => s._id);
+      console.log(`[Backfill Earnings] All-sellers mode: ${sellerIds.length} sellers`);
+    } else {
+      sellerIds = [sellerId];
+    }
+
+    const totals = { total: 0, success: 0, failed: 0, errors: [] };
+
+    for (const sid of sellerIds) {
+      let query = { seller: sid };
+      if (sinceDate) {
+        query.creationDate = { $gte: new Date(sinceDate) };
+      }
+      // Skip PARTIALLY_REFUNDED — user enters those manually
+      query.orderPaymentStatus = { $nin: ['PARTIALLY_REFUNDED'] };
+
+      const orders = await Order.find(query).sort({ creationDate: -1 });
+      console.log(`[Backfill Earnings] Seller ${sid}: ${orders.length} orders`);
+      totals.total += orders.length;
+
+      for (let i = 0; i < orders.length; i++) {
+        const order = orders[i];
+        try {
+          if (order.orderPaymentStatus === 'FULLY_REFUNDED') {
+            const financials = await calculateFinancials({ ...order.toObject(), orderEarnings: 0 });
+            await Order.findByIdAndUpdate(order._id, { orderEarnings: 0, ...financials });
+            totals.success++;
+          } else {
+            const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
+            const adFee = parseFloat(order.adFeeGeneral || 0);
+            const newEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
+
+            const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+              order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+            const financials = await calculateFinancials({ ...order.toObject(), orderEarnings: newEarnings }, marketplace);
+
+            await Order.findByIdAndUpdate(order._id, { orderEarnings: newEarnings, ...financials });
+            totals.success++;
+
+            if ((i + 1) % 50 === 0) {
+              console.log(`[Backfill Earnings] Seller ${sid} progress: ${i + 1}/${orders.length}`);
+            }
+          }
+        } catch (orderErr) {
+          totals.failed++;
+          if (totals.errors.length < 20) {
+            totals.errors.push({ orderId: order.orderId, error: orderErr.message });
+          }
+        }
+      }
+    }
+
+    res.json({
+      message: `Earnings recalculated across ${sellerIds.length} seller(s): ${totals.success} updated, ${totals.failed} failed`,
+      results: totals
+    });
+
+  } catch (err) {
+    console.error('[Backfill Earnings] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Backfill Amazon financials (amazonTotal, amazonTotalINR, marketplaceFee, igst, totalCC, profit) from raw beforeTax / estimatedTax
+router.post('/backfill-amazon-financials', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+  const { sellerId, sinceDate, allSellers } = req.body;
+
+  if (!sellerId && !allSellers) {
+    return res.status(400).json({ error: 'sellerId or allSellers:true is required' });
+  }
+
+  try {
+    let sellerIds;
+    if (allSellers) {
+      const allSellerDocs = await Seller.find({}, '_id').lean();
+      sellerIds = allSellerDocs.map(s => s._id);
+      console.log(`[Backfill Amazon] All-sellers mode: ${sellerIds.length} sellers`);
+    } else {
+      sellerIds = [sellerId];
+    }
+
+    const totals = { total: 0, success: 0, failed: 0, errors: [] };
+
+    for (const sid of sellerIds) {
+      const query = { seller: sid };
+      if (sinceDate) {
+        query.creationDate = { $gte: new Date(sinceDate) };
+      }
+
+      const orders = await Order.find(query).sort({ creationDate: -1 });
+      console.log(`[Backfill Amazon] Seller ${sid}: ${orders.length} orders`);
+      totals.total += orders.length;
+
+      for (let i = 0; i < orders.length; i++) {
+        const order = orders[i];
+        try {
+          const amazonFinancials = await calculateAmazonFinancials(order);
+          await Order.findByIdAndUpdate(order._id, amazonFinancials);
+          totals.success++;
+
+          if ((i + 1) % 50 === 0) {
+            console.log(`[Backfill Amazon] Seller ${sid} progress: ${i + 1}/${orders.length}`);
+          }
+        } catch (orderErr) {
+          totals.failed++;
+          if (totals.errors.length < 20) {
+            totals.errors.push({ orderId: order.orderId, error: orderErr.message });
+          }
+        }
+      }
+    }
+
+    res.json({
+      message: `Amazon financials recalculated across ${sellerIds.length} seller(s): ${totals.success} updated, ${totals.failed} failed`,
+      results: totals
+    });
+
+  } catch (err) {
+    console.error('[Backfill Amazon] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -3056,15 +3215,6 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
                   // If refund handling returned data, merge it
                   if (refundData) {
                     orderData = { ...orderData, ...refundData };
-
-                    // Also calculate and add refund breakdown for partially refunded orders
-                    if (ebayOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                      const refundBreakdown = calculateRefundBreakdown(ebayOrder);
-                      orderData.refundItemAmount = refundBreakdown.refundItemAmount;
-                      orderData.refundTaxAmount = refundBreakdown.refundTaxAmount;
-                      orderData.refundTotalToBuyer = refundBreakdown.refundTotalToBuyer;
-                      orderData.ebayPaidTaxRefund = refundBreakdown.ebayPaidTaxRefund;
-                    }
                   }
 
                   Object.assign(existingOrder, orderData);
@@ -3150,15 +3300,6 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
                   // If refund handling returned data, merge it with orderData
                   if (refundData) {
                     orderData = { ...orderData, ...refundData };
-
-                    // Also calculate and add refund breakdown for partially refunded orders
-                    if (ebayOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                      const refundBreakdown = calculateRefundBreakdown(ebayOrder);
-                      orderData.refundItemAmount = refundBreakdown.refundItemAmount;
-                      orderData.refundTaxAmount = refundBreakdown.refundTaxAmount;
-                      orderData.refundTotalToBuyer = refundBreakdown.refundTotalToBuyer;
-                      orderData.ebayPaidTaxRefund = refundBreakdown.ebayPaidTaxRefund;
-                    }
                   }
 
                   // Define fields that should trigger notifications
@@ -3813,22 +3954,20 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
 
                       // Recalculate orderEarnings if this is a PAID order
                       if (existingOrder.orderPaymentStatus === 'PAID') {
-                        const subtotal = parseFloat(existingOrder.subtotalUSD || 0);
-                        const discount = parseFloat(existingOrder.discountUSD || 0);
-                        const salesTax = parseFloat(existingOrder.salesTaxUSD || 0);
-                        const transactionFees = parseFloat(existingOrder.transactionFeesUSD || 0);
-                        const adFee = parseFloat(existingOrder.adFeeGeneralUSD || 0);
-                        const shipping = parseFloat(existingOrder.shippingUSD || 0);
-                        existingOrder.orderEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
+                        const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
+                        const adFeeVal = parseFloat(existingOrder.adFeeGeneral || 0);
+                        existingOrder.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
 
-                        // Recalculate financial fields (TDS, TID, NET, P.Balance INR)
+                        // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
                         const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                           existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                        const financials = await calculateFinancials({ orderEarnings: existingOrder.orderEarnings }, marketplace);
+                        const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
                         existingOrder.tds = financials.tds;
                         existingOrder.tid = financials.tid;
                         existingOrder.net = financials.net;
                         existingOrder.pBalanceINR = financials.pBalanceINR;
+                        existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                        existingOrder.profit = financials.profit;
 
                         console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
                       } else {
@@ -4433,28 +4572,18 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
     orderData.conversionRate = parseFloat(conversionRate.toFixed(5)); // Store rate with 5 decimal precision
   }
 
-  // Auto-calculate orderEarnings for normal (non-refunded) orders
-  // For PAID orders, calculate: subtotal + discount - salesTax - transactionFees - adFee - shipping
+  // Auto-calculate orderEarnings for PAID orders: totalDueSeller.value - adFeeGeneral
+  // If adFeeGeneral is not yet available, it defaults to 0
   if (orderData.orderPaymentStatus === 'PAID') {
-    const subtotal = parseFloat(orderData.subtotalUSD || 0);
-    const discount = parseFloat(orderData.discountUSD || 0); // Already negative
-    const salesTax = parseFloat(orderData.salesTaxUSD || 0);
-    const transactionFees = parseFloat(orderData.transactionFeesUSD || 0);
-    const adFee = parseFloat(orderData.adFeeGeneralUSD || orderData.adFee || 0);
-    const shipping = parseFloat(orderData.shippingUSD || 0);
+    const totalDueSeller = parseFloat(ebayOrder.paymentSummary?.totalDueSeller?.value || 0);
+    const adFee = parseFloat(orderData.adFeeGeneral || 0);
+    orderData.orderEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
 
-    // Order earnings = subtotal + discount - salesTax - transactionFees - adFee - shipping
-    orderData.orderEarnings = parseFloat((subtotal + discount - salesTax - transactionFees - adFee - shipping).toFixed(2));
-
-    // Calculate financial fields (TDS, TID, NET, P.Balance INR)
+    // Calculate downstream financial fields
     const marketplace = purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
       purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-    const financials = await calculateFinancials({ orderEarnings: orderData.orderEarnings }, marketplace);
+    const financials = await calculateFinancials({ ...orderData }, marketplace);
     Object.assign(orderData, financials);
-
-    // Calculate Amazon-side financial fields
-    const amazonFinancials = await calculateAmazonFinancials(orderData);
-    Object.assign(orderData, amazonFinancials);
   }
 
   return orderData;
@@ -8936,26 +9065,13 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
       ]
     };
 
-    // Timezone-Aware Date Range Logic (Pacific Time - handles DST)
+    // Timezone-Aware Date Range Logic (Pacific Time - exact DST handling via Intl)
     matchQuery.dateSold = {};
 
-    const startRefDate = new Date(startDate + 'T12:00:00Z');
-    const startMonth = startRefDate.getUTCMonth();
-    const startDay = startRefDate.getUTCDate();
-    const startUsePDT = (startMonth > 2 && startMonth < 10) || (startMonth === 2 && startDay >= 8) || (startMonth === 10 && startDay < 2);
-
-    const start = new Date(startDate + 'T00:00:00Z');
-    start.setUTCHours(startUsePDT ? 7 : 8, 0, 0, 0);
+    const { start } = getPTDayBoundsUTC(startDate);
     matchQuery.dateSold.$gte = start;
 
-    const endRefDate = new Date(endDate + 'T12:00:00Z');
-    const endMonth = endRefDate.getUTCMonth();
-    const endDay = endRefDate.getUTCDate();
-    const endUsePDT = (endMonth > 2 && endMonth < 10) || (endMonth === 2 && endDay >= 8) || (endMonth === 10 && endDay < 2);
-
-    const end = new Date(endDate + 'T00:00:00Z');
-    end.setUTCDate(end.getUTCDate() + 1);
-    end.setUTCHours(endUsePDT ? 6 : 7, 59, 59, 999);
+    const { end } = getPTDayBoundsUTC(endDate);
     matchQuery.dateSold.$lte = end;
 
     if (sellerId) {
@@ -8967,6 +9083,15 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
       const marketplaceId = marketplace === 'EBAY_ENCA' ? 'EBAY_CA' : marketplace;
       matchQuery.purchaseMarketplaceId = marketplaceId;
     }
+
+    // Always exclude low-value orders (subtotal < $3) from analytics
+    matchQuery.$and = matchQuery.$and || [];
+    matchQuery.$and.push({
+      $or: [
+        { subtotal: { $gte: 3 } },
+        { subtotalUSD: { $gte: 3 } }
+      ]
+    });
 
     // Determine grouping format with PST timezone
     let dateGroupFormat;
@@ -8987,17 +9112,25 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
         $group: {
           _id: dateGroupFormat,
           totalOrders: { $sum: 1 },
-          totalSubtotal: { $sum: { $ifNull: ['$subtotalUSD', 0] } },
-          totalShipping: { $sum: { $ifNull: ['$shippingUSD', 0] } },
-          totalSalesTax: { $sum: { $ifNull: ['$salesTaxUSD', 0] } },
-          totalDiscount: { $sum: { $ifNull: ['$discountUSD', 0] } },
-          totalTransactionFees: { $sum: { $ifNull: ['$transactionFeesUSD', 0] } },
+          totalSubtotal: { $sum: { $ifNull: ['$subtotal', 0] } },
+          totalShipping: { $sum: { $ifNull: ['$shipping', 0] } },
+          totalSalesTax: { $sum: { $ifNull: ['$salesTax', 0] } },
+          totalDiscount: { $sum: { $ifNull: ['$discount', 0] } },
+          totalTransactionFees: { $sum: { $ifNull: ['$transactionFees', 0] } },
           totalAdFees: { $sum: { $ifNull: ['$adFeeGeneral', 0] } },
           totalEarnings: { $sum: { $ifNull: ['$orderEarnings', 0] } },
           totalPBalanceINR: { $sum: { $ifNull: ['$pBalanceINR', 0] } },
           totalAmazonCosts: { $sum: { $ifNull: ['$amazonTotalINR', 0] } },
           totalCreditCardFees: { $sum: { $ifNull: ['$totalCC', 0] } },
-          totalProfit: { $sum: { $ifNull: ['$profit', 0] } }
+          // Compute profit on-the-fly so stale stored values don't affect results
+          totalProfit: {
+            $sum: {
+              $subtract: [
+                { $subtract: [{ $ifNull: ['$pBalanceINR', 0] }, { $ifNull: ['$amazonTotalINR', 0] }] },
+                { $ifNull: ['$totalCC', 0] }
+              ]
+            }
+          }
         }
       },
       {
