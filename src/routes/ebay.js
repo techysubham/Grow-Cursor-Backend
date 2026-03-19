@@ -382,6 +382,64 @@ const EBAY_OAUTH_SCOPES = [
 imageCache.startAutoCleanup();
 
 // ============================================
+// HELPER: Pacific Time Day Bounds (DST-accurate)
+// ============================================
+/**
+ * Returns the exact UTC start/end for a calendar date in America/Los_Angeles.
+ * Uses Node's built-in Intl API instead of an approximated month/day DST check,
+ * which correctly handles transition days like March 8 (DST starts at 2 AM, not midnight).
+ *
+ * Example for March 8 2026 (DST transition day):
+ *   Midnight PST  = 08:00 UTC  (correct start - first 2 hrs are still PST)
+ *   23:59:59 PDT  = 06:59:59 UTC next day (correct end - rest of day is PDT)
+ *
+ * @param {string} dateStr - 'YYYY-MM-DD'
+ * @returns {{ start: Date, end: Date }}
+ */
+function getPTDayBoundsUTC(dateStr) {
+  function getPTHour(d) {
+    return parseInt(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Los_Angeles',
+        hour: 'numeric',
+        hour12: false,
+        hourCycle: 'h23'
+      }).format(d),
+      10
+    );
+  }
+  function getPTDateStr(d) {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(d);
+  }
+
+  // Find which UTC hour (7 or 8) is midnight in PT for this date
+  // PST = UTC-8 → midnight = T08:00Z; PDT = UTC-7 → midnight = T07:00Z
+  function findMidnightUTC(ds) {
+    const pst = new Date(`${ds}T08:00:00.000Z`);
+    if (getPTDateStr(pst) === ds && getPTHour(pst) === 0) return pst;
+    const pdt = new Date(`${ds}T07:00:00.000Z`);
+    if (getPTDateStr(pdt) === ds && getPTHour(pdt) === 0) return pdt;
+    return pst; // fallback to PST
+  }
+
+  const start = findMidnightUTC(dateStr);
+
+  // End = 1ms before midnight of the next day in PT
+  const tmp = new Date(`${dateStr}T12:00:00.000Z`);
+  tmp.setUTCDate(tmp.getUTCDate() + 1);
+  const nextDateStr = tmp.toISOString().split('T')[0];
+  const nextStart = findMidnightUTC(nextDateStr);
+  const end = new Date(nextStart.getTime() - 1); // 23:59:59.999 PT
+
+  return { start, end };
+}
+
+// ============================================
 // HELPER: Recalculate USD Fields
 // ============================================
 function recalculateUSDFields(order) {
@@ -1657,46 +1715,18 @@ router.get('/stored-orders', async (req, res) => {
       }
     }
 
-    // Timezone-Aware Date Range Logic (Pacific Time)
-    // Note: Pacific Time observes DST, so it's UTC-8 (PST) or UTC-7 (PDT)
-    // In March 2026, DST starts March 8, so after that date it's PDT (UTC-7)
+    // Timezone-Aware Date Range Logic (Pacific Time - exact DST handling via Intl)
     if (startDate || endDate) {
       query.dateSold = {};
 
       if (startDate) {
-        // Midnight PT on start date
-        // Parse the date and determine if it falls in DST period
-        const refDate = new Date(startDate + 'T12:00:00Z'); // noon UTC as reference
-        const year = refDate.getUTCFullYear();
-
-        // DST in US: Second Sunday in March to First Sunday in November
-        // For simplification, check if month is March-November
-        const month = refDate.getUTCMonth(); // 0-indexed: 0=Jan, 2=Mar, 10=Nov
-        const isDST = month >= 2 && month <= 10; // March(2) through November(10)
-
-        // But need more precision for March and November
-        // For now, use simple logic: if March and day >= 8, use PDT
-        const day = refDate.getUTCDate();
-        const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-
-        // Midnight PT = 07:00 UTC (PDT) or 08:00 UTC (PST)
-        const startUTC = new Date(startDate + 'T00:00:00Z');
-        startUTC.setUTCHours(usePDT ? 7 : 8, 0, 0, 0);
-        query.dateSold.$gte = startUTC;
+        const { start } = getPTDayBoundsUTC(startDate);
+        query.dateSold.$gte = start;
       }
 
       if (endDate) {
-        // 23:59:59.999 PT on end date
-        const refDate = new Date(endDate + 'T12:00:00Z');
-        const month = refDate.getUTCMonth();
-        const day = refDate.getUTCDate();
-        const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-
-        // End of day PT: 06:59:59.999 UTC next day (PDT) or 07:59:59.999 UTC next day (PST)
-        const endUTC = new Date(endDate + 'T00:00:00Z');
-        endUTC.setUTCDate(endUTC.getUTCDate() + 1);
-        endUTC.setUTCHours(usePDT ? 6 : 7, 59, 59, 999);
-        query.dateSold.$lte = endUTC;
+        const { end } = getPTDayBoundsUTC(endDate);
+        query.dateSold.$lte = end;
       }
     }
 
@@ -1874,31 +1904,18 @@ router.get('/all-orders-usd', async (req, res) => {
       query['buyer.buyerRegistrationAddress.fullName'] = { $regex: searchBuyerName, $options: 'i' };
     }
 
-    // Timezone-Aware Date Range Logic (Pacific Time - handles DST)
+    // Timezone-Aware Date Range Logic (Pacific Time - exact DST handling via Intl)
     if (startDate || endDate) {
       query.dateSold = {};
 
       if (startDate) {
-        const refDate = new Date(startDate + 'T12:00:00Z');
-        const month = refDate.getUTCMonth();
-        const day = refDate.getUTCDate();
-        const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-
-        const startUTC = new Date(startDate + 'T00:00:00Z');
-        startUTC.setUTCHours(usePDT ? 7 : 8, 0, 0, 0);
-        query.dateSold.$gte = startUTC;
+        const { start } = getPTDayBoundsUTC(startDate);
+        query.dateSold.$gte = start;
       }
 
       if (endDate) {
-        const refDate = new Date(endDate + 'T12:00:00Z');
-        const month = refDate.getUTCMonth();
-        const day = refDate.getUTCDate();
-        const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
-
-        const endUTC = new Date(endDate + 'T00:00:00Z');
-        endUTC.setUTCDate(endUTC.getUTCDate() + 1);
-        endUTC.setUTCHours(usePDT ? 6 : 7, 59, 59, 999);
-        query.dateSold.$lte = endUTC;
+        const { end } = getPTDayBoundsUTC(endDate);
+        query.dateSold.$lte = end;
       }
     }
 
@@ -9044,26 +9061,13 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
       ]
     };
 
-    // Timezone-Aware Date Range Logic (Pacific Time - handles DST)
+    // Timezone-Aware Date Range Logic (Pacific Time - exact DST handling via Intl)
     matchQuery.dateSold = {};
 
-    const startRefDate = new Date(startDate + 'T12:00:00Z');
-    const startMonth = startRefDate.getUTCMonth();
-    const startDay = startRefDate.getUTCDate();
-    const startUsePDT = (startMonth > 2 && startMonth < 10) || (startMonth === 2 && startDay >= 8) || (startMonth === 10 && startDay < 2);
-
-    const start = new Date(startDate + 'T00:00:00Z');
-    start.setUTCHours(startUsePDT ? 7 : 8, 0, 0, 0);
+    const { start } = getPTDayBoundsUTC(startDate);
     matchQuery.dateSold.$gte = start;
 
-    const endRefDate = new Date(endDate + 'T12:00:00Z');
-    const endMonth = endRefDate.getUTCMonth();
-    const endDay = endRefDate.getUTCDate();
-    const endUsePDT = (endMonth > 2 && endMonth < 10) || (endMonth === 2 && endDay >= 8) || (endMonth === 10 && endDay < 2);
-
-    const end = new Date(endDate + 'T00:00:00Z');
-    end.setUTCDate(end.getUTCDate() + 1);
-    end.setUTCHours(endUsePDT ? 6 : 7, 59, 59, 999);
+    const { end } = getPTDayBoundsUTC(endDate);
     matchQuery.dateSold.$lte = end;
 
     if (sellerId) {
