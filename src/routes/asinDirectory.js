@@ -1,5 +1,6 @@
 import express from 'express';
 import AsinDirectory from '../models/AsinDirectory.js';
+import AsinListProduct from '../models/AsinListProduct.js';
 import { requireAuth } from '../middleware/auth.js';
 import { fetchAmazonData } from '../utils/asinAutofill.js';
 
@@ -31,6 +32,7 @@ router.get('/', requireAuth, async (req, res) => {
     const search = req.query.search || '';
     const sortBy = req.query.sortBy || '-addedAt'; // Default: newest first
     const listProductId = req.query.listProductId || '';
+    const rangeId = req.query.rangeId || '';
 
     const skip = (page - 1) * limit;
 
@@ -43,7 +45,12 @@ router.get('/', requireAuth, async (req, res) => {
       ];
     }
     if (listProductId) {
+      // Specific product selected — exact match (existing behaviour)
       query.listProductId = listProductId;
+    } else if (rangeId) {
+      // Range selected but no product — show all ASINs across every product in this range
+      const productIds = await AsinListProduct.find({ rangeId }).select('_id').lean();
+      query.listProductId = { $in: productIds.map(p => p._id) };
     } else if (req.query.showMoved !== 'true') {
       // Default: hide ASINs already moved to a list
       query.listProductId = null;
