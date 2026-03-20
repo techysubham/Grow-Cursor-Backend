@@ -123,12 +123,15 @@ function buildAffiliateSpendQuery(dateStr, excludeLowValue, extraFilters = []) {
 // ---------------------------------------------------------------------------
 router.get('/daily', async (req, res) => {
     try {
-        const { date, excludeLowValue } = req.query;
+        const { date, excludeLowValue, includeDone } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
-        const { query } = buildAffiliateQueueQuery(date, excludeLowValue, [
-            { sourcingStatus: { $ne: 'Done' } },
-        ]);
+        const extraFilters = [];
+        if (includeDone !== 'true') {
+            extraFilters.push({ sourcingStatus: { $ne: 'Done' } });
+        }
+
+        const { query } = buildAffiliateQueueQuery(date, excludeLowValue, extraFilters);
 
         const orders = await Order.find(query)
             .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
