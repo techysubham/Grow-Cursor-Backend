@@ -50,7 +50,7 @@ router.get('/', requireAuth, async (req, res) => {
 
         const records = await CsvStorage.find(filter)
             .select('-csvData') // Exclude binary data from list response
-            .populate('seller', 'storeName')
+            .populate({ path: 'seller', select: 'storeName user', populate: { path: 'user', select: 'username' } })
             .populate('feedUploadId', 'status uploadSummary taskId')
             .populate('scheduledSellerId', 'storeName')
             .sort({ createdAt: -1 })
@@ -85,7 +85,8 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
             rangeId,
             rangeName,
             productId,
-            productName
+            productName,
+            source
         } = req.body;
 
         if (!sellerId) {
@@ -108,6 +109,7 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
             rangeName: rangeName || '',
             productId: productId || null,
             productName: productName || '',
+            source: source || null,
             createdBy: req.user?._id || null
         });
 
