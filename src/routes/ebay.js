@@ -1653,10 +1653,20 @@ router.get('/stored-orders', async (req, res) => {
     }
 
     if (productName) {
+      const normalizedTokens = String(productName)
+        .trim()
+        .split(/\s+/)
+        .map(token => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .filter(Boolean);
+
+      const productNamePattern = normalizedTokens.length > 0
+        ? normalizedTokens.join('.*')
+        : String(productName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
       const productClause = {
         $or: [
-          { productName: { $regex: productName, $options: 'i' } },
-          { 'lineItems.title': { $regex: productName, $options: 'i' } }
+          { productName: { $regex: productNamePattern, $options: 'i' } },
+          { 'lineItems.title': { $regex: productNamePattern, $options: 'i' } }
         ]
       };
 
