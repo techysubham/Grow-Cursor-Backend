@@ -1061,7 +1061,7 @@ router.post('/', requireAuth, async (req, res) => {
 // ============================================
 router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, startDateTime, stepMinutes, batchFilter, batchId } = req.body;
+    const { templateId, sellerId, startDateTime, stepMinutes, batchFilter, batchId, fromRow, toRow } = req.body;
 
     if (!templateId || !sellerId || !startDateTime || stepMinutes == null) {
       return res.status(400).json({ error: 'templateId, sellerId, startDateTime, and stepMinutes are required' });
@@ -1104,6 +1104,15 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
       return res.json({ updated: 0, firstTime: null, lastTime: null });
     }
 
+    // Optional row range (1-based, inclusive). Defaults to the full list.
+    const from = fromRow && parseInt(fromRow) >= 1 ? parseInt(fromRow) - 1 : 0;
+    const to   = toRow   && parseInt(toRow)   >= 1 ? parseInt(toRow)       : listings.length;
+    const targetListings = listings.slice(from, to);
+
+    if (targetListings.length === 0) {
+      return res.json({ updated: 0, firstTime: null, lastTime: null });
+    }
+
     // Pure arithmetic: add totalMinutes to the base time and return "YYYY-MM-DD HH:MM:SS"
     const pad = n => String(n).padStart(2, '0');
     const daysInMonth = (y, m) => new Date(y, m, 0).getDate(); // m is 1-based
@@ -1133,7 +1142,7 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
       return `${y}-${pad(m)}-${pad(d)} ${pad(hh)}:${pad(mm)}:${pad(baseSec)}`;
     }
 
-    const bulkOps = listings.map((listing, i) => ({
+    const bulkOps = targetListings.map((listing, i) => ({
       updateOne: {
         filter: { _id: listing._id },
         update: { $set: { scheduleTime: addMinutesAndFormat(i * step) } }
@@ -1143,9 +1152,9 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
     await TemplateListing.bulkWrite(bulkOps);
 
     res.json({
-      updated: listings.length,
+      updated: targetListings.length,
       firstTime: addMinutesAndFormat(0),
-      lastTime: addMinutesAndFormat((listings.length - 1) * step)
+      lastTime: addMinutesAndFormat((targetListings.length - 1) * step)
     });
   } catch (error) {
     console.error('[Bulk Apply Schedule] Error:', error.message);
