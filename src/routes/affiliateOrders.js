@@ -41,7 +41,7 @@ function getCarryOverLabel(carryOverDays) {
 }
 
 function getEffectiveSpendAmount(order) {
-    const amount = order?.beforeTaxUSD ?? order?.beforeTax;
+    const amount = order?.affiliatePrice;
     return Number(amount) || 0;
 }
 
@@ -65,9 +65,8 @@ function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = []) {
     if (excludeLowValue === 'true') {
         filters.push({
             $or: [
-                { beforeTaxUSD: { $gte: 3 } },
-                { beforeTaxUSD: { $exists: false } },
-                { beforeTaxUSD: null },
+                { subtotalUSD: { $gte: 3 } },
+                { subtotal: { $gte: 3 } },
             ],
         });
     }
@@ -102,9 +101,8 @@ function buildAffiliateSpendQuery(dateStr, excludeLowValue, extraFilters = []) {
     if (excludeLowValue === 'true') {
         filters.push({
             $or: [
-                { beforeTaxUSD: { $gte: 3 } },
-                { beforeTaxUSD: { $exists: false } },
-                { beforeTaxUSD: null },
+                { subtotalUSD: { $gte: 3 } },
+                { subtotal: { $gte: 3 } },
             ],
         });
     }
@@ -226,6 +224,9 @@ router.patch('/:id/sourcing', async (req, res) => {
             'purchaser',
             'sourcingMessageStatus',
             'amazonAccount',
+            'affiliatePrice',
+            'beforeTax',
+            'estimatedTax',
             'beforeTaxUSD',
             'fulfillmentNotes',
         ];
@@ -303,7 +304,7 @@ router.get('/balances', async (req, res) => {
             {
                 $group: {
                     _id: '$amazonAccount',
-                    totalExpense: { $sum: { $ifNull: ['$beforeTaxUSD', { $ifNull: ['$beforeTax', 0] }] } },
+                    totalExpense: { $sum: { $ifNull: ['$affiliatePrice', 0] } },
                     orderCount: { $sum: 1 },
                 },
             },
@@ -397,10 +398,10 @@ router.get('/summary', async (req, res) => {
         // All orders in the active sourcing queue for the selected day
         const [orders, spendOrders, balances] = await Promise.all([
             Order.find(queueQuery)
-                .select('purchaser sourcingStatus beforeTaxUSD beforeTax amazonExchangeRate amazonAccount dateSold creationDate')
+                .select('purchaser sourcingStatus affiliatePrice beforeTax estimatedTax amazonExchangeRate amazonAccount dateSold creationDate')
                 .lean(),
             Order.find(spendQuery)
-                .select('beforeTaxUSD beforeTax amazonExchangeRate')
+                .select('affiliatePrice beforeTax estimatedTax amazonExchangeRate')
                 .lean(),
             AmazonAccountDailyBalance.find({ date }).lean(),
         ]);
