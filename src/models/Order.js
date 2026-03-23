@@ -55,6 +55,7 @@ const OrderSchema = new mongoose.Schema(
     refundTotalUSD: Number, // Total refund amount in USD
     beforeTaxUSD: Number, // Amazon order before tax amount in USD
     estimatedTaxUSD: Number, // Amazon estimated tax in USD
+    affiliatePrice: Number, // Manual affiliate page price, separate from Amazon beforeTax
     conversionRate: Number, // Stored conversion rate for reference
     cancelState: String, // NONE_REQUESTED, CANCEL_REQUESTED, CANCELED, etc.
     worksheetStatus: {
