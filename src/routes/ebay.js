@@ -3572,8 +3572,32 @@ router.post('/poll-new-orders', requireAuth, requireRole('fulfillmentadmin', 'su
               try {
                 const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId);
                 if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
-                  await Order.findByIdAndUpdate(newOrder._id, { adFeeGeneral: adFeeResult.adFeeGeneral });
-                  console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
+                  newOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
+                  newOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
+
+                  // Recalculate orderEarnings if this is a PAID order
+                  if (newOrder.orderPaymentStatus === 'PAID') {
+                    const totalDueSeller = parseFloat(newOrder.paymentSummary?.totalDueSeller?.value || 0);
+                    const adFeeVal = parseFloat(newOrder.adFeeGeneral || 0);
+                    newOrder.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
+
+                    // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
+                    const marketplace = newOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                      newOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                    const financials = await calculateFinancials({ ...newOrder.toObject(), orderEarnings: newOrder.orderEarnings }, marketplace);
+                    newOrder.tds = financials.tds;
+                    newOrder.tid = financials.tid;
+                    newOrder.net = financials.net;
+                    newOrder.pBalanceINR = financials.pBalanceINR;
+                    newOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                    newOrder.profit = financials.profit;
+
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Calculated earnings: $${newOrder.orderEarnings}`);
+                  } else {
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
+                  }
+
+                  await newOrder.save();
                 }
               } catch (adFeeErr) {
                 console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
