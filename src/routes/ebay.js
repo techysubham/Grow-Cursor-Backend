@@ -1877,7 +1877,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 
 // NEW ENDPOINT: All Orders with USD conversion
 router.get('/all-orders-usd', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount } = req.query;
 
   try {
     let query = {};
@@ -1941,6 +1941,14 @@ router.get('/all-orders-usd', async (req, res) => {
           { subtotalUSD: { $gte: 3 } },
           { subtotal: { $gte: 3 } }
         ]
+      });
+    }
+
+    // Exclude orders without Amazon Account
+    if (excludeNoAmazonAccount === 'true') {
+      query.$and = query.$and || [];
+      query.$and.push({
+        amazonAccount: { $exists: true, $ne: null, $ne: '' }
       });
     }
 
@@ -3564,8 +3572,32 @@ router.post('/poll-new-orders', requireAuth, requireRole('fulfillmentadmin', 'su
               try {
                 const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId);
                 if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
-                  await Order.findByIdAndUpdate(newOrder._id, { adFeeGeneral: adFeeResult.adFeeGeneral });
-                  console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
+                  newOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
+                  newOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
+
+                  // Recalculate orderEarnings if this is a PAID order
+                  if (newOrder.orderPaymentStatus === 'PAID') {
+                    const totalDueSeller = parseFloat(newOrder.paymentSummary?.totalDueSeller?.value || 0);
+                    const adFeeVal = parseFloat(newOrder.adFeeGeneral || 0);
+                    newOrder.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
+
+                    // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
+                    const marketplace = newOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                      newOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                    const financials = await calculateFinancials({ ...newOrder.toObject(), orderEarnings: newOrder.orderEarnings }, marketplace);
+                    newOrder.tds = financials.tds;
+                    newOrder.tid = financials.tid;
+                    newOrder.net = financials.net;
+                    newOrder.pBalanceINR = financials.pBalanceINR;
+                    newOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                    newOrder.profit = financials.profit;
+
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Calculated earnings: $${newOrder.orderEarnings}`);
+                  } else {
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
+                  }
+
+                  await newOrder.save();
                 }
               } catch (adFeeErr) {
                 console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
@@ -4067,8 +4099,7 @@ router.post('/resync-recent', requireAuth, requireRole('fulfillmentadmin', 'supe
       'amazonAccount', 'beforeTax', 'estimatedTax', 'beforeTaxUSD', 'estimatedTaxUSD',
       'amazonTotal', 'amazonTotalINR', 'marketplaceFee', 'igst', 'totalCC', 'amazonExchangeRate',
       'fulfillmentNotes', 'remark', 'messagingStatus', 'itemStatus', 'resolvedFrom',
-      'arrivingDate', 'adFeeGeneral', 'adFeeGeneralUSD',
-      'orderEarnings', 'tds', 'tid', 'net', 'pBalanceINR', 'ebayExchangeRate',
+      'arrivingDate',
       '_id', '__v', 'createdAt', 'updatedAt'
     ]);
 
@@ -4193,12 +4224,48 @@ router.post('/resync-recent', requireAuth, requireRole('fulfillmentadmin', 'supe
               });
               console.log(`  🔄 RESYNCED: ${ebayOrder.orderId} - ${changedFields.join(', ')}`);
             }
+
+            // Fetch ad fee if not already set or is $0
+            if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
+              try {
+                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId);
+                if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
+                  existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
+                  existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
+
+                  // Recalculate orderEarnings if this is a PAID order
+                  if (existingOrder.orderPaymentStatus === 'PAID') {
+                    const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
+                    const adFeeVal = parseFloat(existingOrder.adFeeGeneral || 0);
+                    existingOrder.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
+
+                    // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
+                    const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                      existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                    const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
+                    existingOrder.tds = financials.tds;
+                    existingOrder.tid = financials.tid;
+                    existingOrder.net = financials.net;
+                    existingOrder.pBalanceINR = financials.pBalanceINR;
+                    existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                    existingOrder.profit = financials.profit;
+
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
+                  } else {
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
+                  }
+
+                  await existingOrder.save();
+                }
+              } catch (adFeeErr) {
+                console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
+              }
+            }
           } else {
-            // New order not in DB - create it
-            const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
-            const newOrder = await Order.create(orderData);
-            newOrders.push(newOrder.orderId);
-            console.log(`  🆕 NEW (resync): ${ebayOrder.orderId}`);
+            // New order not in DB - ignore it.
+            // As per user request, new orders should ONLY be fetched via the "Poll New Orders" button.
+            // The resync button is strictly for updating existing orders.
+            console.log(`  ⏭️ NEW (resync): ${ebayOrder.orderId} - Ignored. Not in DB.`);
           }
         }
 
@@ -9101,6 +9168,11 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
         { subtotal: { $gte: 3 } },
         { subtotalUSD: { $gte: 3 } }
       ]
+    });
+
+    // Exclude orders without amazonAccount assigned
+    matchQuery.$and.push({
+      amazonAccount: { $exists: true, $ne: null, $ne: '' }
     });
 
     // Determine grouping format with PST timezone
