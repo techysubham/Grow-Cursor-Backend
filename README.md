@@ -10,10 +10,10 @@
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
-- [Environment Variables](#environment-variables)
+<!-- - [Environment Variables](#environment-variables) -->
 - [API Routes](#api-routes)
 - [Key Features](#key-features)
-- [Scripts](#scripts)
+<!-- - [Scripts](#scripts) -->
 - [Deployment](#deployment)
 
 ---
