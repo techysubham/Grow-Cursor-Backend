@@ -9174,6 +9174,11 @@ router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'su
       ]
     });
 
+    // Exclude orders without amazonAccount assigned
+    matchQuery.$and.push({
+      amazonAccount: { $exists: true, $ne: null, $ne: '' }
+    });
+
     // Determine grouping format with PST timezone
     let dateGroupFormat;
     if (groupBy === 'day') {
