@@ -1877,7 +1877,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 
 // NEW ENDPOINT: All Orders with USD conversion
 router.get('/all-orders-usd', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount } = req.query;
 
   try {
     let query = {};
@@ -1941,6 +1941,14 @@ router.get('/all-orders-usd', async (req, res) => {
           { subtotalUSD: { $gte: 3 } },
           { subtotal: { $gte: 3 } }
         ]
+      });
+    }
+
+    // Exclude orders without Amazon Account
+    if (excludeNoAmazonAccount === 'true') {
+      query.$and = query.$and || [];
+      query.$and.push({
+        amazonAccount: { $exists: true, $ne: null, $ne: '' }
       });
     }
 
