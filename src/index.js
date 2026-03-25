@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import path from 'path';
+import mongoSanitize from 'express-mongo-sanitize';
 
 // Load environment variables FIRST before any other imports
 dotenv.config();
@@ -75,6 +76,7 @@ import imageCache from './lib/imageCache.js';
 const app = express();
 
 app.use(helmet());
+// TODO: Lock down CORS — replace origin '*' with actual frontend domains (e.g. Vercel URL, localhost) once all consuming origins are identified
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -82,6 +84,7 @@ app.use(cors({
   exposedHeaders: ['Content-Disposition']
 }));
 app.use(express.json({ limit: '10mb' })); // Increased limit for bulk operations
+app.use(mongoSanitize()); // Sanitize user input to prevent NoSQL injection (strips $ and . from req.body/query/params)
 app.use(morgan('dev'));
 
 // Serve static uploads

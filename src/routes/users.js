@@ -95,19 +95,13 @@ router.post('/', requireAuth, async (req, res) => {
   }
 
   if (['superadmin', 'hradmin', 'operationhead'].includes(role)) {
-    // Return credentials for superadmin record-keeping
+    // Return user info for superadmin record-keeping (password NOT included — displayed from local state on frontend)
     res.json({
       id: user._id,
       email: user.email,
       username: user.username,
       role: user.role,
-      credentials: {
-        email: user.email,
-        username: user.username,
-        password: password,
-        role: user.role,
-        createdAt: new Date()
-      }
+      department: user.department
     });
   } else {
     res.json({ id: user._id, email: user.email, username: user.username, role: user.role });
@@ -125,8 +119,8 @@ router.get('/compatibility-editors', requireAuth, requireRole('superadmin', 'com
   res.json(editors);
 });
 
-// Check if email or username already exists
-router.get('/check-exists', async (req, res) => {
+// Check if email or username already exists (requires auth to prevent user enumeration)
+router.get('/check-exists', requireAuth, async (req, res) => {
   const { email, username } = req.query;
   try {
     let exists = false;
