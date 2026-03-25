@@ -1807,6 +1807,41 @@ router.get('/stored-orders', async (req, res) => {
       });
     }
 
+    // Filter to only show orders that do not have an Amazon Account added yet
+    if (req.query.missingAmazonAccount === 'true') {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { amazonAccount: { $exists: false } },
+          { amazonAccount: null },
+          { amazonAccount: '' }
+        ]
+      });
+      // Exclude cancelled orders when this filter is active
+      query.$and.push({
+        $or: [
+          { cancelState: { $exists: false } },
+          { cancelState: null },
+          { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+        ]
+      });
+      query.$and.push({
+        $or: [
+          { 'cancelStatus.cancelState': { $exists: false } },
+          { 'cancelStatus.cancelState': null },
+          { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+        ]
+      });
+      // Exclude orders with refunds when this filter is active
+      query.$and.push({
+        $or: [
+          { refunds: { $exists: false } },
+          { refunds: { $size: 0 } },
+          { refunds: null }
+        ]
+      });
+    }
+
     // Calculate pagination
     const pageNum = parseInt(page, 10);
     const limitNum = parseInt(limit, 10);
@@ -1940,6 +1975,41 @@ router.get('/all-orders-usd', async (req, res) => {
         $or: [
           { subtotalUSD: { $gte: 3 } },
           { subtotal: { $gte: 3 } }
+        ]
+      });
+    }
+
+    // Filter to only show orders that do not have an Amazon Account added yet
+    if (req.query.missingAmazonAccount === 'true') {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { amazonAccount: { $exists: false } },
+          { amazonAccount: null },
+          { amazonAccount: '' }
+        ]
+      });
+      // Exclude cancelled orders when this filter is active
+      query.$and.push({
+        $or: [
+          { cancelState: { $exists: false } },
+          { cancelState: null },
+          { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+        ]
+      });
+      query.$and.push({
+        $or: [
+          { 'cancelStatus.cancelState': { $exists: false } },
+          { 'cancelStatus.cancelState': null },
+          { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+        ]
+      });
+      // Exclude orders with refunds when this filter is active
+      query.$and.push({
+        $or: [
+          { refunds: { $exists: false } },
+          { refunds: { $size: 0 } },
+          { refunds: null }
         ]
       });
     }
