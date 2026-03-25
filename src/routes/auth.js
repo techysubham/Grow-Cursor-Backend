@@ -1,11 +1,21 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 import User from '../models/User.js';
 
 const router = Router();
 
-router.post('/login', async (req, res) => {
+// Rate limit login attempts: max 15 requests per 15 minutes per IP
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please try again after 15 minutes.' }
+});
+
+router.post('/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   const user = await User.findOne({ username });
@@ -17,8 +27,11 @@ router.post('/login', async (req, res) => {
   res.json({ token, user: { id: user._id, email: user.email, username: user.username, role: user.role } });
 });
 
-// Seed superadmin if none exists (development helper)
+// Seed superadmin if none exists (development helper — disabled in production)
 router.post('/seed-superadmin', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
   const { email, username, password } = req.body || {};
   if (!email || !username || !password) return res.status(400).json({ error: 'email, username, password required' });
   const exists = await User.findOne({ role: 'superadmin' });
