@@ -1684,15 +1684,44 @@ router.get('/stored-orders', async (req, res) => {
     }
 
     if (searchBuyerName) {
-      query['buyer.buyerRegistrationAddress.fullName'] = { $regex: searchBuyerName, $options: 'i' };
+      const buyerClause = {
+        $or: [
+          { 'buyer.buyerRegistrationAddress.fullName': { $regex: searchBuyerName, $options: 'i' } },
+          { 'buyer.username': { $regex: searchBuyerName, $options: 'i' } }
+        ]
+      };
+
+      if (query.$or) {
+        if (!query.$and) query.$and = [];
+        query.$and.push({ $or: query.$or });
+        delete query.$or;
+        query.$and.push(buyerClause);
+      } else if (query.$and) {
+        query.$and.push(buyerClause);
+      } else {
+        query.$or = buyerClause.$or;
+      }
     }
 
     // Item ID search (searches both lineItems.legacyItemId and itemNumber)
     if (searchItemId) {
-      query.$or = [
-        { 'lineItems.legacyItemId': { $regex: searchItemId, $options: 'i' } },
-        { itemNumber: { $regex: searchItemId, $options: 'i' } }
-      ];
+      const itemClause = {
+        $or: [
+          { 'lineItems.legacyItemId': { $regex: searchItemId, $options: 'i' } },
+          { itemNumber: { $regex: searchItemId, $options: 'i' } }
+        ]
+      };
+
+      if (query.$or) {
+        if (!query.$and) query.$and = [];
+        query.$and.push({ $or: query.$or });
+        delete query.$or;
+        query.$and.push(itemClause);
+      } else if (query.$and) {
+        query.$and.push(itemClause);
+      } else {
+        query.$or = itemClause.$or;
+      }
     }
 
     if (productName) {
@@ -1946,7 +1975,23 @@ router.get('/all-orders-usd', async (req, res) => {
     }
 
     if (searchBuyerName) {
-      query['buyer.buyerRegistrationAddress.fullName'] = { $regex: searchBuyerName, $options: 'i' };
+      const buyerClause = {
+        $or: [
+          { 'buyer.buyerRegistrationAddress.fullName': { $regex: searchBuyerName, $options: 'i' } },
+          { 'buyer.username': { $regex: searchBuyerName, $options: 'i' } }
+        ]
+      };
+
+      if (query.$or) {
+        if (!query.$and) query.$and = [];
+        query.$and.push({ $or: query.$or });
+        delete query.$or;
+        query.$and.push(buyerClause);
+      } else if (query.$and) {
+        query.$and.push(buyerClause);
+      } else {
+        query.$or = buyerClause.$or;
+      }
     }
 
     // Timezone-Aware Date Range Logic (Pacific Time - exact DST handling via Intl)
