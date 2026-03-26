@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import Transaction from '../models/Transaction.js';
 import Order from '../models/Order.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
@@ -132,11 +133,58 @@ router.get('/credit-card-summary', requireAuth, requireRole('superadmin'), async
 // GET /api/transactions - List all
 router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
     try {
-        const transactions = await Transaction.find()
-            .populate('bankAccount', 'name')
-            .populate('creditCardName', 'name')
-            .sort({ date: -1 });
-        res.json(transactions);
+        const { page = 1, limit = 50, startDate, endDate, bankAccount, transactionType } = req.query;
+
+        const query = {};
+        if (startDate || endDate) {
+            query.date = {};
+            if (startDate) query.date.$gte = new Date(startDate);
+            // End date should include the full day
+            if (endDate) {
+                const end = new Date(endDate);
+                end.setHours(23, 59, 59, 999);
+                query.date.$lte = end;
+            }
+        }
+        if (bankAccount) query.bankAccount = new mongoose.Types.ObjectId(bankAccount);
+        if (transactionType) query.transactionType = transactionType;
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const limitNum = parseInt(limit);
+
+        const [transactions, totalTransactions, aggregateSum] = await Promise.all([
+            Transaction.find(query)
+                .populate('bankAccount', 'name')
+                .populate('creditCardName', 'name')
+                .sort({ date: -1 })
+                .skip(skip)
+                .limit(limitNum),
+            Transaction.countDocuments(query),
+            Transaction.aggregate([
+                { $match: query },
+                {
+                    $group: {
+                        _id: null,
+                        totalCredit: {
+                            $sum: { $cond: [{ $eq: ['$transactionType', 'Credit'] }, '$amount', 0] }
+                        },
+                        totalDebit: {
+                            $sum: { $cond: [{ $eq: ['$transactionType', 'Debit'] }, '$amount', 0] }
+                        }
+                    }
+                }
+            ])
+        ]);
+
+        const summary = aggregateSum[0] || { totalCredit: 0, totalDebit: 0 };
+
+        res.json({
+            transactions,
+            totalPages: Math.ceil(totalTransactions / limitNum),
+            currentPage: parseInt(page),
+            totalTransactions,
+            summary
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
