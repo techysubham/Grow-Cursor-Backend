@@ -138,6 +138,10 @@ const templateListingSchema = new mongoose.Schema({
     type: Number,
     default: null
   },
+  downloadedActionField: {
+    type: String,
+    default: null
+  },
   
   // Duplicate tracking
   duplicateCount: {

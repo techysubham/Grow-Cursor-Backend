@@ -3314,6 +3314,9 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     console.log('🔢 Batch number:', batchNumber);
     console.log('🆔 Batch ID:', batchId);
     
+    // Get custom Action field from template
+    const actionField = template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
+    
     // Mark listings as downloaded (also clears pendingRedownload flag)
     const updateResult = await TemplateListing.updateMany(
       filter,
@@ -3321,14 +3324,12 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
         downloadBatchId: batchId,
         downloadedAt: new Date(),
         downloadBatchNumber: batchNumber,
+        downloadedActionField: actionField,
         pendingRedownload: false
       }
     );
     
     console.log('✅ Updated listings:', updateResult.modifiedCount);
-    
-    // Get custom Action field from template
-    const actionField = template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
     console.log('📝 Using Action field:', actionField);
     
     // Build core headers (38 columns)
@@ -3592,6 +3593,9 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
 
     const batchNumber = (latestBatch?.downloadBatchNumber || 0) + 1;
 
+    // Build CSV — identical structure to GET /export-csv
+    const actionField = template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
+
     // Mark the underlying TemplateListing docs as downloaded (batch tracking only — field values are NOT updated)
     const existingIds = listings.map(l => l._existingListingId).filter(Boolean);
     if (existingIds.length > 0) {
@@ -3601,13 +3605,11 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
           downloadBatchId: batchId,
           downloadedAt: new Date(),
           downloadBatchNumber: batchNumber,
+          downloadedActionField: actionField,
           pendingRedownload: false
         }
       );
     }
-
-    // Build CSV — identical structure to GET /export-csv
-    const actionField = template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
 
     const coreHeaders = [
       actionField, 'Custom label (SKU)', 'Category ID', 'Category name', 'Title',
@@ -3894,8 +3896,8 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
     
     const batchNumber = listings[0].downloadBatchNumber;
     
-    // Get custom Action field from template
-    const actionField = template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
+    // Use the action field that was saved at download time; fall back to current template value
+    const actionField = listings[0].downloadedActionField || template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
     console.log('📝 Using Action field:', actionField);
     
     // Build core headers (38 columns)
