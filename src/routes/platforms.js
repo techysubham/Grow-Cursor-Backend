@@ -1,10 +1,10 @@
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Platform from '../models/Platform.js';
 
 const router = Router();
 
-router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('ManagePlatforms'), async (req, res) => {
   const { name, type } = req.body || {};
   if (!name || !type) return res.status(400).json({ error: 'name and type required' });
   try {

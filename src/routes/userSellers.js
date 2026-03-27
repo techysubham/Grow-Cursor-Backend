@@ -1,5 +1,5 @@
 import express from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import UserDailyQuantity from '../models/UserDailyQuantity.js';
 

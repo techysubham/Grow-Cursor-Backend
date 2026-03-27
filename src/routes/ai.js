@@ -2,7 +2,7 @@
 
 import express from 'express';
 import OpenAI from 'openai';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import AiFitmentUsage from '../models/AiFitmentUsage.js';
 import User from '../models/User.js';
 
@@ -217,7 +217,7 @@ eBay title to rephrase: ${currentTitle}`;
 // GET /api/ai/fitment-usage-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
 // Returns day-wise, user-wise stats
 // ============================================
-router.get('/fitment-usage-stats', requireAuth, requireRole('superadmin', 'compatibilityadmin'), async (req, res) => {
+router.get('/fitment-usage-stats', requireAuth, requirePageAccess('AiFitmentUsage'), async (req, res) => {
     try {
         const { startDate, endDate } = req.query;
         const matchStage = {};

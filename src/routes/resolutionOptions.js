@@ -1,6 +1,6 @@
 import express from 'express';
 import ResolutionOption from '../models/ResolutionOption.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -29,7 +29,7 @@ router.get('/', requireAuth, async (req, res) => {
     }
 });
 
-router.post('/', requireAuth, requireRole('superadmin', 'hoc', 'compliance_manager', 'fulfillment_admin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
     try {
         const { name } = req.body;
         if (!name || !name.trim()) {
@@ -48,7 +48,7 @@ router.post('/', requireAuth, requireRole('superadmin', 'hoc', 'compliance_manag
     }
 });
 
-router.patch('/:id', requireAuth, requireRole('superadmin', 'hoc', 'compliance_manager', 'fulfillment_admin'), async (req, res) => {
+router.patch('/:id', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
     try {
         const { name } = req.body;
         if (!name || !name.trim()) {
@@ -75,7 +75,7 @@ router.patch('/:id', requireAuth, requireRole('superadmin', 'hoc', 'compliance_m
     }
 });
 
-router.delete('/:id', requireAuth, requireRole('superadmin', 'hoc', 'compliance_manager', 'fulfillment_admin'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
     try {
         const option = await ResolutionOption.findByIdAndDelete(req.params.id);
         if (!option) {

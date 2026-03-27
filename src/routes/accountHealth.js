@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Order from '../models/Order.js';
 import Case from '../models/Case.js';
 import Return from '../models/Return.js';
@@ -26,7 +26,7 @@ const SNAD_RETURN_REASONS = [
  * Returns SNAD details for orders with SNAD cases or returns
  * Supports filters: sellerId, startDate, endDate
  */
-router.get('/details', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.get('/details', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
     const { sellerId, startDate, endDate } = req.query;
 
@@ -179,7 +179,7 @@ router.get('/details', requireAuth, requireRole('fulfillmentadmin', 'superadmin'
  * Each window covers an 84-day period, and we generate a new window every week
  * BBE Rate = (SNAD count / Total Sales in that 84-day period) × 100
  */
-router.get('/evaluation-windows', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
     const { sellerId } = req.query;
     const sellerMatch = sellerId ? { seller: new mongoose.Types.ObjectId(sellerId) } : {};
@@ -308,7 +308,7 @@ router.get('/evaluation-windows', requireAuth, requireRole('fulfillmentadmin', '
  * POST /account-health/evaluation-windows/market-avg
  * Update market average (creates a new historical record)
  */
-router.post('/evaluation-windows/market-avg', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.post('/evaluation-windows/market-avg', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
     const { value, effectiveDate, sellerId } = req.body;
     
@@ -342,7 +342,7 @@ router.post('/evaluation-windows/market-avg', requireAuth, requireRole('fulfillm
  * PATCH /account-health/details/:orderId
  * Update sellerFault field for an order
  */
-router.patch('/details/:orderId', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.patch('/details/:orderId', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
     const { orderId } = req.params;
     const { sellerFault } = req.body;
@@ -374,7 +374,7 @@ router.patch('/details/:orderId', requireAuth, requireRole('fulfillmentadmin', '
  * Week 1 & 2: Actual BBE rate (past data)
  * Week 3 & 4: Additional sales needed to meet market avg (prediction)
  */
-router.get('/overview', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.get('/overview', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
     // Fetch all sellers with user data
     const sellers = await Seller.find().populate('user', 'username email').lean();

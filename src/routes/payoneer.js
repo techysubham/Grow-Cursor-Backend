@@ -1,7 +1,7 @@
 import express from 'express';
 import PayoneerRecord from '../models/PayoneerRecord.js';
 import Transaction from '../models/Transaction.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -25,7 +25,7 @@ const calculateFields = (amount, exchangeRate) => {
 };
 
 // GET /api/payoneer - List all records with pagination and filtering
-router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { page = 1, limit = 50, startDate, endDate, store } = req.query;
 
@@ -82,7 +82,7 @@ router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // POST /api/payoneer - Create new record
-router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit } = req.body;
 
@@ -139,7 +139,7 @@ router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // PUT /api/payoneer/:id - Update record
-router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.put('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { id } = req.params;
         const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit } = req.body;
@@ -202,7 +202,7 @@ router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // DELETE /api/payoneer/:id - Delete record
-router.delete('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { id } = req.params;
         await PayoneerRecord.findByIdAndDelete(id);

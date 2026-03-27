@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Assignment from '../models/Assignment.js';
 import CompatibilityAssignment from '../models/CompatibilityAssignment.js';
 import Range from '../models/Range.js';
@@ -9,7 +9,7 @@ const router = Router();
 
 // Get eligible completed listing assignments for compatibility admin
 // Conditions: Category = "Ebay Motors" AND Pending Quantity = 0 (completedQuantity >= quantity)
-router.get('/eligible', requireAuth, requireRole('superadmin', 'compatibilityadmin'), async (req, res) => {
+router.get('/eligible', requireAuth, requirePageAccess('CompatibilityTasks'), async (req, res) => {
   try {
     // Pagination
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -107,7 +107,7 @@ router.get('/eligible', requireAuth, requireRole('superadmin', 'compatibilityadm
 });
 
 // Create a compatibility assignment for an editor
-router.post('/assign', requireAuth, requireRole('superadmin', 'compatibilityadmin'), async (req, res) => {
+router.post('/assign', requireAuth, requirePageAccess('CompatibilityTasks'), async (req, res) => {
   try {
     const { sourceAssignmentId, editorId, rangeQuantities, notes } = req.body || {};
     if (!sourceAssignmentId || !editorId || !rangeQuantities || !Array.isArray(rangeQuantities) || rangeQuantities.length === 0) {
@@ -149,7 +149,7 @@ router.post('/assign', requireAuth, requireRole('superadmin', 'compatibilityadmi
 });
 
 // Get progress of compatibility assignments (for admin tracking)
-router.get('/progress', requireAuth, requireRole('superadmin', 'compatibilityadmin'), async (req, res) => {
+router.get('/progress', requireAuth, requirePageAccess('CompatibilityProgress'), async (req, res) => {
   try {
     const me = req.user?.userId || req.user?.id;
     
@@ -250,7 +250,7 @@ router.get('/progress', requireAuth, requireRole('superadmin', 'compatibilityadm
 });
 
 // Get filter options for eligible assignments (AdminTaskList)
-router.get('/eligible-filter-options', requireAuth, requireRole('superadmin', 'compatibilityadmin'), async (req, res) => {
+router.get('/eligible-filter-options', requireAuth, requirePageAccess('CompatibilityTasks'), async (req, res) => {
   try {
     const [subcategories, listingPlatforms, stores] = await Promise.all([
       // Get all subcategories from database
@@ -283,7 +283,7 @@ router.get('/eligible-filter-options', requireAuth, requireRole('superadmin', 'c
 });
 
 // Get filter options for compatibility progress page
-router.get('/filter-options', requireAuth, requireRole('superadmin', 'compatibilityadmin'), async (req, res) => {
+router.get('/filter-options', requireAuth, requirePageAccess('CompatibilityProgress'), async (req, res) => {
   try {
     const [subcategories, listingPlatforms, stores, editors] = await Promise.all([
       // Get all subcategories from database
@@ -316,7 +316,7 @@ router.get('/filter-options', requireAuth, requireRole('superadmin', 'compatibil
 });
 
 // Editor: list my compatibility assignments
-router.get('/mine', requireAuth, requireRole('superadmin', 'compatibilityeditor'), async (req, res) => {
+router.get('/mine', requireAuth, requirePageAccess('CompatibilityEditor'), async (req, res) => {
   try {
     const me = req.user?.userId || req.user?.id;
     const items = await CompatibilityAssignment.find({ editor: me })
@@ -335,7 +335,7 @@ router.get('/mine', requireAuth, requireRole('superadmin', 'compatibilityeditor'
 });
 
 // Editor: add/update range quantity for compatibility work
-router.post('/:id/complete-range', requireAuth, requireRole('superadmin', 'compatibilityeditor'), async (req, res) => {
+router.post('/:id/complete-range', requireAuth, requirePageAccess('CompatibilityEditor'), async (req, res) => {
   try {
     const { id } = req.params;
     const { rangeId, quantity } = req.body || {};

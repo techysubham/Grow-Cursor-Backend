@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import User from '../models/User.js';
 
@@ -171,7 +171,7 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // GET /admin - Get all leave requests (HR Admin and Superadmin only)
-router.get('/admin', requireAuth, requireRole('hradmin', 'superadmin'), async (req, res) => {
+router.get('/admin', requireAuth, requirePageAccess('LeaveAdmin'), async (req, res) => {
     try {
         const { status, department } = req.query;
 
@@ -198,7 +198,7 @@ router.get('/admin', requireAuth, requireRole('hradmin', 'superadmin'), async (r
 });
 
 // PUT /:id/status - Approve or reject a leave request (HR Admin and Superadmin only)
-router.put('/:id/status', requireAuth, requireRole('hradmin', 'superadmin'), async (req, res) => {
+router.put('/:id/status', requireAuth, requirePageAccess('LeaveAdmin'), async (req, res) => {
     try {
         const { id } = req.params;
         const { status, rejectionReason } = req.body;

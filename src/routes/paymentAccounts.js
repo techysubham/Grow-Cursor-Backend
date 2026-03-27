@@ -1,11 +1,11 @@
 import express from 'express';
 import PaymentAccount from '../models/PaymentAccount.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 
 const router = express.Router();
 
 // GET /api/payment-accounts - List all
-router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess('BankAccounts'), async (req, res) => {
     try {
         const accounts = await PaymentAccount.find()
             .populate('bankAccount', 'name')
@@ -17,7 +17,7 @@ router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // POST /api/payment-accounts - Create
-router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('BankAccounts'), async (req, res) => {
     try {
         const { name, bankAccount } = req.body;
         if (!name || !bankAccount) {
@@ -36,7 +36,7 @@ router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // PUT /api/payment-accounts/:id - Update
-router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.put('/:id', requireAuth, requirePageAccess('BankAccounts'), async (req, res) => {
     try {
         const { id } = req.params;
         const { name, bankAccount } = req.body;
@@ -52,7 +52,7 @@ router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // DELETE /api/payment-accounts/:id - Delete
-router.delete('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('BankAccounts'), async (req, res) => {
     try {
         const { id } = req.params;
         await PaymentAccount.findByIdAndDelete(id);

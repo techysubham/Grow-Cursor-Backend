@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import RemarkTemplate from '../models/RemarkTemplate.js';
 
 const router = Router();
@@ -92,7 +92,7 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-router.put('/', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+router.put('/', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const incoming = Array.isArray(req.body?.templates) ? req.body.templates : null;
     if (!incoming) {

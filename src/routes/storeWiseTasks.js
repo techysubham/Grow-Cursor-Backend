@@ -1,12 +1,12 @@
 // routes/storeWiseTasks.js
 import express from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Assignment from '../models/Assignment.js';
 
 const router = express.Router();
 
 // Get aggregated store-wise task summary
-router.get('/summary', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.get('/summary', requireAuth, requirePageAccess('StoreWiseTasks'), async (req, res) => {
   try {
     // Admins see ALL tasks regardless of scheduled date
     const aggregation = await Assignment.aggregate([
@@ -60,7 +60,7 @@ router.get('/summary', requireAuth, requireRole('superadmin', 'listingadmin'), a
 });
 
 // Get detailed assignments for a specific store and date
-router.get('/details', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.get('/details', requireAuth, requirePageAccess('StoreWiseTasks'), async (req, res) => {
   try {
     const { 
       storeId, date, page, limit,

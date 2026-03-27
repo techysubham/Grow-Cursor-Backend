@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Range from '../models/Range.js';
 import Category from '../models/Category.js';
 
 const router = Router();
 
-router.post('/', requireAuth, requireRole('superadmin', 'productadmin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('ManageRanges'), async (req, res) => {
   const { name, categoryId } = req.body || {};
   if (!name || !categoryId) return res.status(400).json({ error: 'name and categoryId required' });
   try {

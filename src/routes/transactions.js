@@ -2,12 +2,12 @@ import express from 'express';
 import mongoose from 'mongoose';
 import Transaction from '../models/Transaction.js';
 import Order from '../models/Order.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 
 const router = express.Router();
 
 // GET /api/transactions/balance-summary - Get balance per bank account
-router.get('/balance-summary', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.get('/balance-summary', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
     try {
         const summary = await Transaction.aggregate([
             {
@@ -53,7 +53,7 @@ router.get('/balance-summary', requireAuth, requireRole('superadmin'), async (re
 });
 
 // GET /api/transactions/credit-card-summary
-router.get('/credit-card-summary', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.get('/credit-card-summary', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
     try {
         // Step 1: Get total transferred TO each credit card via transactions
         const transactionSummary = await Transaction.aggregate([
@@ -131,7 +131,7 @@ router.get('/credit-card-summary', requireAuth, requireRole('superadmin'), async
 });
 
 // GET /api/transactions - List all
-router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
     try {
         const { page = 1, limit = 50, startDate, endDate, bankAccount, transactionType } = req.query;
 
@@ -191,7 +191,7 @@ router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // POST /api/transactions - Create Manual Transaction
-router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
     try {
         const { date, bankAccount, transactionType, amount, remark, creditCardName } = req.body;
 
@@ -220,7 +220,7 @@ router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // PUT /api/transactions/:id - Update Manual Transaction
-router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.put('/:id', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
     try {
         const { id } = req.params;
         const { date, bankAccount, transactionType, amount, remark, creditCardName } = req.body;
@@ -250,7 +250,7 @@ router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // DELETE /api/transactions/:id - Delete Manual Transaction
-router.delete('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
     try {
         const { id } = req.params;
         const transaction = await Transaction.findById(id);

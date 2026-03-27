@@ -1,6 +1,6 @@
 // routes/amazonAccounts.js
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import AmazonAccount from '../models/AmazonAccount.js';
 
 const router = Router();
@@ -16,7 +16,7 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // POST: Add new Amazon Account (Restricted to specific roles)
-router.post('/', requireAuth, requireRole('superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('AmazonAccounts'), async (req, res) => {
   const { name, addressLine1, addressLine2, city, state, postalCode, country, phoneNumber, notes } = req.body;
   if (!name) return res.status(400).json({ error: 'Account name is required' });
   
@@ -42,7 +42,7 @@ router.post('/', requireAuth, requireRole('superadmin', 'hoc', 'compliancemanage
 });
 
 // PATCH: Update an account
-router.patch('/:id', requireAuth, requireRole('superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.patch('/:id', requireAuth, requirePageAccess('AmazonAccounts'), async (req, res) => {
   const { name, addressLine1, addressLine2, city, state, postalCode, country, phoneNumber, notes } = req.body;
   
   try {
@@ -77,7 +77,7 @@ router.patch('/:id', requireAuth, requireRole('superadmin', 'hoc', 'compliancema
 });
 
 // DELETE: Remove an account (Optional, but good to have)
-router.delete('/:id', requireAuth, requireRole('superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('AmazonAccounts'), async (req, res) => {
     try {
       await AmazonAccount.findByIdAndDelete(req.params.id);
       res.json({ success: true });
