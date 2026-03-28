@@ -118,8 +118,8 @@ export async function requireAuth(req, res, next) {
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     
-    // Validate token version against database (security: invalidate old tokens on password change)
-    const user = await User.findById(payload.userId).select('tokenVersion').lean();
+    // Validate token version and permissions version against database
+    const user = await User.findById(payload.userId).select('tokenVersion permissionsVersion').lean();
     if (!user) {
       return res.status(401).json({ error: 'User not found' });
     }
@@ -131,7 +131,15 @@ export async function requireAuth(req, res, next) {
       return res.status(401).json({ error: 'Token expired. Please login again.' });
     }
     
-    req.user = payload; // { userId, role, tokenVersion }
+    // Check if permissions have been modified by admin
+    const userPermissionsVersion = user.permissionsVersion || 1;
+    const payloadPermissionsVersion = payload.permissionsVersion || 1;
+    
+    if (payloadPermissionsVersion !== userPermissionsVersion) {
+      return res.status(401).json({ error: 'Your access permissions have been updated. Please login again.' });
+    }
+    
+    req.user = payload; // { userId, role, tokenVersion, permissionsVersion }
     return next();
   } catch (e) {
     return res.status(401).json({ error: 'Invalid token' });

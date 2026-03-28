@@ -24,7 +24,12 @@ router.post('/login', loginLimiter, async (req, res) => {
   if (!user.active) return res.status(401).json({ error: 'Account is not active' });
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return res.status(401).json({ error: 'Incorrect password' });
-  const token = jwt.sign({ userId: user._id.toString(), role: user.role, tokenVersion: user.tokenVersion || 1 }, process.env.JWT_SECRET, { expiresIn: '7d' });
+  const token = jwt.sign({ 
+    userId: user._id.toString(), 
+    role: user.role, 
+    tokenVersion: user.tokenVersion || 1,
+    permissionsVersion: user.permissionsVersion || 1
+  }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
   // Fetch assigned sellers for this user
   const sellerAssignments = await UserSellerAssignment.find({ user: user._id }).select('seller').lean();

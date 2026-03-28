@@ -33,7 +33,9 @@ const UserSchema = new mongoose.Schema(
     pagePermissions: [{ type: String }], // Array of page IDs e.g. ['OrdersDashboard', 'FeedUpload']
     useCustomPermissions: { type: Boolean, default: false }, // When true, only pagePermissions apply; when false, role-based defaults
     // Token versioning for security (invalidate all sessions on password change)
-    tokenVersion: { type: Number, default: 1 } // Increment on password change to invalidate all existing tokens
+    tokenVersion: { type: Number, default: 1 }, // Increment on password change to invalidate all existing tokens
+    // Permissions versioning (invalidate sessions when permissions change)
+    permissionsVersion: { type: Number, default: 1 } // Increment when pagePermissions or useCustomPermissions change
   },
   { timestamps: true }
 );

@@ -229,10 +229,18 @@ router.put('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessMa
       return res.status(400).json({ error: 'useCustomPermissions must be a boolean' });
     }
 
+    // Increment permissionsVersion to invalidate existing sessions when permissions change
+    const currentUser = await User.findById(req.params.id).select('permissionsVersion');
+    const newPermissionsVersion = (currentUser.permissionsVersion || 1) + 1;
+
     const user = await User.findByIdAndUpdate(
       req.params.id,
-      { pagePermissions, useCustomPermissions },
-      { new: true, select: 'username role pagePermissions useCustomPermissions' }
+      { 
+        pagePermissions, 
+        useCustomPermissions,
+        permissionsVersion: newPermissionsVersion
+      },
+      { new: true, select: 'username role pagePermissions useCustomPermissions permissionsVersion' }
     );
 
     if (!user) return res.status(404).json({ error: 'User not found' });
