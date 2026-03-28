@@ -152,11 +152,23 @@ export function requireRole(...roles) {
  * New page-based access control middleware.
  * Replaces requireRole() for all admin-managed page routes.
  *
- * @param {string} pageId - The page identifier (must match PAGE_DEFAULT_ROLES key)
+ * @param {string|string[]} pageId - Single page identifier or array of page IDs (user needs access to ANY one)
  * @param {string[]} [defaultRoles] - Override default roles (optional, falls back to PAGE_DEFAULT_ROLES)
  */
 export function requirePageAccess(pageId, defaultRoles) {
-  const fallbackRoles = defaultRoles || PAGE_DEFAULT_ROLES[pageId] || [];
+  // Normalize to array for consistent handling
+  const pageIds = Array.isArray(pageId) ? pageId : [pageId];
+  
+  // Collect fallback roles from all pages (if defaultRoles not provided)
+  let fallbackRoles = defaultRoles;
+  if (!fallbackRoles) {
+    const allRoles = new Set();
+    pageIds.forEach(id => {
+      const roles = PAGE_DEFAULT_ROLES[id] || [];
+      roles.forEach(role => allRoles.add(role));
+    });
+    fallbackRoles = Array.from(allRoles);
+  }
 
   return async function (req, res, next) {
     if (!req.user) {
@@ -176,8 +188,9 @@ export function requirePageAccess(pageId, defaultRoles) {
       }
 
       if (user.useCustomPermissions) {
-        // Custom permissions mode: only explicit pagePermissions apply
-        if (user.pagePermissions && user.pagePermissions.includes(pageId)) {
+        // Custom permissions mode: check if user has access to ANY of the requested pages
+        const hasAccess = user.pagePermissions && pageIds.some(id => user.pagePermissions.includes(id));
+        if (hasAccess) {
           return next();
         }
         return res.status(403).json({ error: 'Forbidden: You do not have access to this page' });
