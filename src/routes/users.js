@@ -276,8 +276,14 @@ router.put('/:id/password', requireAuth, requirePageAccess('UserPasswordManageme
     // Hash the new password
     const passwordHash = await bcrypt.hash(newPassword, 10);
 
-    // Update the password
-    await User.findByIdAndUpdate(req.params.id, { passwordHash });
+    // Update the password AND increment tokenVersion to invalidate all existing sessions
+    const currentUser = await User.findById(req.params.id).select('tokenVersion');
+    const newTokenVersion = (currentUser.tokenVersion || 1) + 1;
+    
+    await User.findByIdAndUpdate(req.params.id, { 
+      passwordHash,
+      tokenVersion: newTokenVersion 
+    });
 
     res.json({
       message: `Password updated successfully for ${user.username}`,

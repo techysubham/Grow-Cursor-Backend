@@ -105,7 +105,7 @@ export const PAGE_DEFAULT_ROLES = {
   'Ideas': ['_all'],
 };
 
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization || '';
   let token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   
@@ -117,7 +117,21 @@ export function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = payload; // { userId, role }
+    
+    // Validate token version against database (security: invalidate old tokens on password change)
+    const user = await User.findById(payload.userId).select('tokenVersion').lean();
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+    
+    const userTokenVersion = user.tokenVersion || 1;
+    const payloadTokenVersion = payload.tokenVersion || 1;
+    
+    if (payloadTokenVersion !== userTokenVersion) {
+      return res.status(401).json({ error: 'Token expired. Please login again.' });
+    }
+    
+    req.user = payload; // { userId, role, tokenVersion }
     return next();
   } catch (e) {
     return res.status(401).json({ error: 'Invalid token' });
