@@ -251,4 +251,43 @@ router.put('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessMa
   }
 });
 
+// ============================================
+// PASSWORD MANAGEMENT (Superadmin only)
+// ============================================
+
+// PUT /:id/password - Change a user's password (Superadmin only)
+router.put('/:id/password', requireAuth, requirePageAccess('UserPasswordManagement'), async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+
+    if (!newPassword || typeof newPassword !== 'string') {
+      return res.status(400).json({ error: 'newPassword is required and must be a string' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    }
+
+    const user = await User.findById(req.params.id).select('username email role');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Hash the new password
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    // Update the password
+    await User.findByIdAndUpdate(req.params.id, { passwordHash });
+
+    res.json({
+      message: `Password updated successfully for ${user.username}`,
+      userId: user._id,
+      username: user.username
+    });
+  } catch (err) {
+    console.error('Error changing user password:', err);
+    res.status(500).json({ error: 'Failed to change password' });
+  }
+});
+
 export default router;
