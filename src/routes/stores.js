@@ -1,10 +1,10 @@
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Store from '../models/Store.js';
 
 const router = Router();
 
-router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('ManageStores'), async (req, res) => {
   const { name, platformId } = req.body || {};
   if (!name || !platformId) return res.status(400).json({ error: 'name and platformId required' });
   try {

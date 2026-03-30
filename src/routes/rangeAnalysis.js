@@ -8,7 +8,7 @@ import Seller from '../models/Seller.js';
 import Range from '../models/Range.js';
 import Assignment from '../models/Assignment.js';
 import ListingCompletion from '../models/ListingCompletion.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -263,7 +263,7 @@ router.get('/ebay-models', requireAuth, async (req, res) => {
 
 // POST /api/range-analysis/sync-ebay-models
 // Fetch ALL vehicle models from eBay Taxonomy API and store in database
-router.post('/sync-ebay-models', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.post('/sync-ebay-models', requireAuth, requirePageAccess('RangeAnalyzer'), async (req, res) => {
   try {
     // 1. Find a seller with valid eBay tokens
     const seller = await Seller.findOne({ 
@@ -447,7 +447,7 @@ router.get('/device-models', requireAuth, async (req, res) => {
 
 // POST /api/range-analysis/sync-device-models
 // Fetch cell phone and tablet models from eBay Taxonomy API and store in database
-router.post('/sync-device-models', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.post('/sync-device-models', requireAuth, requirePageAccess('RangeAnalyzer'), async (req, res) => {
   try {
     console.log('[Device Sync] Starting sync for Cell Phones and Tablets...');
     
@@ -601,7 +601,7 @@ router.post('/sync-device-models', requireAuth, requireRole('superadmin'), async
 // Uses CACHED models for faster performance
 // Supports both vehicle models and device models (phones/tablets)
 // If categoryId is provided, also searches existing Ranges for that category
-router.post('/analyze', requireAuth, requireRole('superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'), async (req, res) => {
+router.post('/analyze', requireAuth, requirePageAccess('RangeAnalyzer', ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee']), async (req, res) => {
   try {
     const startTime = Date.now();
     const { textToAnalyze, searchType, categoryId } = req.body;
@@ -760,7 +760,7 @@ router.post('/analyze', requireAuth, requireRole('superadmin', 'listingadmin', '
 // POST /api/range-analysis/map-to-ranges
 // Maps detected model names to Range IDs for a specific category
 // Creates ranges if they don't exist
-router.post('/map-to-ranges', requireAuth, requireRole('superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'), async (req, res) => {
+router.post('/map-to-ranges', requireAuth, requirePageAccess('RangeAnalyzer', ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee']), async (req, res) => {
   try {
     const { categoryId, modelCounts } = req.body;
     // modelCounts: [{ modelName: "Honda Accord", count: 5 }, ...]
@@ -826,7 +826,7 @@ router.post('/map-to-ranges', requireAuth, requireRole('superadmin', 'listingadm
 
 // POST /api/range-analysis/ensure-unknown-range
 // Ensures "Unknown" range exists for a category
-router.post('/ensure-unknown-range', requireAuth, requireRole('superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'), async (req, res) => {
+router.post('/ensure-unknown-range', requireAuth, requirePageAccess('RangeAnalyzer', ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee']), async (req, res) => {
   try {
     const { categoryId } = req.body;
 
@@ -874,7 +874,7 @@ router.post('/ensure-unknown-range', requireAuth, requireRole('superadmin', 'lis
 // Saves multiple range quantities to an assignment in ONE atomic operation
 // This avoids race conditions from multiple parallel requests
 // Supports auto-trim: if total exceeds remainingLimit, it trims proportionally
-router.post('/save-bulk-ranges', requireAuth, requireRole('superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'), async (req, res) => {
+router.post('/save-bulk-ranges', requireAuth, requirePageAccess('RangeAnalyzer', ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee']), async (req, res) => {
   try {
     const { assignmentId, categoryId, modelCounts, unknownQty, remainingLimit } = req.body;
     // modelCounts: [{ modelName: "Honda CR-V", count: 5 }, ...]

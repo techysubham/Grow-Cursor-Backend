@@ -1,6 +1,6 @@
 import express from 'express';
 import CreditCard from '../models/CreditCard.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -16,7 +16,7 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Create a new credit card
-router.post('/', requireAuth, requireRole('superadmin', 'hoc', 'compliance_manager', 'fulfillment_admin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('CreditCards'), async (req, res) => {
   try {
     const { name } = req.body;
     if (!name || !name.trim()) {
@@ -36,7 +36,7 @@ router.post('/', requireAuth, requireRole('superadmin', 'hoc', 'compliance_manag
 });
 
 // Delete a credit card
-router.delete('/:id', requireAuth, requireRole('superadmin', 'hoc', 'compliance_manager', 'fulfillment_admin'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('CreditCards'), async (req, res) => {
   try {
     const card = await CreditCard.findByIdAndDelete(req.params.id);
     if (!card) {

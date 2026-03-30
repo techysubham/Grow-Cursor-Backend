@@ -1,11 +1,11 @@
 import express from 'express';
 import ExtraExpense from '../models/ExtraExpense.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 
 const router = express.Router();
 
 // GET /api/extra-expenses - List all
-router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess('ExtraExpenses'), async (req, res) => {
     try {
         const expenses = await ExtraExpense.find().sort({ date: -1 });
         res.json(expenses);
@@ -15,7 +15,7 @@ router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // POST /api/extra-expenses - Create
-router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('ExtraExpenses'), async (req, res) => {
     try {
         const { date, name, amount, paidBy } = req.body;
 
@@ -32,7 +32,7 @@ router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // PUT /api/extra-expenses/:id - Update
-router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.put('/:id', requireAuth, requirePageAccess('ExtraExpenses'), async (req, res) => {
     try {
         const { id } = req.params;
         const { date, name, amount, paidBy } = req.body;
@@ -53,7 +53,7 @@ router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // DELETE /api/extra-expenses/:id - Delete
-router.delete('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('ExtraExpenses'), async (req, res) => {
     try {
         const { id } = req.params;
         const expense = await ExtraExpense.findById(id);

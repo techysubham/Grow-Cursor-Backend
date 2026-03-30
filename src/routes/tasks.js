@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Task from '../models/Task.js';
 
 const router = Router();
 
 // Create a product research entry (productadmin or superadmin)
-router.post('/', requireAuth, requireRole('superadmin', 'productadmin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('TaskList'), async (req, res) => {
   const body = req.body || {};
   try {
     // normalize legacy field names and defaults
@@ -112,7 +112,7 @@ router.get('/', requireAuth, async (req, res) => {
 
 
 // Assign a task to a lister (listingadmin or superadmin)
-router.post('/:id/assign', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.post('/:id/assign', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   const { listerId, quantity, listingPlatformId, storeId } = req.body || {};
   if (!listerId) return res.status(400).json({ error: 'listerId required' });
   if (!quantity) return res.status(400).json({ error: 'quantity required' });
@@ -132,7 +132,7 @@ router.post('/:id/assign', requireAuth, requireRole('superadmin', 'listingadmin'
 });
 
 // Update task fields (productadmin edits product fields; listingadmin can reassign)
-router.put('/:id', requireAuth, requireRole('superadmin', 'productadmin', 'listingadmin'), async (req, res) => {
+router.put('/:id', requireAuth, requirePageAccess('TaskList'), async (req, res) => {
   const { role } = req.user;
   const updates = req.body || {};
   const task = await Task.findById(req.params.id);
@@ -161,7 +161,7 @@ router.put('/:id', requireAuth, requireRole('superadmin', 'productadmin', 'listi
 });
 
 // Lister marks completed
-router.post('/:id/complete', requireAuth, requireRole('lister'), async (req, res) => {
+router.post('/:id/complete', requireAuth, requirePageAccess('TaskList', ['lister']), async (req, res) => {
   const { userId } = req.user;
   const { completedQuantity } = req.body || {};
   const task = await Task.findOne({ _id: req.params.id, assignedLister: userId });
@@ -180,7 +180,7 @@ router.post('/:id/complete', requireAuth, requireRole('lister'), async (req, res
 });
 
 // Admin-side analytics (platform/store/lister/date filters)
-router.get('/analytics', requireAuth, requireRole('superadmin', 'productadmin', 'listingadmin'), async (req, res) => {
+router.get('/analytics', requireAuth, requirePageAccess('ListingsSummary'), async (req, res) => {
   const { platformId, storeId, listerId, date } = req.query || {};
   const match = {};
   if (platformId) match.listingPlatform = platformId;
@@ -224,7 +224,7 @@ router.get('/analytics', requireAuth, requireRole('superadmin', 'productadmin', 
 });
 
 // Superadmin/listingadmin: admin-lister assignment summary
-router.get('/analytics/admin-lister', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.get('/analytics/admin-lister', requireAuth, requirePageAccess('ListerInfo'), async (req, res) => {
   const { platformId, storeId, listerId, date } = req.query || {};
   const match = {};
   if (platformId) match.listingPlatform = platformId;
@@ -278,7 +278,7 @@ router.get('/analytics/admin-lister', requireAuth, requireRole('superadmin', 'li
 });
 
 // Daily totals (optionally filtered by platform/store/lister)
-router.get('/analytics/daily', requireAuth, requireRole('superadmin', 'productadmin', 'listingadmin'), async (req, res) => {
+router.get('/analytics/daily', requireAuth, requirePageAccess('StoreDailyTasks'), async (req, res) => {
   const { platformId, storeId, listerId } = req.query || {};
   const match = {};
   if (platformId) match.listingPlatform = platformId;
@@ -316,7 +316,7 @@ router.get('/analytics/daily', requireAuth, requireRole('superadmin', 'productad
 });
 
 // Per-lister per day with platform/store breakdown
-router.get('/analytics/lister-daily', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.get('/analytics/lister-daily', requireAuth, requirePageAccess('ListerInfo'), async (req, res) => {
   const { listerId, platformId, storeId } = req.query || {};
   const match = {};
   if (listerId) match.assignedLister = listerId;
@@ -366,7 +366,7 @@ router.get('/analytics/lister-daily', requireAuth, requireRole('superadmin', 'li
 });
 
 // Listings summary grouped by assignment-day, platform and store (optional filters: platformId, storeId)
-router.get('/analytics/listings-summary', requireAuth, requireRole('superadmin', 'listingadmin', 'productadmin'), async (req, res) => {
+router.get('/analytics/listings-summary', requireAuth, requirePageAccess('ListingsSummary'), async (req, res) => {
   const { platformId, storeId } = req.query || {};
   const match = {};
   if (platformId) match.listingPlatform = new mongoose.Types.ObjectId(platformId);
@@ -425,7 +425,7 @@ router.get('/analytics/listings-summary', requireAuth, requireRole('superadmin',
 });
 
 // Delete a task and cascade to assignments and compatibility assignments
-router.delete('/:id', requireAuth, requireRole('superadmin', 'productadmin', 'listingadmin'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('TaskList'), async (req, res) => {
   try {
     const taskId = req.params.id;
     const task = await Task.findById(taskId);

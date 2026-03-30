@@ -1,11 +1,11 @@
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Salary from '../models/Salary.js';
 
 const router = Router();
 
 // GET /api/salary - Fetch all salaries for a specific year
-router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess('Salary'), async (req, res) => {
     try {
         const year = parseInt(req.query.year) || new Date().getFullYear();
 
@@ -42,7 +42,7 @@ router.get('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // POST /api/salary - Create a new empty salary row
-router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('Salary'), async (req, res) => {
     try {
         const { year, name, designation } = req.body;
 
@@ -65,7 +65,7 @@ router.post('/', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // PUT /api/salary/:id - Update salary for an existing row
-router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.put('/:id', requireAuth, requirePageAccess('Salary'), async (req, res) => {
     try {
         const { id } = req.params;
         const updateData = req.body;
@@ -92,7 +92,7 @@ router.put('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
 });
 
 // DELETE /api/salary/:id - Delete a salary row
-router.delete('/:id', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('Salary'), async (req, res) => {
     try {
         const { id } = req.params;
         const salary = await Salary.findByIdAndDelete(id);

@@ -1,13 +1,13 @@
 // routes/listingCompletions.js
 import express from 'express';
 import mongoose from 'mongoose';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import ListingCompletion from '../models/ListingCompletion.js';
 
 const router = express.Router();
 
 // Get listing completion history with filters
-router.get('/', requireAuth, requireRole('superadmin', 'listingadmin', 'productadmin'), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess('ListingSheet'), async (req, res) => {
   try {
     const { platformId, storeId, marketplace, startDate, endDate, listerId } = req.query;
     
@@ -41,7 +41,7 @@ router.get('/', requireAuth, requireRole('superadmin', 'listingadmin', 'producta
 });
 
 // Get aggregated listing sheet data
-router.get('/sheet', requireAuth, requireRole('superadmin', 'listingadmin', 'productadmin'), async (req, res) => {
+router.get('/sheet', requireAuth, requirePageAccess('ListingSheet'), async (req, res) => {
   try {
     const { platformId, storeId, marketplace, startDate, endDate, page, limit, category, subcategory, range } = req.query;
     

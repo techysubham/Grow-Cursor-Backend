@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import User from '../models/User.js';
 import Seller from '../models/Seller.js';
 import EmployeeProfile from '../models/EmployeeProfile.js';
@@ -108,13 +108,13 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
-router.get('/listers', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.get('/listers', requireAuth, requirePageAccess('AddUser'), async (req, res) => {
   const listers = await User.find({ role: 'lister', active: true }).select('email username role');
   res.json(listers);
 });
 
 // List compatibility editors (for superadmin or compatibilityadmin)
-router.get('/compatibility-editors', requireAuth, requireRole('superadmin', 'compatibilityadmin'), async (req, res) => {
+router.get('/compatibility-editors', requireAuth, requirePageAccess('AddCompatibilityEditor'), async (req, res) => {
   const editors = await User.find({ role: 'compatibilityeditor', active: true }).select('email username role');
   res.json(editors);
 });
@@ -140,7 +140,7 @@ router.get('/check-exists', requireAuth, async (req, res) => {
 // GET / - fetch all active users
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const users = await User.find({ active: true }).select('username email role department');
+    const users = await User.find({ active: true }).select('username email role department pagePermissions useCustomPermissions');
     res.json(users);
   } catch (e) {
     res.status(500).json({ error: 'Error fetching users' });
@@ -148,7 +148,7 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // PUT /:id/strict-timer - Toggle strict timer for a user (Superadmin only)
-router.put('/:id/strict-timer', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.put('/:id/strict-timer', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
   try {
     const { id } = req.params;
     const { isStrictTimer } = req.body;
@@ -192,6 +192,115 @@ router.put('/:id/strict-timer', requireAuth, requireRole('superadmin'), async (r
   } catch (error) {
     console.error('Error updating strict timer:', error);
     res.status(500).json({ error: 'Failed to update strict timer setting' });
+  }
+});
+
+// ============================================
+// PAGE ACCESS MANAGEMENT (Superadmin only)
+// ============================================
+
+// GET /:id/page-permissions - Get a user's page permissions
+router.get('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessManagement'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('username role pagePermissions useCustomPermissions');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({
+      userId: user._id,
+      username: user.username,
+      role: user.role,
+      pagePermissions: user.pagePermissions || [],
+      useCustomPermissions: user.useCustomPermissions || false
+    });
+  } catch (err) {
+    console.error('Error fetching page permissions:', err);
+    res.status(500).json({ error: 'Failed to fetch page permissions' });
+  }
+});
+
+// PUT /:id/page-permissions - Set a user's page permissions
+router.put('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessManagement'), async (req, res) => {
+  try {
+    const { pagePermissions, useCustomPermissions } = req.body;
+
+    if (!Array.isArray(pagePermissions)) {
+      return res.status(400).json({ error: 'pagePermissions must be an array of page IDs' });
+    }
+    if (typeof useCustomPermissions !== 'boolean') {
+      return res.status(400).json({ error: 'useCustomPermissions must be a boolean' });
+    }
+
+    // Increment permissionsVersion to invalidate existing sessions when permissions change
+    const currentUser = await User.findById(req.params.id).select('permissionsVersion');
+    const newPermissionsVersion = (currentUser.permissionsVersion || 1) + 1;
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { 
+        pagePermissions, 
+        useCustomPermissions,
+        permissionsVersion: newPermissionsVersion
+      },
+      { new: true, select: 'username role pagePermissions useCustomPermissions permissionsVersion' }
+    );
+
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    res.json({
+      message: `Page permissions updated for ${user.username}`,
+      userId: user._id,
+      username: user.username,
+      role: user.role,
+      pagePermissions: user.pagePermissions,
+      useCustomPermissions: user.useCustomPermissions
+    });
+  } catch (err) {
+    console.error('Error updating page permissions:', err);
+    res.status(500).json({ error: 'Failed to update page permissions' });
+  }
+});
+
+// ============================================
+// PASSWORD MANAGEMENT (Superadmin only)
+// ============================================
+
+// PUT /:id/password - Change a user's password (Superadmin only)
+router.put('/:id/password', requireAuth, requirePageAccess('UserPasswordManagement'), async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+
+    if (!newPassword || typeof newPassword !== 'string') {
+      return res.status(400).json({ error: 'newPassword is required and must be a string' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    }
+
+    const user = await User.findById(req.params.id).select('username email role');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Hash the new password
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    // Update the password AND increment tokenVersion to invalidate all existing sessions
+    const currentUser = await User.findById(req.params.id).select('tokenVersion');
+    const newTokenVersion = (currentUser.tokenVersion || 1) + 1;
+    
+    await User.findByIdAndUpdate(req.params.id, { 
+      passwordHash,
+      tokenVersion: newTokenVersion 
+    });
+
+    res.json({
+      message: `Password updated successfully for ${user.username}`,
+      userId: user._id,
+      username: user.username
+    });
+  } catch (err) {
+    console.error('Error changing user password:', err);
+    res.status(500).json({ error: 'Failed to change password' });
   }
 });
 

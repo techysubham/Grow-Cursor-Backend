@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import InternalMessage from '../models/InternalMessage.js';
 import User from '../models/User.js';
 
@@ -223,7 +223,7 @@ router.get('/unread-count', requireAuth, async (req, res) => {
 // ============================================
 
 // 6. SUPERADMIN: Get All Conversations
-router.get('/admin/all-conversations', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.get('/admin/all-conversations', requireAuth, requirePageAccess('ViewAllMessages'), async (req, res) => {
   try {
     const { page = 1, limit = 50, search } = req.query;
     const skip = (page - 1) * limit;
@@ -287,7 +287,7 @@ router.get('/admin/all-conversations', requireAuth, requireRole('superadmin'), a
 });
 
 // 7. SUPERADMIN: View Any Conversation
-router.get('/admin/conversation/:conversationId', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.get('/admin/conversation/:conversationId', requireAuth, requirePageAccess('ViewAllMessages'), async (req, res) => {
   try {
     const { conversationId } = req.params;
 

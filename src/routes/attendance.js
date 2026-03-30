@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Attendance from '../models/Attendance.js';
 import User from '../models/User.js';
 
@@ -237,7 +237,7 @@ router.get('/report', requireAuth, async (req, res) => {
 });
 
 // GET /admin/report - Admin endpoint for viewing all attendance (Superadmin only)
-router.get('/admin/report', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.get('/admin/report', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
     try {
         const { date, department, userId } = req.query;
 
@@ -273,7 +273,7 @@ router.get('/admin/report', requireAuth, requireRole('superadmin'), async (req, 
 });
 
 // POST /admin/force-stop/:attendanceId - Force stop a timer (Superadmin only)
-router.post('/admin/force-stop/:attendanceId', requireAuth, requireRole('superadmin'), async (req, res) => {
+router.post('/admin/force-stop/:attendanceId', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
     try {
         const { attendanceId } = req.params;
 
@@ -312,7 +312,7 @@ router.post('/admin/force-stop/:attendanceId', requireAuth, requireRole('superad
 });
 
 // Edit attendance hours - HR admin and superadmin only
-router.put('/admin/edit-hours/:attendanceId', requireAuth, requireRole('superadmin', 'hradmin'), async (req, res) => {
+router.put('/admin/edit-hours/:attendanceId', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
     try {
         const { attendanceId } = req.params;
         const { totalWorkTime } = req.body;
@@ -345,7 +345,7 @@ router.put('/admin/edit-hours/:attendanceId', requireAuth, requireRole('superadm
 });
 
 // Delete attendance record - HR admin and superadmin only
-router.delete('/admin/:attendanceId', requireAuth, requireRole('superadmin', 'hradmin'), async (req, res) => {
+router.delete('/admin/:attendanceId', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
     try {
         const { attendanceId } = req.params;
 

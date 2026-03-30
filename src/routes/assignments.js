@@ -1,7 +1,7 @@
 // routes/assignments.js
 import express from 'express';
 import mongoose from 'mongoose';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Assignment from '../models/Assignment.js';
 import Task from '../models/Task.js';
 import Range from '../models/Range.js';
@@ -14,7 +14,7 @@ const router = express.Router();
 /* -------------------- CREATE / LIST -------------------- */
 
 // Get all available filter options
-router.get('/filter-options', requireAuth, requireRole('superadmin', 'listingadmin', 'productadmin'), async (req, res) => {
+router.get('/filter-options', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   try {
     const [
       platforms,
@@ -82,7 +82,7 @@ router.get('/filter-options', requireAuth, requireRole('superadmin', 'listingadm
   }
 });
 
-router.post('/', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   try {
     const { taskId, listerId, quantity, listingPlatformId, storeId, notes, scheduledDate } = req.body || {};
     if (!taskId || !listerId || !quantity || !listingPlatformId || !storeId) {
@@ -132,7 +132,7 @@ router.post('/', requireAuth, requireRole('superadmin', 'listingadmin'), async (
 
 
 
-router.get('/', requireAuth, requireRole('superadmin', 'listingadmin', 'productadmin'), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   try {
     const {
       taskId, listerId, platformId, storeId,
@@ -245,7 +245,7 @@ router.get('/', requireAuth, requireRole('superadmin', 'listingadmin', 'producta
 
 /* -------------------- DELETE (CASCADE) -------------------- */
 // Delete an assignment and cascade delete any related compatibility assignments and listing completions
-router.delete('/:id', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   try {
     const { id } = req.params;
     const doc = await Assignment.findById(id);
@@ -275,7 +275,7 @@ router.delete('/:id', requireAuth, requireRole('superadmin', 'listingadmin'), as
 // List assignments for the logged-in lister
 router.get('/mine',
   requireAuth,
-  requireRole('superadmin', 'listingadmin', 'lister'),
+  requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'lister']),
   async (req, res) => {
     try {
       const me = req.user?.userId || req.user?.id;
@@ -302,7 +302,7 @@ router.get('/mine',
 );
 router.get('/mine/with-status',
   requireAuth,
-  requireRole('superadmin', 'listingadmin', 'lister'),
+  requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'lister']),
   async (req, res) => {
     try {
       const me = req.user?.userId || req.user?.id;
@@ -361,7 +361,7 @@ router.get('/mine/with-status',
 // Lister/admin completes an assignment
 router.post('/:id/complete',
   requireAuth,
-  requireRole('superadmin', 'listingadmin', 'lister'),
+  requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'lister']),
   async (req, res) => {
     const { id } = req.params;
     const { completedQuantity } = req.body || {};
@@ -399,7 +399,7 @@ router.post('/:id/complete',
 
 router.get('/analytics/admin-lister',
   requireAuth,
-  requireRole('superadmin', 'listingadmin', 'productadmin'),
+  requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'productadmin']),
   async (req, res) => {
     try {
       const rows = await Assignment.aggregate([
@@ -452,7 +452,7 @@ router.get('/analytics/admin-lister',
 
 router.get('/analytics/listings-summary',
   requireAuth,
-  requireRole('superadmin', 'listingadmin', 'productadmin'),
+  requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'productadmin']),
   async (req, res) => {
     try {
       const { platformId, storeId, dateMode, dateSingle, dateFrom, dateTo } = req.query;
@@ -594,7 +594,7 @@ router.get('/analytics/listings-summary',
 router.get(
   '/analytics/stock-ledger',
   requireAuth,
-  requireRole('superadmin', 'listingadmin', 'productadmin'),
+  requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'productadmin']),
   async (req, res) => {
     try {
       const { platformId, storeId, categoryId, subcategoryId, category, range } = req.query || {};
@@ -725,7 +725,7 @@ router.get(
 // Get range quantity distribution for an assignment
 router.get('/:id/ranges',
   requireAuth,
-  requireRole('superadmin', 'listingadmin', 'lister'),
+  requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'lister']),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -754,7 +754,7 @@ router.get('/:id/ranges',
 // Add or update range quantity for an assignment
 router.post('/:id/complete-range',
   requireAuth,
-  requireRole('superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'),
+  requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee']),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -850,7 +850,7 @@ router.post('/:id/complete-range',
 // Submit assignment (mark as complete)
 router.post('/:id/submit',
   requireAuth,
-  requireRole('superadmin', 'listingadmin', 'lister'),
+  requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'lister']),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -924,7 +924,7 @@ router.post('/:id/submit',
 );
 
 // --- NEW ROUTE: BULK ASSIGNMENT ---
-router.post('/bulk', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.post('/bulk', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   try {
     const {
       listerId,

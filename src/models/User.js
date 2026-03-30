@@ -28,7 +28,14 @@ const UserSchema = new mongoose.Schema(
     },
     department: { type: String, trim: true },
     active: { type: Boolean, default: true },
-    isStrictTimer: { type: Boolean, default: true } // Mandatory timer tracking (false for superadmin by default)
+    isStrictTimer: { type: Boolean, default: true }, // Mandatory timer tracking (false for superadmin by default)
+    // Dynamic page access control
+    pagePermissions: [{ type: String }], // Array of page IDs e.g. ['OrdersDashboard', 'FeedUpload']
+    useCustomPermissions: { type: Boolean, default: false }, // When true, only pagePermissions apply; when false, role-based defaults
+    // Token versioning for security (invalidate all sessions on password change)
+    tokenVersion: { type: Number, default: 1 }, // Increment on password change to invalidate all existing tokens
+    // Permissions versioning (invalidate sessions when permissions change)
+    permissionsVersion: { type: Number, default: 1 } // Increment when pagePermissions or useCustomPermissions change
   },
   { timestamps: true }
 );

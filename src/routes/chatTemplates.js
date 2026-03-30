@@ -1,5 +1,5 @@
  import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import ChatTemplate from '../models/ChatTemplate.js';
 
 const router = Router();
@@ -124,7 +124,7 @@ router.get('/', requireAuth, async (req, res) => {
  * GET /chat-templates/all
  * Get all templates (including inactive) for management
  */
-router.get('/all', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+router.get('/all', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const templates = await ChatTemplate.find()
       .sort({ category: 1, sortOrder: 1, createdAt: 1 })
@@ -141,7 +141,7 @@ router.get('/all', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'h
  * POST /chat-templates
  * Create a new template
  */
-router.post('/', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const { category, label, text } = req.body;
 
@@ -174,7 +174,7 @@ router.post('/', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc
  * PATCH /chat-templates/:id
  * Update a template
  */
-router.patch('/:id', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+router.patch('/:id', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const { id } = req.params;
     const { category, label, text, isActive, sortOrder } = req.body;
@@ -207,7 +207,7 @@ router.patch('/:id', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 
  * DELETE /chat-templates/:id
  * Soft delete a template (set isActive to false)
  */
-router.delete('/:id', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const { id } = req.params;
     const { hard } = req.query; // ?hard=true for permanent delete
@@ -229,7 +229,7 @@ router.delete('/:id', requireAuth, requireRole('fulfillmentadmin', 'superadmin',
  * POST /chat-templates/seed
  * Seed database with default templates (only if empty)
  */
-router.post('/seed', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.post('/seed', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const existingCount = await ChatTemplate.countDocuments();
     
@@ -272,7 +272,7 @@ router.post('/seed', requireAuth, requireRole('fulfillmentadmin', 'superadmin'),
  * PATCH /chat-templates/reorder
  * Reorder templates within a category
  */
-router.patch('/reorder', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+router.patch('/reorder', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const { orderedIds } = req.body; // Array of template IDs in new order
 

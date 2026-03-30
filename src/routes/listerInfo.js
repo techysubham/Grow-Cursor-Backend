@@ -1,12 +1,12 @@
 // routes/listerInfo.js
 import express from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Assignment from '../models/Assignment.js';
 
 const router = express.Router();
 
 // Get aggregated lister-wise task summary
-router.get('/summary', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.get('/summary', requireAuth, requirePageAccess('ListerInfo'), async (req, res) => {
   try {
     const aggregation = await Assignment.aggregate([
       {
@@ -76,7 +76,7 @@ router.get('/summary', requireAuth, requireRole('superadmin', 'listingadmin'), a
 });
 
 // Get detailed assignments for a specific lister and date
-router.get('/details', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.get('/details', requireAuth, requirePageAccess('ListerInfo'), async (req, res) => {
   try {
     const { listerId, date, page, limit } = req.query;
     

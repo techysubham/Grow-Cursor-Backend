@@ -1,15 +1,39 @@
 import { Router } from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess, requireRole } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
 import User from '../models/User.js';
+import UserSellerAssignment from '../models/UserSellerAssignment.js';
 
 const router = Router();
 
 // List all sellers (for admin dashboard)
-// --- FIX IS HERE: Added 'hoc', 'compliancemanager', and lister roles ---
-router.get('/all', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'compatibilityadmin', 'compatibilityeditor', 'listingadmin', 'hoc', 'compliancemanager', 'productadmin', 'lister', 'advancelister', 'trainee'), async (req, res) => {
-  const sellers = await Seller.find().populate('user', 'username email');
-  res.json(sellers);
+// Superadmin sees all; other users see only their assigned sellers
+router.get('/all', requireAuth, async (req, res) => {
+  try {
+    if (req.user.role === 'superadmin') {
+      // Superadmin sees all sellers
+      const sellers = await Seller.find().populate('user', 'username email');
+      return res.json(sellers);
+    }
+
+    // For non-superadmin: get their seller assignments
+    const assignments = await UserSellerAssignment.find({ user: req.user.userId }).select('seller').lean();
+    const assignedSellerIds = assignments.map(a => a.seller);
+
+    if (assignedSellerIds.length === 0) {
+      // No assignments — return all sellers (backward compat for roles that had full access before)
+      // This preserves existing behavior for users who haven't been explicitly assigned sellers
+      const sellers = await Seller.find().populate('user', 'username email');
+      return res.json(sellers);
+    }
+
+    // Filter to only assigned sellers
+    const sellers = await Seller.find({ _id: { $in: assignedSellerIds } }).populate('user', 'username email');
+    res.json(sellers);
+  } catch (err) {
+    console.error('Error fetching sellers:', err);
+    res.status(500).json({ error: 'Failed to fetch sellers' });
+  }
 });
 
 // Get current seller profile and eBay marketplaces

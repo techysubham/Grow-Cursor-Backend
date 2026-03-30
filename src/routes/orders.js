@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Order from '../models/Order.js';
 import Seller from '../models/Seller.js';
 import Return from '../models/Return.js';
@@ -149,7 +149,7 @@ async function getCurrentNonCompliantSellerSet(optionalSellerId) {
   return nonCompliant;
 }
 
-router.get('/dashboard/monthly-delta', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.get('/dashboard/monthly-delta', requireAuth, requirePageAccess('OrdersDashboard'), async (req, res) => {
   try {
     const month = req.query.month || getPtDateString(new Date()).slice(0, 7);
     const previousMonth = getPreviousMonth(month);
@@ -219,7 +219,7 @@ router.get('/dashboard/monthly-delta', requireAuth, requireRole('fulfillmentadmi
   }
 });
 
-router.get('/dashboard/overview', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboard'), async (req, res) => {
   try {
     const date = req.query.date || getPtDateString(new Date());
     const { sellerId } = req.query;
@@ -400,7 +400,7 @@ router.get('/dashboard/overview', requireAuth, requireRole('fulfillmentadmin', '
 });
 
 // Get daily order statistics for all sellers
-router.get('/daily-statistics', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId } = req.query;
 
@@ -524,7 +524,7 @@ router.get('/daily-statistics', requireAuth, requireRole('fulfillmentadmin', 'su
 });
 
 // Get worksheet statistics for cancellations, returns, INR/disputes, and inquiries
-router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.get('/worksheet-statistics', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId } = req.query;
 
@@ -753,7 +753,7 @@ router.get('/worksheet-statistics', requireAuth, requireRole('fulfillmentadmin',
 });
 
 // Worksheet summary for cards (totals + open counts + totalOrders) based on the same filter as worksheet-statistics
-router.get('/worksheet-summary', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.get('/worksheet-summary', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId } = req.query;
 

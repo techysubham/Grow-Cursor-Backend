@@ -1,7 +1,7 @@
 import express from 'express';
 import Listing from '../models/Listing.js';
 import Seller from '../models/Seller.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 
 const router = express.Router();
 

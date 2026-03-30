@@ -9,7 +9,7 @@ import zlib from 'zlib';
 import path from 'path';
 import sharp from 'sharp';
 import FormData from 'form-data';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
 import Order from '../models/Order.js';
 import Return from '../models/Return.js';
@@ -1584,7 +1584,7 @@ router.get('/cancelled-orders', async (req, res) => {
 
 
 // Get a single order by orderId
-router.get('/order/:orderId', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.get('/order/:orderId', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   const { orderId } = req.params;
 
   try {
@@ -2180,7 +2180,7 @@ router.get('/all-orders-usd', async (req, res) => {
 });
 
 // Test endpoint to check Finances API basic connectivity (no filter)
-router.get('/test-finances-basic', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.get('/test-finances-basic', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { sellerId } = req.query;
 
   if (!sellerId) {
@@ -2237,7 +2237,7 @@ router.get('/test-finances-basic', requireAuth, requireRole('fulfillmentadmin', 
 });
 
 // Test endpoint to check Finances API for a single order
-router.get('/test-finances/:orderId', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.get('/test-finances/:orderId', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { orderId } = req.params;
   const { sellerId } = req.query;
 
@@ -2342,7 +2342,7 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
 });
 
 // Get count of orders needing ad fee backfill
-router.get('/backfill-ad-fees/count', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.get('/backfill-ad-fees/count', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { sellerId, sinceDate, allSellers } = req.query;
 
   if (!sellerId && allSellers !== 'true') {
@@ -2383,7 +2383,7 @@ router.get('/backfill-ad-fees/count', requireAuth, requireRole('fulfillmentadmin
 });
 
 // Update order earnings (user-entered from Fulfillment Dashboard)
-router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+router.post('/orders/:orderId/update-earnings', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     const { orderId } = req.params;
     const { orderEarnings } = req.body;
@@ -2434,7 +2434,7 @@ router.post('/orders/:orderId/update-earnings', requireAuth, requireRole('fulfil
 });
 
 // Handle Amazon refund received - zero out Amazon costs
-router.post('/orders/:orderId/amazon-refund-received', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+router.post('/orders/:orderId/amazon-refund-received', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     const { orderId } = req.params;
 
@@ -2478,7 +2478,7 @@ router.post('/orders/:orderId/amazon-refund-received', requireAuth, requireRole(
 
 // Backfill ad fees from eBay Finances API for orders since a given date
 // Supports single seller (sellerId) or all sellers (allSellers: true)
-router.post('/backfill-ad-fees', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.post('/backfill-ad-fees', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { sellerId, sinceDate, skipAlreadySet = true, allSellers } = req.body;
 
   if (!sellerId && !allSellers) {
@@ -2604,7 +2604,7 @@ router.post('/backfill-ad-fees', requireAuth, requireRole('fulfillmentadmin', 's
 
 // Backfill / recalculate orderEarnings for existing orders using totalDueSeller.value - adFeeGeneral
 // Supports single seller (sellerId) or all sellers (allSellers: true)
-router.post('/backfill-earnings', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.post('/backfill-earnings', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { sellerId, sinceDate, allSellers } = req.body;
 
   if (!sellerId && !allSellers) {
@@ -2680,7 +2680,7 @@ router.post('/backfill-earnings', requireAuth, requireRole('fulfillmentadmin', '
 });
 
 // Backfill Amazon financials (amazonTotal, amazonTotalINR, marketplaceFee, igst, totalCC, profit) from raw beforeTax / estimatedTax
-router.post('/backfill-amazon-financials', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.post('/backfill-amazon-financials', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { sellerId, sinceDate, allSellers } = req.body;
 
   if (!sellerId && !allSellers) {
@@ -3155,7 +3155,7 @@ router.post('/orders/:orderId/upload-tracking-multiple', async (req, res) => {
 });
 
 // Poll all sellers for new/updated orders with smart detection (PARALLEL + UTC-based)
-router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'compliancemanager', 'hoc'), async (req, res) => {
+router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     // Helper function to normalize dates for comparison (ignore milliseconds/format)
     function normalizeDateForComparison(date) {
@@ -3578,7 +3578,7 @@ router.post('/poll-all-sellers', requireAuth, requireRole('fulfillmentadmin', 's
 });
 
 // Poll all sellers for NEW ORDERS ONLY (Phase 1)
-router.post('/poll-new-orders', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'compliancemanager', 'hoc'), async (req, res) => {
+router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true, $ne: null } })
       .populate('user', 'username email');
@@ -3772,7 +3772,7 @@ router.post('/poll-new-orders', requireAuth, requireRole('fulfillmentadmin', 'su
 });
 
 // ONE-TIME RESYNC: Re-fetch orders from Dec 1, 2025 8AM UTC with USD conversion
-router.post('/resync-from-dec1', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.post('/resync-from-dec1', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true, $ne: null } })
       .populate('user', 'username email');
@@ -3904,7 +3904,7 @@ router.post('/resync-from-dec1', requireAuth, requireRole('fulfillmentadmin', 's
 });
 
 // Poll all sellers for ORDER UPDATES ONLY (Phase 2)
-router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'compliancemanager', 'hoc'), async (req, res) => {
+router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     // Helper function to normalize dates for comparison (ignore milliseconds/format)
     function normalizeDateForComparison(date) {
@@ -4207,7 +4207,7 @@ router.post('/poll-order-updates', requireAuth, requireRole('fulfillmentadmin', 
 });
 
 // Resync recent orders (last 10 days) - catches silent eBay changes where lastModifiedDate wasn't updated
-router.post('/resync-recent', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'compliancemanager', 'hoc'), async (req, res) => {
+router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     // Fields that should NOT be overwritten (manually set by team)
     const MANUAL_FIELDS = new Set([
@@ -4983,7 +4983,7 @@ router.patch('/orders/:orderId/dismiss-arrival', requireAuth, async (req, res) =
 // Fetch return requests from eBay Post-Order API and store in DB
 
 // Fetch return requests from eBay Post-Order API and store in DB
-router.post('/fetch-returns', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
       .populate('user', 'username');
@@ -5278,7 +5278,7 @@ router.get('/stored-returns', async (req, res) => {
 // ===== INR CASES ENDPOINTS =====
 
 // Fetch INR cases from eBay Post-Order API and store in DB
-router.post('/fetch-inr-cases', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
       .populate('user', 'username');
@@ -5526,7 +5526,7 @@ router.get('/stored-inr-cases', async (req, res) => {
 // ===== PAYMENT DISPUTES ENDPOINTS =====
 
 // Fetch Payment Disputes from eBay Fulfillment API and store in DB
-router.post('/fetch-payment-disputes', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
       .populate('user', 'username');
@@ -5789,7 +5789,7 @@ router.get('/issues-by-order', requireAuth, async (req, res) => {
 
 // 1. HEAVY SYNC: Fetch Inbox (Manual Trigger)
 // 1. HEAVY SYNC: Fetch Inbox (Smart Polling)
-router.post('/sync-inbox', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     console.log('[Sync Inbox] Starting smart message sync...');
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } }).populate('user', 'username email');
@@ -5893,7 +5893,7 @@ router.post('/sync-inbox', requireAuth, requireRole('fulfillmentadmin', 'superad
 //LIGHT SYNC: Active Thread Poll (Auto Interval)
 // Filters by SenderID to be lightweight
 // 2. LIGHT SYNC: Active Thread Poll
-router.post('/sync-thread', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.post('/sync-thread', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   const { sellerId, buyerUsername, itemId } = req.body;
 
   if (!sellerId || !buyerUsername) return res.status(400).json({ error: 'Missing identifiers' });
@@ -6054,7 +6054,7 @@ async function uploadImageToEbay(token, filePath) {
 }
 
 // 3. SEND MESSAGE (Chat Window)
-router.post('/send-message', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   const { orderId, buyerUsername, itemId, body, subject, mediaUrls } = req.body;
 
   try {
@@ -6835,7 +6835,7 @@ router.post('/chat/mark-unread', requireAuth, async (req, res) => {
 
 // Fetch buyer messages/inquiries from eBay Post-Order API and store in DB
 // Fetch buyer messages/inquiries from eBay Post-Order API and store in DB
-router.post('/fetch-messages', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.post('/fetch-messages', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
       .populate('user', 'username');
@@ -7008,7 +7008,7 @@ router.get('/stored-messages', async (req, res) => {
 
 
 // Mark message as resolved
-router.patch('/messages/:messageId/resolve', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.patch('/messages/:messageId/resolve', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   const { messageId } = req.params;
   const { isResolved } = req.body;
 
@@ -9228,7 +9228,7 @@ router.get('/item-images/:itemId', requireAuth, async (req, res) => {
 // ============================================
 
 // Get cache statistics (Admin only)
-router.get('/cache/stats', requireAuth, requireRole('superadmin', 'fulfillmentadmin'), (req, res) => {
+router.get('/cache/stats', requireAuth, requirePageAccess('SellerFunds'), (req, res) => {
   try {
     const stats = imageCache.getStats();
     const sizeInfo = imageCache.getSizeInfo();
@@ -9245,7 +9245,7 @@ router.get('/cache/stats', requireAuth, requireRole('superadmin', 'fulfillmentad
 });
 
 // Clear cache (Admin only)
-router.post('/cache/clear', requireAuth, requireRole('superadmin'), (req, res) => {
+router.post('/cache/clear', requireAuth, requirePageAccess('SellerFunds'), (req, res) => {
   try {
     imageCache.clear();
     res.json({
@@ -9259,7 +9259,7 @@ router.post('/cache/clear', requireAuth, requireRole('superadmin'), (req, res) =
 });
 
 // Seller Analytics - Aggregated data by day/week/month
-router.get('/seller-analytics', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc'), async (req, res) => {
+router.get('/seller-analytics', requireAuth, requirePageAccess('SellerAnalytics'), async (req, res) => {
   try {
     const { sellerId, groupBy = 'day', startDate, endDate, marketplace } = req.query;
 
@@ -9798,7 +9798,7 @@ async function processPendingPolicyMessages(limit = 50) {
 }
 
 // Compatibility endpoint path kept to avoid breaking existing UI button
-router.post('/orders/send-auto-messages', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.post('/orders/send-auto-messages', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const result = await processPendingPolicyMessages(50);
     res.json({
@@ -9814,7 +9814,7 @@ router.post('/orders/send-auto-messages', requireAuth, requireRole('fulfillmenta
 // =====================================================
 // AWAITING SHEET SUMMARY - Order counts by seller (no tracking)
 // =====================================================
-router.get('/awaiting-sheet-summary', requireAuth, requireRole('fulfillmentadmin', 'superadmin', 'hoc', 'compliancemanager'), async (req, res) => {
+router.get('/awaiting-sheet-summary', requireAuth, requirePageAccess('AwaitingSheet'), async (req, res) => {
   try {
     const { date, marketplace } = req.query;
 
@@ -10308,7 +10308,7 @@ export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDa
 // FEED UPLOAD SUCCESS STATS (aggregated day-wise by seller)
 // GET /api/ebay/feed/upload-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&sellerId=...
 // ============================================
-router.get('/feed/upload-stats', requireAuth, requireRole('superadmin', 'listingadmin'), async (req, res) => {
+router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId } = req.query;
 
@@ -10371,7 +10371,7 @@ router.get('/feed/upload-stats', requireAuth, requireRole('superadmin', 'listing
 // ============================================
 // SELLER FUNDS SUMMARY (All connected sellers)
 // ============================================
-router.get('/seller-funds-summary', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
   try {
     // Get all sellers with eBay tokens
     const sellers = await Seller.find({
@@ -10440,7 +10440,7 @@ router.get('/seller-funds-summary', requireAuth, requireRole('fulfillmentadmin',
 // ============================================
 // PROCESSING TRANSACTIONS for a specific seller
 // ============================================
-router.get('/processing-transactions/:sellerId', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.get('/processing-transactions/:sellerId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
   try {
     const seller = await Seller.findById(req.params.sellerId).populate('user', 'username');
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
@@ -10587,7 +10587,7 @@ router.get('/processing-transactions/:sellerId', requireAuth, requireRole('fulfi
 // ============================================
 // UPCOMING PAYOUTS for a specific seller
 // ============================================
-router.get('/upcoming-payouts/:sellerId', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.get('/upcoming-payouts/:sellerId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
   try {
     const seller = await Seller.findById(req.params.sellerId).populate('user', 'username');
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
@@ -10649,7 +10649,7 @@ router.get('/upcoming-payouts/:sellerId', requireAuth, requireRole('fulfillmenta
 // ============================================
 // ON HOLD TRANSACTIONS for a specific seller
 // ============================================
-router.get('/onhold-transactions/:sellerId', requireAuth, requireRole('fulfillmentadmin', 'superadmin'), async (req, res) => {
+router.get('/onhold-transactions/:sellerId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
   try {
     const seller = await Seller.findById(req.params.sellerId).populate('user', 'username');
     if (!seller) return res.status(404).json({ error: 'Seller not found' });

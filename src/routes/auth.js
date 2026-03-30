@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import User from '../models/User.js';
+import UserSellerAssignment from '../models/UserSellerAssignment.js';
 
 const router = Router();
 
@@ -23,8 +24,29 @@ router.post('/login', loginLimiter, async (req, res) => {
   if (!user.active) return res.status(401).json({ error: 'Account is not active' });
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return res.status(401).json({ error: 'Incorrect password' });
-  const token = jwt.sign({ userId: user._id.toString(), role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
-  res.json({ token, user: { id: user._id, email: user.email, username: user.username, role: user.role } });
+  const token = jwt.sign({ 
+    userId: user._id.toString(), 
+    role: user.role, 
+    tokenVersion: user.tokenVersion || 1,
+    permissionsVersion: user.permissionsVersion || 1
+  }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+  // Fetch assigned sellers for this user
+  const sellerAssignments = await UserSellerAssignment.find({ user: user._id }).select('seller').lean();
+  const assignedSellers = sellerAssignments.map(a => a.seller.toString());
+
+  res.json({
+    token,
+    user: {
+      id: user._id,
+      email: user.email,
+      username: user.username,
+      role: user.role,
+      pagePermissions: user.pagePermissions || [],
+      useCustomPermissions: user.useCustomPermissions || false,
+      assignedSellers
+    }
+  });
 });
 
 // Seed superadmin if none exists (development helper — disabled in production)
@@ -42,5 +64,3 @@ router.post('/seed-superadmin', async (req, res) => {
 });
 
 export default router;
-
-

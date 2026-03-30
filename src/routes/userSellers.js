@@ -1,5 +1,5 @@
 import express from 'express';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import UserDailyQuantity from '../models/UserDailyQuantity.js';
 
@@ -45,14 +45,10 @@ router.post('/assignments', requireAuth, requireHrOrSuperadmin, async (req, res)
             return res.status(400).json({ error: 'User ID and Seller ID are required' });
         }
 
-        // Check if seller is already assigned to someone else
-        const existing = await UserSellerAssignment.findOne({ seller: sellerId });
-        if (existing && existing.user.toString() !== userId) {
-            return res.status(400).json({ error: 'This seller is already assigned to another user. Unassign first or assign to the same user.' });
-        }
-
-        if (existing && existing.user.toString() === userId) {
-            return res.status(400).json({ error: 'This assignment already exists.' });
+        // Check if this specific user-seller pair already exists
+        const existing = await UserSellerAssignment.findOne({ user: userId, seller: sellerId });
+        if (existing) {
+            return res.status(400).json({ error: 'This user is already assigned to this seller.' });
         }
 
         const assignment = new UserSellerAssignment({
