@@ -30,6 +30,7 @@ import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import UserDailyQuantity from '../models/UserDailyQuantity.js';
 import CompatibilityBatchLog from '../models/CompatibilityBatchLog.js';
 import User from '../models/User.js';
+import ItemCategoryMap from '../models/ItemCategoryMap.js';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
@@ -1887,6 +1888,9 @@ router.get('/stored-orders', async (req, res) => {
           select: 'username email'
         }
       })
+      .populate('orderCategoryId', 'name')
+      .populate('orderRangeId', 'name')
+      .populate('orderProductId', 'name')
       // Sorting: ShipBy Date for awaiting (Oldest First), Arriving Date for Amazon Arrivals, Creation Date otherwise (Newest First)
       .sort(
         awaitingShipment === 'true'
@@ -4807,6 +4811,16 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
       purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
     const financials = await calculateFinancials({ ...orderData }, marketplace);
     Object.assign(orderData, financials);
+  }
+
+  // Auto-populate CRP if this item has been classified
+  if (orderData.itemNumber) {
+    const mapping = await ItemCategoryMap.findOne({ itemNumber: orderData.itemNumber }).lean();
+    if (mapping) {
+      orderData.orderCategoryId = mapping.categoryId;
+      orderData.orderRangeId = mapping.rangeId || null;
+      orderData.orderProductId = mapping.productId || null;
+    }
   }
 
   return orderData;

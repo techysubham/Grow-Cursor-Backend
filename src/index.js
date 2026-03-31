@@ -68,6 +68,7 @@ import salaryRoutes from './routes/salary.js';
 import aiRoutes from './routes/ai.js';
 import affiliateOrdersRoutes from './routes/affiliateOrders.js';
 import listingStatsRoutes from './routes/listingStats.js';
+import itemCategoryMapRoutes from './routes/itemCategoryMap.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
@@ -169,6 +170,7 @@ app.use('/api/salary', salaryRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/affiliate-orders', affiliateOrdersRoutes);
 app.use('/api/listing-stats', listingStatsRoutes);
+app.use('/api/item-category-map', itemCategoryMapRoutes);
 
 const port = process.env.PORT || 5000;
 
