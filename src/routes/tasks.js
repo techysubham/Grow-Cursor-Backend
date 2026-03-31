@@ -2,11 +2,12 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Task from '../models/Task.js';
+import User from '../models/User.js';
 
 const router = Router();
 
-// Create a product research entry (productadmin or superadmin)
-router.post('/', requireAuth, requirePageAccess('TaskList'), async (req, res) => {
+// Create a product research entry (productadmin or superadmin or users with ProductResearch permission)
+router.post('/', requireAuth, requirePageAccess(['TaskList', 'ProductResearch']), async (req, res) => {
   const body = req.body || {};
   try {
     // normalize legacy field names and defaults
@@ -44,35 +45,46 @@ router.post('/', requireAuth, requirePageAccess('TaskList'), async (req, res) =>
   }
 });
 
-// List tasks (productadmin see all; listingadmin see all; listers see assigned to them)
-// List tasks (productadmin see all; listingadmin see all; listers see assigned to them)
+// List tasks (productadmin see all; listingadmin see all; listers see assigned to them UNLESS they have ProductResearch permission)
 router.get('/', requireAuth, async (req, res) => {
   const { role, userId } = req.user;
   const { platformId, storeId, listerId, date, sortBy = 'date', sortOrder = 'desc', search } = req.query || {};
   const { page, limit } = req.query; // <-- no defaults here
 
-  const query = role === 'lister' ? { assignedLister: userId } : {};
-
-  if (role !== 'lister') {
-    if (platformId) query.listingPlatform = platformId;
-    if (storeId) query.store = storeId;
-    if (listerId) query.assignedLister = listerId;
-    if (date) {
-      const d = new Date(date);
-      const start = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-      const end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
-      query.date = { $gte: start, $lt: end };
-    }
-  }
-
-  if (search) {
-    query.$or = [
-      { productTitle: { $regex: search, $options: 'i' } },
-      { supplierLink: { $regex: search, $options: 'i' } }
-    ];
-  }
-
   try {
+    // Fetch user's custom permissions from database
+    const user = await User.findById(userId).select('pagePermissions useCustomPermissions').lean();
+    
+    // Check if lister has custom permission for ProductResearch
+    const hasProductResearchAccess = user && 
+      user.useCustomPermissions && 
+      user.pagePermissions && 
+      user.pagePermissions.includes('ProductResearch');
+
+    // Listers can only see their assigned tasks UNLESS they have ProductResearch permission
+    const query = (role === 'lister' && !hasProductResearchAccess) 
+      ? { assignedLister: userId } 
+      : {};
+
+    if (role !== 'lister' || hasProductResearchAccess) {
+      if (platformId) query.listingPlatform = platformId;
+      if (storeId) query.store = storeId;
+      if (listerId) query.assignedLister = listerId;
+      if (date) {
+        const d = new Date(date);
+        const start = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+        const end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+        query.date = { $gte: start, $lt: end };
+      }
+    }
+
+    if (search) {
+      query.$or = [
+        { productTitle: { $regex: search, $options: 'i' } },
+        { supplierLink: { $regex: search, $options: 'i' } }
+      ];
+    }
+
     const sortOptions = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
     const base = Task.find(query)
       .sort(sortOptions)
@@ -106,6 +118,7 @@ router.get('/', requireAuth, async (req, res) => {
       totalPages: Math.ceil(total / limitNum)
     });
   } catch (e) {
+    console.error('Error fetching tasks:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -132,32 +145,45 @@ router.post('/:id/assign', requireAuth, requirePageAccess('Assignments'), async 
 });
 
 // Update task fields (productadmin edits product fields; listingadmin can reassign)
-router.put('/:id', requireAuth, requirePageAccess('TaskList'), async (req, res) => {
-  const { role } = req.user;
+router.put('/:id', requireAuth, requirePageAccess(['TaskList', 'ProductResearch']), async (req, res) => {
+  const { role, userId } = req.user;
   const updates = req.body || {};
-  const task = await Task.findById(req.params.id);
-  if (!task) return res.status(404).json({ error: 'Not found' });
-  if (role === 'productadmin' || role === 'superadmin') {
-    // Product admin can only edit product fields (not listing fields)
-    if (updates.date !== undefined) task.date = new Date(updates.date);
-    if (updates.productTitle !== undefined) task.productTitle = updates.productTitle;
-    if (updates.supplierLink !== undefined) task.supplierLink = updates.supplierLink;
-    if (updates.sourcePrice !== undefined) task.sourcePrice = updates.sourcePrice;
-    if (updates.sellingPrice !== undefined) task.sellingPrice = updates.sellingPrice;
-    if (updates.sourcePlatformId !== undefined) task.sourcePlatform = updates.sourcePlatformId;
-    if (updates.categoryId !== undefined) task.category = updates.categoryId;
-    if (updates.subcategoryId !== undefined) task.subcategory = updates.subcategoryId;
-    if (updates.rangeId !== undefined) task.range = updates.rangeId;
-  } else if (role === 'listingadmin' || role === 'superadmin') {
-    // Listing admin can reassign lister, update quantity, listing platform, store
-    if (updates.listerId !== undefined) task.assignedLister = updates.listerId;
-    if (updates.quantity !== undefined) task.quantity = updates.quantity;
-    if (updates.listingPlatformId !== undefined) task.listingPlatform = updates.listingPlatformId;
-    if (updates.storeId !== undefined) task.store = updates.storeId;
+  
+  try {
+    // Fetch user's custom permissions
+    const user = await User.findById(userId).select('pagePermissions useCustomPermissions').lean();
+    const hasProductResearchAccess = user && 
+      user.useCustomPermissions && 
+      user.pagePermissions && 
+      user.pagePermissions.includes('ProductResearch');
+    
+    const task = await Task.findById(req.params.id);
+    if (!task) return res.status(404).json({ error: 'Not found' });
+    
+    if (role === 'productadmin' || role === 'superadmin' || hasProductResearchAccess) {
+      // Product admin or users with ProductResearch permission can edit product fields
+      if (updates.date !== undefined) task.date = new Date(updates.date);
+      if (updates.productTitle !== undefined) task.productTitle = updates.productTitle;
+      if (updates.supplierLink !== undefined) task.supplierLink = updates.supplierLink;
+      if (updates.sourcePrice !== undefined) task.sourcePrice = updates.sourcePrice;
+      if (updates.sellingPrice !== undefined) task.sellingPrice = updates.sellingPrice;
+      if (updates.sourcePlatformId !== undefined) task.sourcePlatform = updates.sourcePlatformId;
+      if (updates.categoryId !== undefined) task.category = updates.categoryId;
+      if (updates.subcategoryId !== undefined) task.subcategory = updates.subcategoryId;
+      if (updates.rangeId !== undefined) task.range = updates.rangeId;
+    } else if (role === 'listingadmin') {
+      // Listing admin can reassign lister, update quantity, listing platform, store
+      if (updates.listerId !== undefined) task.assignedLister = updates.listerId;
+      if (updates.quantity !== undefined) task.quantity = updates.quantity;
+      if (updates.listingPlatformId !== undefined) task.listingPlatform = updates.listingPlatformId;
+      if (updates.storeId !== undefined) task.store = updates.storeId;
+    }
+    await task.save();
+    await task.populate(['category', 'subcategory', 'range', 'sourcePlatform', 'listingPlatform', 'store', 'assignedLister', 'createdBy']);
+    res.json(task);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  await task.save();
-  await task.populate(['category', 'subcategory', 'range', 'sourcePlatform', 'listingPlatform', 'store', 'assignedLister', 'createdBy']);
-  res.json(task);
 });
 
 // Lister marks completed
@@ -425,7 +451,7 @@ router.get('/analytics/listings-summary', requireAuth, requirePageAccess('Listin
 });
 
 // Delete a task and cascade to assignments and compatibility assignments
-router.delete('/:id', requireAuth, requirePageAccess('TaskList'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess(['TaskList', 'ProductResearch']), async (req, res) => {
   try {
     const taskId = req.params.id;
     const task = await Task.findById(taskId);
