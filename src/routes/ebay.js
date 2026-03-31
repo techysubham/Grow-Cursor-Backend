@@ -4099,6 +4099,42 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
 
                 // Always save ALL changes to DB (even non-notifiable)
                 Object.assign(existingOrder, orderData);
+                
+                // Check if order became FULLY_REFUNDED and set earnings to $0
+                if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
+                  existingOrder.orderEarnings = 0;
+                  
+                  // Recalculate financial fields with $0 earnings
+                  const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                    existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                  const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+                  existingOrder.tds = financials.tds;
+                  existingOrder.tid = financials.tid;
+                  existingOrder.net = financials.net;
+                  existingOrder.pBalanceINR = financials.pBalanceINR;
+                  existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                  existingOrder.profit = financials.profit;
+                  
+                  console.log(`  ❌ FULLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
+                } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
+                  // For PARTIALLY_REFUNDED: use totalDueSeller (do NOT subtract adFee)
+                  const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
+                  existingOrder.orderEarnings = parseFloat(totalDueSeller.toFixed(2));
+                  
+                  // Recalculate financial fields
+                  const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                    existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                  const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
+                  existingOrder.tds = financials.tds;
+                  existingOrder.tid = financials.tid;
+                  existingOrder.net = financials.net;
+                  existingOrder.pBalanceINR = financials.pBalanceINR;
+                  existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                  existingOrder.profit = financials.profit;
+                  
+                  console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to totalDueSeller: $${existingOrder.orderEarnings}`);
+                }
+                
                 await existingOrder.save();
 
                 // Fetch ad fee if not already set
@@ -4109,7 +4145,7 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
                       existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                       existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
 
-                      // Recalculate orderEarnings if this is a PAID order
+                      // Recalculate orderEarnings based on payment status
                       if (existingOrder.orderPaymentStatus === 'PAID') {
                         const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
                         const adFeeVal = parseFloat(existingOrder.adFeeGeneral || 0);
@@ -4127,6 +4163,39 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
                         existingOrder.profit = financials.profit;
 
                         console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
+                      } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
+                        // For PARTIALLY_REFUNDED: use totalDueSeller (do NOT subtract adFee)
+                        const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
+                        existingOrder.orderEarnings = parseFloat(totalDueSeller.toFixed(2));
+
+                        // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
+                        const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                          existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                        const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
+                        existingOrder.tds = financials.tds;
+                        existingOrder.tid = financials.tid;
+                        existingOrder.net = financials.net;
+                        existingOrder.pBalanceINR = financials.pBalanceINR;
+                        existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                        existingOrder.profit = financials.profit;
+
+                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - PARTIALLY_REFUNDED earnings: $${existingOrder.orderEarnings} (totalDueSeller)`);
+                      } else if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
+                        // For FULLY_REFUNDED: earnings = $0 (ad fee stored but not used in calculation)
+                        existingOrder.orderEarnings = 0;
+
+                        // Recalculate financial fields with $0
+                        const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                          existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                        const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+                        existingOrder.tds = financials.tds;
+                        existingOrder.tid = financials.tid;
+                        existingOrder.net = financials.net;
+                        existingOrder.pBalanceINR = financials.pBalanceINR;
+                        existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                        existingOrder.profit = financials.profit;
+
+                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - FULLY_REFUNDED earnings: $0`);
                       } else {
                         console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
                       }
@@ -4332,6 +4401,41 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
             }
 
             if (hasChanges) {
+              // Check if order became FULLY_REFUNDED and set earnings to $0
+              if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
+                existingOrder.orderEarnings = 0;
+                
+                // Recalculate financial fields with $0 earnings
+                const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                  existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+                existingOrder.tds = financials.tds;
+                existingOrder.tid = financials.tid;
+                existingOrder.net = financials.net;
+                existingOrder.pBalanceINR = financials.pBalanceINR;
+                existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                existingOrder.profit = financials.profit;
+                
+                console.log(`  ❌ FULLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
+              } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
+                // For PARTIALLY_REFUNDED: use totalDueSeller (do NOT subtract adFee)
+                const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
+                existingOrder.orderEarnings = parseFloat(totalDueSeller.toFixed(2));
+                
+                // Recalculate financial fields
+                const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                  existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
+                existingOrder.tds = financials.tds;
+                existingOrder.tid = financials.tid;
+                existingOrder.net = financials.net;
+                existingOrder.pBalanceINR = financials.pBalanceINR;
+                existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                existingOrder.profit = financials.profit;
+                
+                console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to totalDueSeller: $${existingOrder.orderEarnings}`);
+              }
+              
               await existingOrder.save();
               updatedOrders.push({
                 orderId: existingOrder.orderId,
@@ -4348,7 +4452,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                   existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                   existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
 
-                  // Recalculate orderEarnings if this is a PAID order
+                  // Recalculate orderEarnings based on payment status
                   if (existingOrder.orderPaymentStatus === 'PAID') {
                     const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
                     const adFeeVal = parseFloat(existingOrder.adFeeGeneral || 0);
@@ -4366,6 +4470,39 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                     existingOrder.profit = financials.profit;
 
                     console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
+                  } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
+                    // For PARTIALLY_REFUNDED: use totalDueSeller (do NOT subtract adFee)
+                    const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
+                    existingOrder.orderEarnings = parseFloat(totalDueSeller.toFixed(2));
+
+                    // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
+                    const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                      existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                    const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
+                    existingOrder.tds = financials.tds;
+                    existingOrder.tid = financials.tid;
+                    existingOrder.net = financials.net;
+                    existingOrder.pBalanceINR = financials.pBalanceINR;
+                    existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                    existingOrder.profit = financials.profit;
+
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - PARTIALLY_REFUNDED earnings: $${existingOrder.orderEarnings} (totalDueSeller)`);
+                  } else if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
+                    // For FULLY_REFUNDED: earnings = $0 (ad fee stored but not used in calculation)
+                    existingOrder.orderEarnings = 0;
+
+                    // Recalculate financial fields with $0
+                    const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                      existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                    const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+                    existingOrder.tds = financials.tds;
+                    existingOrder.tid = financials.tid;
+                    existingOrder.net = financials.net;
+                    existingOrder.pBalanceINR = financials.pBalanceINR;
+                    existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                    existingOrder.profit = financials.profit;
+
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - FULLY_REFUNDED earnings: $0`);
                   } else {
                     console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
                   }
