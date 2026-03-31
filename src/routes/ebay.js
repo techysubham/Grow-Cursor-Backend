@@ -1945,7 +1945,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 
 // NEW ENDPOINT: All Orders with USD conversion
 router.get('/all-orders-usd', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit } = req.query;
 
   try {
     let query = {};
@@ -2069,6 +2069,24 @@ router.get('/all-orders-usd', async (req, res) => {
       query.$and.push({
         amazonAccount: { $exists: true, $ne: null, $ne: '' }
       });
+    }
+
+    // Filter by profit range
+    if (minProfit !== undefined || maxProfit !== undefined) {
+      query.$and = query.$and || [];
+      const profitCondition = {};
+      
+      if (minProfit !== undefined && minProfit !== '') {
+        profitCondition.$gte = parseFloat(minProfit);
+      }
+      
+      if (maxProfit !== undefined && maxProfit !== '') {
+        profitCondition.$lte = parseFloat(maxProfit);
+      }
+      
+      if (Object.keys(profitCondition).length > 0) {
+        query.$and.push({ profit: profitCondition });
+      }
     }
 
     // Calculate pagination
