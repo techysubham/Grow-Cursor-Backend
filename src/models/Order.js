@@ -131,6 +131,11 @@ const OrderSchema = new mongoose.Schema(
     totalCC: Number, // marketplaceFee + igst
     profit: { type: Number, default: 0 }, // P.Balance (INR) - A_total-inr - Total_CC
 
+    // CRP classification (Category / Range / Product)
+    orderCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'AsinListCategory', default: null },
+    orderRangeId: { type: mongoose.Schema.Types.ObjectId, ref: 'AsinListRange', default: null },
+    orderProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'AsinListProduct', default: null },
+
     // Manual logs field for internal notes (used in Issues & Resolutions)
     logs: { type: String, default: '' },
 

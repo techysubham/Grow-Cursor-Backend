@@ -5,10 +5,16 @@ import { requireAuth } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Get all products under a range
+// Get all products under a range (or all products when ?all=true)
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { rangeId } = req.query;
+    const { rangeId, all } = req.query;
+
+    if (all === 'true') {
+      const products = await AsinListProduct.find({}).sort({ name: 1 }).lean();
+      return res.json(products);
+    }
+
     if (!rangeId) {
       return res.status(400).json({ error: 'rangeId query param is required' });
     }
