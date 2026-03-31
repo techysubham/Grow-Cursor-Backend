@@ -1162,6 +1162,35 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================
+// CLEAR SCHEDULE TIMES
+// POST /template-listings/clear-schedule
+// Clears scheduleTime for all active-batch listings
+// ============================================
+router.post('/clear-schedule', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, batchFilter, batchId } = req.body;
+
+    if (!templateId || !sellerId) {
+      return res.status(400).json({ error: 'templateId and sellerId are required' });
+    }
+
+    const filter = { templateId, sellerId };
+    if (batchId) {
+      filter.downloadBatchId = batchId;
+    } else if (!batchFilter || batchFilter === 'active') {
+      filter.$or = [{ downloadBatchId: null }, { pendingRedownload: true }];
+    }
+
+    const result = await TemplateListing.updateMany(filter, { $set: { scheduleTime: '' } });
+
+    res.json({ cleared: result.modifiedCount });
+  } catch (error) {
+    console.error('[Clear Schedule] Error:', error.message);
+    res.status(500).json({ error: error.message || 'Failed to clear schedule times' });
+  }
+});
+
 // Bulk update listings
 router.put('/bulk-update', requireAuth, async (req, res) => {
   try {
@@ -2468,6 +2497,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             pendingRedownload: true,
             duplicateCount: (existingListing.duplicateCount || 0) + 1,
             lastDuplicateAttempt: Date.now(),
+            scheduleTime: '',
             updatedAt: Date.now()
           };
           const overwritableFields = ['title', 'description', 'startPrice', 'quantity', 'itemPhotoUrl', 'conditionId', 'format', 'duration', 'location'];
@@ -2871,6 +2901,11 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
             $set: {
               ...newData,
               status: 'active',
+              scheduleTime: '',
+              downloadBatchId: null,
+              downloadedAt: null,
+              downloadBatchNumber: null,
+              pendingRedownload: false,
               updatedAt: Date.now()
             }
           }
@@ -3130,6 +3165,11 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
             $set: {
               ...newData,
               status: 'active',
+              scheduleTime: '',
+              downloadBatchId: null,
+              downloadedAt: null,
+              downloadBatchNumber: null,
+              pendingRedownload: false,
               updatedAt: Date.now()
             }
           }
