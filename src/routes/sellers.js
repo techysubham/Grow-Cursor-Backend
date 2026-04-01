@@ -7,28 +7,11 @@ import UserSellerAssignment from '../models/UserSellerAssignment.js';
 const router = Router();
 
 // List all sellers (for admin dashboard)
-// Superadmin sees all; other users see only their assigned sellers
+// All authenticated users can see all sellers in dropdowns
 router.get('/all', requireAuth, async (req, res) => {
   try {
-    if (req.user.role === 'superadmin') {
-      // Superadmin sees all sellers
-      const sellers = await Seller.find().populate('user', 'username email');
-      return res.json(sellers);
-    }
-
-    // For non-superadmin: get their seller assignments
-    const assignments = await UserSellerAssignment.find({ user: req.user.userId }).select('seller').lean();
-    const assignedSellerIds = assignments.map(a => a.seller);
-
-    if (assignedSellerIds.length === 0) {
-      // No assignments — return all sellers (backward compat for roles that had full access before)
-      // This preserves existing behavior for users who haven't been explicitly assigned sellers
-      const sellers = await Seller.find().populate('user', 'username email');
-      return res.json(sellers);
-    }
-
-    // Filter to only assigned sellers
-    const sellers = await Seller.find({ _id: { $in: assignedSellerIds } }).populate('user', 'username email');
+    // Return all sellers for all authenticated users
+    const sellers = await Seller.find().populate('user', 'username email');
     res.json(sellers);
   } catch (err) {
     console.error('Error fetching sellers:', err);
