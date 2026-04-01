@@ -102,18 +102,6 @@ const OrderSchema = new mongoose.Schema(
     resolution: { type: String, default: null },
     remark: {
       type: String,
-      enum: [
-        'Delivered',
-        'In-transit',
-        'Not yet shipped',
-        'Shipped',
-        'Out for delivery',
-        'Delayed',
-        'Re-ordered',
-        'Refund',
-        'Return started',
-        'Processing'
-      ],
       default: null
     },
     // Financial calculations (All Orders Sheet)

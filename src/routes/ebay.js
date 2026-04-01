@@ -4103,11 +4103,11 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
 
                 // Always save ALL changes to DB (even non-notifiable)
                 Object.assign(existingOrder, orderData);
-                
+
                 // Check if order became FULLY_REFUNDED and set earnings to $0
                 if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
                   existingOrder.orderEarnings = 0;
-                  
+
                   // Recalculate financial fields with $0 earnings
                   const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                     existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
@@ -4118,13 +4118,13 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
                   existingOrder.pBalanceINR = financials.pBalanceINR;
                   existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                   existingOrder.profit = financials.profit;
-                  
+
                   console.log(`  ❌ FULLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
                 } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
                   // For PARTIALLY_REFUNDED: use totalDueSeller (do NOT subtract adFee)
                   const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
                   existingOrder.orderEarnings = parseFloat(totalDueSeller.toFixed(2));
-                  
+
                   // Recalculate financial fields
                   const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                     existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
@@ -4135,10 +4135,10 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
                   existingOrder.pBalanceINR = financials.pBalanceINR;
                   existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                   existingOrder.profit = financials.profit;
-                  
+
                   console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to totalDueSeller: $${existingOrder.orderEarnings}`);
                 }
-                
+
                 await existingOrder.save();
 
                 // Fetch ad fee if not already set
@@ -4408,7 +4408,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
               // Check if order became FULLY_REFUNDED and set earnings to $0
               if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
                 existingOrder.orderEarnings = 0;
-                
+
                 // Recalculate financial fields with $0 earnings
                 const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                   existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
@@ -4419,13 +4419,13 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                 existingOrder.pBalanceINR = financials.pBalanceINR;
                 existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                 existingOrder.profit = financials.profit;
-                
+
                 console.log(`  ❌ FULLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
               } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
                 // For PARTIALLY_REFUNDED: use totalDueSeller (do NOT subtract adFee)
                 const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
                 existingOrder.orderEarnings = parseFloat(totalDueSeller.toFixed(2));
-                
+
                 // Recalculate financial fields
                 const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                   existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
@@ -4436,10 +4436,10 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                 existingOrder.pBalanceINR = financials.pBalanceINR;
                 existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                 existingOrder.profit = financials.profit;
-                
+
                 console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to totalDueSeller: $${existingOrder.orderEarnings}`);
               }
-              
+
               await existingOrder.save();
               updatedOrders.push({
                 orderId: existingOrder.orderId,
@@ -5904,19 +5904,28 @@ router.get('/stored-payment-disputes', async (req, res) => {
 // Used by Fulfillment Dashboard to show an "Issues" column
 router.get('/issues-by-order', requireAuth, async (req, res) => {
   try {
-    const [cases, returns, disputes] = await Promise.all([
+    const [cases, returns, disputes, conversationMeta] = await Promise.all([
       Case.find({}, { orderId: 1, caseType: 1, status: 1, _id: 0 }).lean(),
       Return.find({}, { orderId: 1, returnStatus: 1, _id: 0 }).lean(),
-      PaymentDispute.find({}, { orderId: 1, paymentDisputeStatus: 1, reason: 1, _id: 0 }).lean()
+      PaymentDispute.find({}, { orderId: 1, paymentDisputeStatus: 1, reason: 1, _id: 0 }).lean(),
+      ConversationMeta.find({}, { orderId: 1, caseStatus: 1, _id: 0 }).lean()
     ]);
 
     // Build index: orderId -> array of issue objects
     const index = {};
+    const caseStatusByOrderId = new Map(
+      conversationMeta
+        .filter(meta => meta.orderId)
+        .map(meta => [meta.orderId, meta.caseStatus || 'Case Not Opened'])
+    );
 
     const addIssue = (orderId, issue) => {
       if (!orderId) return;
       if (!index[orderId]) index[orderId] = [];
-      index[orderId].push(issue);
+      index[orderId].push({
+        ...issue,
+        caseStatus: caseStatusByOrderId.get(orderId) || 'Case Not Opened'
+      });
     };
 
     cases.forEach(c => {
