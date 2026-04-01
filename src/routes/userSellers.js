@@ -5,20 +5,12 @@ import UserDailyQuantity from '../models/UserDailyQuantity.js';
 
 const router = express.Router();
 
-// Middleware to allow only HR and Superadmin
-const requireHrOrSuperadmin = (req, res, next) => {
-    if (['hr', 'hradmin', 'superadmin'].includes(req.user.role)) {
-        return next();
-    }
-    return res.status(403).json({ error: 'Access denied' });
-};
-
 // ============================================
 // ASSIGNMENTS
 // ============================================
 
 // Get all assignments
-router.get('/assignments', requireAuth, requireHrOrSuperadmin, async (req, res) => {
+router.get('/assignments', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
     try {
         const assignments = await UserSellerAssignment.find()
             .populate('user', 'username email role department')
@@ -37,7 +29,7 @@ router.get('/assignments', requireAuth, requireHrOrSuperadmin, async (req, res) 
 });
 
 // Assign seller to user
-router.post('/assignments', requireAuth, requireHrOrSuperadmin, async (req, res) => {
+router.post('/assignments', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
     try {
         const { userId, sellerId, dailyTarget } = req.body;
 
@@ -67,7 +59,7 @@ router.post('/assignments', requireAuth, requireHrOrSuperadmin, async (req, res)
 });
 
 // Update assignment daily target
-router.patch('/assignments/:id/target', requireAuth, requireHrOrSuperadmin, async (req, res) => {
+router.patch('/assignments/:id/target', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
     try {
         const { id } = req.params;
         const { dailyTarget } = req.body;
@@ -94,7 +86,7 @@ router.patch('/assignments/:id/target', requireAuth, requireHrOrSuperadmin, asyn
 });
 
 // Unassign seller
-router.delete('/assignments/:id', requireAuth, requireHrOrSuperadmin, async (req, res) => {
+router.delete('/assignments/:id', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
     try {
         const { id } = req.params;
         const deleted = await UserSellerAssignment.findByIdAndDelete(id);
@@ -144,8 +136,8 @@ router.get('/performance', requireAuth, async (req, res) => {
     }
 });
 
-// Update remarks (HR/Superadmin only)
-router.patch('/performance/:id/remarks', requireAuth, requireHrOrSuperadmin, async (req, res) => {
+// Update remarks
+router.patch('/performance/:id/remarks', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
     try {
         const { id } = req.params;
         const { remarks } = req.body;
