@@ -523,6 +523,90 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CRP Analytics  GET /orders/crp-analytics
+// Groups orders by Category, Range, or Product and returns counts.
+// Query params: startDate, endDate, sellerId, groupBy (category|range|product),
+//               excludeLowValue (true/false)
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), async (req, res) => {
+  try {
+    const { startDate, endDate, sellerId, groupBy = 'category', excludeLowValue } = req.query;
+
+    const match = {};
+
+    if (startDate || endDate) {
+      match.dateSold = {};
+      const PST_OFFSET_HOURS = 8;
+      if (startDate) {
+        const start = new Date(startDate);
+        start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
+        match.dateSold.$gte = start;
+      }
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setDate(end.getDate() + 1);
+        end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
+        match.dateSold.$lte = end;
+      }
+    }
+
+    if (sellerId) match.seller = new mongoose.Types.ObjectId(sellerId);
+    if (excludeLowValue === 'true') match.subtotalUSD = { $gte: 3 };
+
+    // Determine which field and lookup collection to use
+    const groupFieldMap = {
+      category: { field: 'orderCategoryId', from: 'asinlistcategories' },
+      range:    { field: 'orderRangeId',    from: 'asinlistranges' },
+      product:  { field: 'orderProductId',  from: 'asinlistproducts' },
+    };
+    const { field, from } = groupFieldMap[groupBy] || groupFieldMap.category;
+
+    const pipeline = [
+      { $match: match },
+      {
+        $group: {
+          _id: { $ifNull: [`$${field}`, null] },
+          count: { $sum: 1 },
+        }
+      },
+      {
+        $lookup: {
+          from,
+          localField: '_id',
+          foreignField: '_id',
+          as: 'taxDoc'
+        }
+      },
+      {
+        $project: {
+          _id: 1,
+          count: 1,
+          name: {
+            $cond: {
+              if: { $eq: ['$_id', null] },
+              then: 'Unassigned',
+              else: { $arrayElemAt: ['$taxDoc.name', 0] }
+            }
+          }
+        }
+      },
+      { $sort: { count: -1 } }
+    ];
+
+    const results = await Order.aggregate(pipeline);
+
+    res.json(results.map(r => ({
+      id: r._id ? r._id.toString() : null,
+      name: r.name || 'Unassigned',
+      count: r.count,
+    })));
+  } catch (error) {
+    console.error('Error fetching CRP analytics:', error);
+    res.status(500).json({ error: 'Failed to fetch CRP analytics' });
+  }
+});
+
 // Get worksheet statistics for cancellations, returns, INR/disputes, and inquiries
 router.get('/worksheet-statistics', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
