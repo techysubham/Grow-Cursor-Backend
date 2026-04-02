@@ -1947,7 +1947,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 
 // NEW ENDPOINT: All Orders with USD conversion
 router.get('/all-orders-usd', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
 
   try {
     let query = {};
@@ -2088,6 +2088,24 @@ router.get('/all-orders-usd', async (req, res) => {
       
       if (Object.keys(profitCondition).length > 0) {
         query.$and.push({ profit: profitCondition });
+      }
+    }
+
+    // Filter by subtotal range
+    if (minSubtotal !== undefined || maxSubtotal !== undefined) {
+      query.$and = query.$and || [];
+      const subtotalCondition = {};
+      
+      if (minSubtotal !== undefined && minSubtotal !== '') {
+        subtotalCondition.$gte = parseFloat(minSubtotal);
+      }
+      
+      if (maxSubtotal !== undefined && maxSubtotal !== '') {
+        subtotalCondition.$lte = parseFloat(maxSubtotal);
+      }
+      
+      if (Object.keys(subtotalCondition).length > 0) {
+        query.$and.push({ subtotal: subtotalCondition });
       }
     }
 
