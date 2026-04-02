@@ -44,6 +44,23 @@ function getPtDayRange(dateStr) {
   return { start, end };
 }
 
+// DST-aware: resolves midnight PT for any date string (handles PST=UTC-8 and PDT=UTC-7)
+function getPTDayBoundsUTC(dateStr) {
+  function findMidnightUTC(ds) {
+    const pdt = new Date(`${ds}T07:00:00.000Z`);
+    const ptStr = new Intl.DateTimeFormat('en-CA', { timeZone: PT_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(pdt);
+    const ptHour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: PT_TIMEZONE, hour: 'numeric', hour12: false, hourCycle: 'h23' }).format(pdt), 10);
+    if (ptStr === ds && ptHour === 0) return pdt;
+    return new Date(`${ds}T08:00:00.000Z`); // fallback to PST
+  }
+  const start = findMidnightUTC(dateStr);
+  const tmp = new Date(`${dateStr}T12:00:00.000Z`);
+  tmp.setUTCDate(tmp.getUTCDate() + 1);
+  const nextDateStr = tmp.toISOString().split('T')[0];
+  const end = new Date(findMidnightUTC(nextDateStr).getTime() - 1);
+  return { start, end };
+}
+
 function getMonthUtcRange(monthStr) {
   const [yearText, monthText] = String(monthStr).split('-');
   const year = Number(yearText);
@@ -537,18 +554,8 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
 
     if (startDate || endDate) {
       match.dateSold = {};
-      const PST_OFFSET_HOURS = 8;
-      if (startDate) {
-        const start = new Date(startDate);
-        start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
-        match.dateSold.$gte = start;
-      }
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setDate(end.getDate() + 1);
-        end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
-        match.dateSold.$lte = end;
-      }
+      if (startDate) match.dateSold.$gte = getPTDayBoundsUTC(startDate).start;
+      if (endDate)   match.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
     }
 
     if (sellerId) match.seller = new mongoose.Types.ObjectId(sellerId);
