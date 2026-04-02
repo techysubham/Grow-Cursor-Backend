@@ -1955,7 +1955,8 @@ router.get('/all-orders-usd', async (req, res) => {
   try {
     let query = {};
     if (sellerId) {
-      query.seller = sellerId;
+      // Convert sellerId to ObjectId for proper matching in MongoDB
+      query.seller = new mongoose.Types.ObjectId(sellerId);
     }
 
     // Exclude cancelled orders if requested
@@ -2206,7 +2207,7 @@ router.get('/all-orders-usd', async (req, res) => {
     }));
 
     // Calculate counts for categories, ranges, and products based on current filters
-    // Get unique category IDs and populate with names
+    // Use the same query object for aggregation since seller is already ObjectId
     const categoryData = await Order.aggregate([
       { $match: query },
       { $group: { _id: '$orderCategoryId', count: { $sum: 1 } } },
