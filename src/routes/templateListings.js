@@ -3530,7 +3530,7 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     // for that seller so Template Directory can show what was listed for them.
     // Fire-and-forget — any failure must not affect the already-sent CSV response.
     try {
-      const isTestingSeller = seller?.user?.username?.toLowerCase() === 'testing';
+      const isTestingSeller = seller?.user?.username?.toLowerCase() === 'growmentality';
       if (sellerId && !isTestingSeller) {
         const upsertOps = listings.map(listing => ({
           updateOne: {
@@ -3749,7 +3749,7 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
     // Snapshot: upsert TemplateListing records for the chosen real seller.
     // Uses inline-edited field values (what actually went into the CSV).
     try {
-      const isTestingSeller = seller?.user?.username?.toLowerCase() === 'testing';
+      const isTestingSeller = seller?.user?.username?.toLowerCase() === 'growmentality';
       if (sellerId && !isTestingSeller) {
         const upsertOps = listings.map(listing => {
           const getField = (name) => {

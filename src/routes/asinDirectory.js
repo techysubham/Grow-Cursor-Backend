@@ -5,11 +5,20 @@ import { requireAuth } from '../middleware/auth.js';
 import { fetchAmazonData } from '../utils/asinAutofill.js';
 
 // Scrape a batch of ASINs in parallel (max 5 at a time) and return enrichment map
-async function scrapeAsinsBatched(asinList, region = 'US', batchSize = 5) {
+// onAsinDone(completedSoFar, total) is called as each individual ASIN settles (optional)
+async function scrapeAsinsBatched(asinList, region = 'US', batchSize = 5, onAsinDone = null) {
   const enrichmentMap = new Map();
+  let completed = 0;
   for (let i = 0; i < asinList.length; i += batchSize) {
     const batch = asinList.slice(i, i + batchSize);
-    const results = await Promise.allSettled(batch.map(asin => fetchAmazonData(asin, region)));
+    const results = await Promise.allSettled(
+      batch.map(asin =>
+        fetchAmazonData(asin, region).finally(() => {
+          completed++;
+          if (onAsinDone) onAsinDone(completed, asinList.length);
+        })
+      )
+    );
     results.forEach((result, idx) => {
       const asin = batch[idx];
       if (result.status === 'fulfilled') {
@@ -60,6 +69,19 @@ router.get('/', requireAuth, async (req, res) => {
 
     const region = req.query.region || '';
     if (region) query.region = region;
+
+    // Moved-to-list date range filter
+    const movedAfter = req.query.movedAfter || '';
+    const movedBefore = req.query.movedBefore || '';
+    if (movedAfter || movedBefore) {
+      query.movedAt = {};
+      if (movedAfter) query.movedAt.$gte = new Date(movedAfter);
+      if (movedBefore) {
+        const end = new Date(movedBefore);
+        end.setHours(23, 59, 59, 999);
+        query.movedAt.$lte = end;
+      }
+    }
 
     // Price range filter — price is stored as a string (e.g. "$12.99"), use $expr to cast
     if (priceMin !== null || priceMax !== null) {
@@ -140,6 +162,85 @@ router.get('/stats', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Error fetching stats:', error);
     res.status(500).json({ error: 'Failed to fetch statistics' });
+  }
+});
+
+// Bulk add ASINs manually — streaming SSE version (GET, token via query param)
+router.get('/bulk-manual-stream', requireAuth, async (req, res) => {
+  const asinsParam = req.query.asins || '';
+  const region = req.query.region || 'US';
+
+  const asins = asinsParam
+    .split(',')
+    .map(a => a.trim().toUpperCase())
+    .filter(Boolean);
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const results = { added: 0, duplicates: 0, errors: [] };
+    const asinRegex = /^B[0-9A-Z]{9}$/;
+    const validAsins = asins.filter(a => asinRegex.test(a));
+    const invalidAsins = asins.filter(a => !asinRegex.test(a));
+    invalidAsins.forEach(a => results.errors.push({ asin: a, reason: 'Invalid ASIN format' }));
+
+    const total = validAsins.length;
+    send('progress', { done: 0, total });
+
+    const enrichmentMap = await scrapeAsinsBatched(validAsins, region, 5, (done) => {
+      send('progress', { done, total });
+    });
+
+    for (const asin of validAsins) {
+      try {
+        const enrichment = enrichmentMap.get(asin);
+        const doc = { asin };
+        if (enrichment?.ok) {
+          const d = enrichment.data;
+          doc.title = d.title || '';
+          doc.brand = d.brand || '';
+          doc.price = d.price ? String(d.price) : '';
+          doc.images = Array.isArray(d.images) ? d.images : [];
+          doc.description = d.description || '';
+          doc.color = d.color || '';
+          doc.compatibility = d.compatibility || '';
+          doc.model = d.model || '';
+          doc.material = d.material || '';
+          doc.specialFeatures = d.specialFeatures || '';
+          doc.size = d.size || '';
+          doc.scraped = true;
+          doc.scrapedAt = new Date();
+          doc.scrapeError = null;
+        } else {
+          doc.scraped = false;
+          doc.scrapeError = enrichment?.error || 'Scrape failed';
+        }
+        doc.region = region;
+        await AsinDirectory.create(doc);
+        results.added++;
+      } catch (err) {
+        if (err.code === 11000) {
+          results.duplicates++;
+        } else {
+          results.errors.push({ asin, reason: err.message });
+        }
+      }
+    }
+
+    send('complete', results);
+  } catch (err) {
+    console.error('SSE bulk-manual-stream error:', err);
+    send('error', { message: err.message || 'Failed to add ASINs' });
+  } finally {
+    res.end();
   }
 });
 

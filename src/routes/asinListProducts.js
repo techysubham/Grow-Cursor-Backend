@@ -72,7 +72,7 @@ router.post('/move', requireAuth, async (req, res) => {
 
     const result = await AsinDirectory.updateMany(
       { _id: { $in: asinIds } },
-      { listProductId: productId }
+      { listProductId: productId, movedAt: new Date() }
     );
 
     console.log(`✅ Moved ${result.modifiedCount} ASINs to product ${product.name} (${productId})`);
