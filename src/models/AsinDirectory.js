@@ -58,6 +58,12 @@ const asinDirectorySchema = new mongoose.Schema({
     index: true
   },
 
+  // Timestamp of when this ASIN was moved to a list via “Move to List”
+  movedAt: {
+    type: Date,
+    default: null
+  },
+
   // Marketplace / region this ASIN was scraped from
   region: {
     type: String,
