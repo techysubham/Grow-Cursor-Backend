@@ -552,7 +552,7 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
     }
 
     if (sellerId) match.seller = new mongoose.Types.ObjectId(sellerId);
-    if (excludeLowValue === 'true') match.subtotalUSD = { $gte: 3 };
+    if (excludeLowValue === 'true') match.$or = [{ subtotalUSD: { $gte: 3 } }, { subtotal: { $gte: 3 } }];
 
     // Determine which field and lookup collection to use
     const groupFieldMap = {
