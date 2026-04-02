@@ -31,6 +31,8 @@ import UserDailyQuantity from '../models/UserDailyQuantity.js';
 import CompatibilityBatchLog from '../models/CompatibilityBatchLog.js';
 import User from '../models/User.js';
 import ItemCategoryMap from '../models/ItemCategoryMap.js';
+import AutoCompatibilityBatch from '../models/AutoCompatibilityBatch.js';
+import OpenAI from 'openai';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
@@ -10902,6 +10904,542 @@ router.get('/onhold-transactions/:sellerId', requireAuth, requirePageAccess('Sel
   } catch (err) {
     console.error('[On Hold Transactions] Error:', err.response?.data || err.message);
     res.status(500).json({ error: 'Failed to fetch on hold transactions' });
+  }
+});
+
+// ============================================
+// AUTO-COMPATIBILITY — Fully automated fitment
+// ============================================
+
+// --- Server-side helpers (mirrored from client CompatibilityDashboard.jsx) ---
+const MAKE_ALIASES = {
+  'chevy': 'Chevrolet', 'chev': 'Chevrolet', 'vw': 'Volkswagen',
+  'volkswagon': 'Volkswagen', 'merc': 'Mercury', 'benz': 'Mercedes-Benz',
+  'mercedes': 'Mercedes-Benz', 'alfa': 'Alfa Romeo', 'land rover': 'Land Rover',
+  'landrover': 'Land Rover', 'range rover': 'Land Rover',
+};
+const resolveMake = (aiMake) => {
+  if (!aiMake) return aiMake;
+  return MAKE_ALIASES[aiMake.trim().toLowerCase()] || aiMake;
+};
+const resolveModel = (aiMake, aiModel) => {
+  if (!aiModel) return aiModel;
+  const makeLower = (aiMake || '').toLowerCase();
+  const modelLower = aiModel.toLowerCase();
+  if (makeLower === 'honda' && modelLower.includes('prologue')) return 'Prologue';
+  if (makeLower === 'honda' && modelLower.includes('fit')) return 'Fit';
+  if (makeLower === 'ram' && modelLower.includes('classic')) return 'Classic';
+  if (makeLower === 'tesla') {
+    if (/model\s*3/i.test(aiModel)) return '3';
+    if (/model\s*y/i.test(aiModel)) return 'Y';
+  }
+  if (makeLower === 'jeep' && /wrangler\s+j[a-z]/i.test(aiModel)) return 'Wrangler';
+  if (makeLower === 'toyota' && modelLower.includes('land cruiser')) return 'Land Cruiser';
+  if (modelLower.includes('silverado') && !/\d{4}/.test(modelLower)) return 'Silverado 1500';
+  if (makeLower === 'bmw' && modelLower.includes('3 series')) return '330i';
+  return aiModel;
+};
+const resolveModelWithYear = (make, model, startYear, endYear) => {
+  const makeLower = (make || '').toLowerCase();
+  const modelNorm = (model || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (makeLower === 'ford' && modelNorm === 'f250') {
+    return Number(endYear) && Number(endYear) < 1999 ? 'F-250' : 'F-250 Super Duty';
+  }
+  return model;
+};
+const clampYearRange = (make, model, startYear, endYear) => {
+  if (!startYear || !endYear) return { startYear, endYear };
+  const makeLower = (make || '').toLowerCase();
+  let start = Number(startYear), end = Number(endYear);
+  if (makeLower === 'dodge' && /ram\s*1500/i.test(model)) {
+    if (start < 1994) start = 1994;
+    if (end > 2014) end = 2014;
+    return { startYear: String(start), endYear: String(end) };
+  }
+  if (makeLower === 'ram') {
+    const numMatch = model.match(/(\d{4})/);
+    if (numMatch && Number(numMatch[1]) >= 1500) {
+      if (start < 2011) start = 2011;
+      if (end > 2026) end = 2026;
+      return { startYear: String(start), endYear: String(end) };
+    }
+  }
+  return { startYear, endYear };
+};
+const normModel = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const fuzzyMatchModel = (aiModel, options) => {
+  if (!aiModel || !options?.length) return null;
+  if (options.includes(aiModel)) return aiModel;
+  const normAi = normModel(aiModel);
+  return options.find(opt => normModel(opt) === normAi) || null;
+};
+
+// Lazy OpenAI singleton for auto-compat (reuses the fitment key)
+let _autoOpenai = null;
+function getAutoOpenAI() {
+  if (!_autoOpenai) {
+    _autoOpenai = new OpenAI({ apiKey: process.env.OPENAI_FITMENT_API_KEY });
+  }
+  return _autoOpenai;
+}
+
+// Helper: call OpenAI to extract fitment (same prompt as ai.js)
+async function aiSuggestFitment(title, description) {
+  const BOILERPLATE_SIGNALS = [
+    'Top Seller', 'Fast, Reliable Shipping', 'Always Free', '1-Day Processing',
+    'Questions?', "We're Happy to Help", 'Buy with Confidence',
+    'Ship from USA', 'Free & Fast Shipping', '30 Days Return',
+    'PLEASE VISIT OUR STORE', 'Thank you for shopping',
+    'All communication is handled', 'eBay\'s messaging platform',
+    'Orders ship within', 'carefully inspected before shipping',
+  ];
+  let rawText = (description || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  let cutAt = rawText.length;
+  for (const signal of BOILERPLATE_SIGNALS) {
+    const idx = rawText.indexOf(signal);
+    if (idx !== -1 && idx < cutAt) cutAt = idx;
+  }
+  const cleanDescription = rawText.slice(0, cutAt).trim().slice(0, 500);
+
+  const prompt = `You are an automotive parts expert. Extract all vehicle fitments from this eBay listing.
+
+IMPORTANT: Focus PRIMARILY on the Description for extracting fitment data. The Title may contain SEO keywords that are not actual fitment info. Use the Title only as supplementary context when the Description lacks detail.
+
+Description: ${cleanDescription}
+Title: ${title || ''}
+
+Return ONLY a valid JSON array (no markdown, no explanation) where each object has:
+- "make": string (e.g. "Toyota")
+- "model": string (e.g. "Camry")
+- "startYear": string or null (e.g. "2010")
+- "endYear": string or null (same as startYear if only one year)
+
+Rules:
+- If a year range is EXPLICITLY stated like "2008-2013", use startYear="2008" endYear="2013"
+- If a single year is EXPLICITLY stated like "2005", use startYear="2005" endYear="2005"
+- CRITICAL: If NO year is explicitly mentioned in the description or title for a fitment, you MUST set startYear and endYear to null. Do NOT guess, infer, or assume years based on the vehicle generation or your knowledge.
+- Only include make and model entries where you are confident based on the text
+- Do not invent or assume any data not explicitly present in the description or title
+- Use the most specific model name mentioned (e.g. "F-150" not just "F-Series")
+- If the description lists a compatibility/fitment table, extract all entries from it
+
+Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013"},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null}]`;
+
+  const completion = await getAutoOpenAI().chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0,
+    max_tokens: 500
+  });
+  const raw = completion.choices[0]?.message?.content?.trim() || '[]';
+  const cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+  let allFitments = [];
+  try {
+    allFitments = JSON.parse(cleaned);
+    if (!Array.isArray(allFitments)) allFitments = [];
+  } catch { allFitments = []; }
+
+  if (allFitments.length === 0) return { make: null, model: null, startYear: null, endYear: null, allFitments: [] };
+  const best = allFitments.reduce((prev, curr) => {
+    const prevGap = Number(prev.endYear) - Number(prev.startYear);
+    const currGap = Number(curr.endYear) - Number(curr.startYear);
+    return currGap > prevGap ? curr : prev;
+  });
+  return { make: best.make, model: best.model, startYear: best.startYear, endYear: best.endYear, allFitments };
+}
+
+// Helper: fetch eBay compatibility property values (reuses the /compatibility/values logic)
+async function fetchCompatValues(token, propertyName, constraints) {
+  let filterParam = '';
+  if (constraints && constraints.length > 0) {
+    filterParam = constraints.map(c => `${c.name}:${String(c.value).replace(/,/g, '\\,')}`).join(',');
+  }
+  const cacheKey = propertyName + (constraints?.length ? '_' + constraints.map(c => `${c.name}_${c.value}`).sort().join('_') : '');
+  const cachedData = await FitmentCache.findOne({ cacheKey });
+  if (cachedData) return cachedData.values;
+
+  const response = await axios.get(
+    'https://api.ebay.com/commerce/taxonomy/v1/category_tree/100/get_compatibility_property_values',
+    {
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' },
+      params: { category_id: '33559', compatibility_property: propertyName, filter: filterParam || undefined }
+    }
+  );
+  const values = (response.data.compatibilityPropertyValues || []).map(item => item.value);
+  if (values.length > 0) {
+    const isLongLived = ['Make', 'Model', 'Year'].includes(propertyName);
+    const ttlMs = isLongLived ? 60 * 24 * 60 * 60 * 1000 : 10 * 24 * 60 * 60 * 1000;
+    await FitmentCache.findOneAndUpdate({ cacheKey }, { cacheKey, values, lastUpdated: new Date(), expireAt: new Date(Date.now() + ttlMs) }, { upsert: true });
+  }
+  return values;
+}
+
+// POST /api/ebay/auto-compatibility
+// Body: { sellerId, targetDate (YYYY-MM-DD), itemLimit (0 = no limit) }
+router.post('/auto-compatibility', requireAuth, async (req, res) => {
+  const { sellerId, targetDate, itemLimit = 0 } = req.body;
+  if (!sellerId || !targetDate) {
+    return res.status(400).json({ error: 'sellerId and targetDate are required' });
+  }
+
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    // Find listings for this seller on the target date that have NO compatibility data
+    const dayStart = new Date(targetDate + 'T00:00:00Z');
+    const dayEnd = new Date(targetDate + 'T23:59:59.999Z');
+    const query = {
+      seller: sellerId,
+      listingStatus: 'Active',
+      startTime: { $gte: dayStart, $lte: dayEnd },
+      $or: [
+        { compatibility: { $exists: false } },
+        { compatibility: { $size: 0 } },
+        { compatibility: null }
+      ]
+    };
+
+    let listings = await Listing.find(query).sort({ startTime: 1 }).lean();
+    if (itemLimit > 0) listings = listings.slice(0, itemLimit);
+
+    if (listings.length === 0) {
+      return res.json({ success: true, message: 'No listings without compatibility found for this date.', batchId: null });
+    }
+
+    // Create batch document
+    const batch = await AutoCompatibilityBatch.create({
+      seller: sellerId,
+      triggeredBy: req.user.userId,
+      targetDate,
+      itemLimit: itemLimit || 0,
+      totalListings: listings.length,
+      status: 'running',
+      startedAt: new Date()
+    });
+
+    // Respond immediately with batchId
+    res.json({ success: true, batchId: batch._id, totalListings: listings.length });
+
+    // --- BACKGROUND PROCESSING ---
+    (async () => {
+      try {
+        const token = await ensureValidToken(seller);
+        let successCount = 0, warningCount = 0, needsManualCount = 0, ebayErrorCount = 0, aiFailedCount = 0;
+
+        for (let i = 0; i < listings.length; i++) {
+          const listing = listings[i];
+          const itemResult = {
+            itemId: listing.itemId,
+            title: listing.title,
+            sku: listing.sku || '',
+            status: 'ai_failed',
+            aiSuggestion: null,
+            resolvedMake: null,
+            resolvedModel: null,
+            failureReason: null,
+            compatibilityList: [],
+            ebayWarning: null,
+            ebayError: null,
+            strippedCount: 0
+          };
+
+          // Update live progress
+          await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
+            processedCount: i,
+            currentItemTitle: listing.title || listing.itemId,
+            currentStep: 'ai_suggest'
+          });
+
+          try {
+            // Step 1: AI suggest
+            const aiData = await aiSuggestFitment(listing.title, listing.descriptionPreview);
+            itemResult.aiSuggestion = aiData;
+
+            if (!aiData.make) {
+              itemResult.status = 'ai_failed';
+              itemResult.failureReason = 'AI could not extract fitment info from this listing';
+              aiFailedCount++;
+              await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
+                $push: { items: itemResult },
+                aiFailedCount,
+                processedCount: i + 1
+              });
+              continue;
+            }
+
+            // Step 2: Resolve make/model
+            const resolvedMake = resolveMake(aiData.make);
+            const resolvedModelStep1 = resolveModel(resolvedMake, aiData.model);
+            const resolvedModelInput = resolveModelWithYear(resolvedMake, resolvedModelStep1, aiData.startYear, aiData.endYear);
+            itemResult.resolvedMake = resolvedMake;
+
+            await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, { currentStep: 'fetching_models' });
+
+            // Step 3: Fetch models from eBay + fuzzy match
+            const modelOpts = await fetchCompatValues(token, 'Model', [{ name: 'Make', value: resolvedMake }]);
+            const canonicalModel = fuzzyMatchModel(resolvedModelInput, modelOpts);
+
+            if (!canonicalModel) {
+              itemResult.status = 'needs_manual';
+              itemResult.resolvedModel = resolvedModelInput;
+              itemResult.failureReason = `Model "${aiData.model}" (resolved: "${resolvedModelInput}") not found in eBay DB for ${resolvedMake}`;
+              needsManualCount++;
+              await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
+                $push: { items: itemResult },
+                needsManualCount,
+                processedCount: i + 1
+              });
+              continue;
+            }
+            itemResult.resolvedModel = canonicalModel;
+
+            await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, { currentStep: 'fetching_years' });
+
+            // Step 4: Fetch years + clamp to AI range
+            const yearOpts = (await fetchCompatValues(token, 'Year', [
+              { name: 'Make', value: resolvedMake },
+              { name: 'Model', value: canonicalModel }
+            ])).map(y => String(y)).sort((a, b) => Number(b) - Number(a));
+
+            let resolvedYears = [];
+            if (aiData.startYear && aiData.endYear) {
+              const clamped = clampYearRange(resolvedMake, canonicalModel, aiData.startYear, aiData.endYear);
+              const min = Math.min(Number(clamped.startYear), Number(clamped.endYear));
+              const max = Math.max(Number(clamped.startYear), Number(clamped.endYear));
+              resolvedYears = yearOpts.filter(y => Number(y) >= min && Number(y) <= max);
+            }
+
+            if (resolvedYears.length === 0) {
+              itemResult.status = 'needs_manual';
+              itemResult.failureReason = `Years ${aiData.startYear}-${aiData.endYear} not found in eBay DB for ${resolvedMake} ${canonicalModel}`;
+              needsManualCount++;
+              await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
+                $push: { items: itemResult },
+                needsManualCount,
+                processedCount: i + 1
+              });
+              continue;
+            }
+
+            await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, { currentStep: 'fetching_trims' });
+
+            // Step 5: Fetch trims + engines for all years (include ALL trims)
+            const compatibilityList = [];
+            for (const year of resolvedYears) {
+              const trims = await fetchCompatValues(token, 'Trim', [
+                { name: 'Make', value: resolvedMake },
+                { name: 'Model', value: canonicalModel },
+                { name: 'Year', value: year }
+              ]);
+
+              if (trims.length === 0) {
+                // No trims available — add Year/Make/Model only
+                compatibilityList.push({
+                  notes: '',
+                  nameValueList: [
+                    { name: 'Year', value: year },
+                    { name: 'Make', value: resolvedMake },
+                    { name: 'Model', value: canonicalModel }
+                  ]
+                });
+              } else {
+                for (const trim of trims) {
+                  const engines = await fetchCompatValues(token, 'Engine', [
+                    { name: 'Make', value: resolvedMake },
+                    { name: 'Model', value: canonicalModel },
+                    { name: 'Year', value: year },
+                    { name: 'Trim', value: trim }
+                  ]);
+
+                  if (engines.length === 0) {
+                    compatibilityList.push({
+                      notes: '',
+                      nameValueList: [
+                        { name: 'Year', value: year },
+                        { name: 'Make', value: resolvedMake },
+                        { name: 'Model', value: canonicalModel },
+                        { name: 'Trim', value: trim }
+                      ]
+                    });
+                  } else {
+                    for (const engine of engines) {
+                      compatibilityList.push({
+                        notes: '',
+                        nameValueList: [
+                          { name: 'Year', value: year },
+                          { name: 'Make', value: resolvedMake },
+                          { name: 'Model', value: canonicalModel },
+                          { name: 'Trim', value: trim },
+                          { name: 'Engine', value: engine }
+                        ]
+                      });
+                    }
+                  }
+                }
+              }
+            }
+
+            itemResult.compatibilityList = compatibilityList;
+
+            await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, { currentStep: 'sending_to_ebay' });
+
+            // Step 6: Send to eBay
+            const sanitized = sanitizeCompatibilityList(compatibilityList);
+            const compatXml = buildCompatXml(sanitized);
+            const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+              <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+                <ErrorLanguage>en_US</ErrorLanguage>
+                <WarningLevel>High</WarningLevel>
+                <Item><ItemID>${listing.itemId}</ItemID>${compatXml}</Item>
+              </ReviseFixedPriceItemRequest>`;
+
+            const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+              headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
+            });
+            const result = await parseStringPromise(response.data);
+            const ack = result.ReviseFixedPriceItemResponse.Ack[0];
+
+            if (ack === 'Failure') {
+              const errors = result.ReviseFixedPriceItemResponse.Errors || [];
+              const errorMessage = errors.map(e => e.LongMessage[0]).join('; ');
+
+              // Try duplicate-listing retry
+              if (isDuplicateListingError(errorMessage)) {
+                try {
+                  const { newPrice, newTitle, warning: retryWarning } = await retryCompatWithTitleDiff(token, listing.itemId, sanitized);
+                  await Listing.findOneAndUpdate({ itemId: listing.itemId }, { compatibility: sanitized, currentPrice: newPrice, title: newTitle });
+                  itemResult.status = 'success';
+                  itemResult.ebayWarning = retryWarning || `Title updated to "${newTitle}" (duplicate listing resolved)`;
+                  successCount++;
+                } catch (retryErr) {
+                  itemResult.status = 'ebay_error';
+                  itemResult.ebayError = `Duplicate listing — retry failed: ${retryErr.message}`;
+                  ebayErrorCount++;
+                }
+              } else {
+                itemResult.status = 'ebay_error';
+                itemResult.ebayError = parseInvalidCombos(errorMessage);
+                ebayErrorCount++;
+                purgeInvalidFromCache(errorMessage).catch(() => {});
+              }
+            } else {
+              // Success or Warning
+              let savedList = sanitized;
+              if (ack === 'Warning') {
+                const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
+                const meaningful = warnings.filter(err => {
+                  const msg = err.LongMessage[0];
+                  return !msg.includes('Best Offer') && !msg.includes('Funds from your sales');
+                });
+                if (meaningful.length > 0) {
+                  const rawWarning = meaningful.map(e => e.LongMessage[0]).join('; ');
+                  itemResult.ebayWarning = meaningful.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
+                  savedList = filterOutInvalidCombos(sanitized, rawWarning);
+                  itemResult.strippedCount = sanitized.length - savedList.length;
+                  purgeInvalidFromCache(rawWarning).catch(() => {});
+                  warningCount++;
+                } else {
+                  successCount++;
+                }
+                itemResult.status = 'warning';
+              } else {
+                itemResult.status = 'success';
+                successCount++;
+              }
+              itemResult.compatibilityList = savedList;
+              await Listing.findOneAndUpdate({ itemId: listing.itemId }, { compatibility: savedList });
+            }
+          } catch (itemErr) {
+            itemResult.status = 'ebay_error';
+            itemResult.ebayError = itemErr.message;
+            ebayErrorCount++;
+          }
+
+          // Save this item result
+          await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
+            $push: { items: itemResult },
+            processedCount: i + 1,
+            successCount, warningCount, needsManualCount, ebayErrorCount, aiFailedCount
+          });
+        }
+
+        // Mark batch complete
+        await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
+          status: 'completed',
+          completedAt: new Date(),
+          currentItemTitle: '',
+          currentStep: 'done'
+        });
+        console.log(`[AutoCompat] Batch ${batch._id} completed: ${successCount} success, ${warningCount} warning, ${needsManualCount} manual, ${ebayErrorCount} error, ${aiFailedCount} ai_failed`);
+      } catch (batchErr) {
+        console.error(`[AutoCompat] Batch ${batch._id} failed:`, batchErr.message);
+        await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
+          status: 'failed',
+          completedAt: new Date(),
+          currentStep: 'failed: ' + batchErr.message
+        });
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/ebay/auto-compatibility-status/:batchId
+router.get('/auto-compatibility-status/:batchId', requireAuth, async (req, res) => {
+  try {
+    const batch = await AutoCompatibilityBatch.findById(req.params.batchId)
+      .select('-items.compatibilityList') // Exclude large compat lists from polling
+      .lean();
+    if (!batch) return res.status(404).json({ error: 'Batch not found' });
+    res.json(batch);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/ebay/auto-compatibility-batch/:batchId — Full batch with compat lists (for manual review)
+router.get('/auto-compatibility-batch/:batchId', requireAuth, async (req, res) => {
+  try {
+    const batch = await AutoCompatibilityBatch.findById(req.params.batchId).lean();
+    if (!batch) return res.status(404).json({ error: 'Batch not found' });
+    res.json(batch);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/ebay/auto-compatibility-batches — History of auto-compat batches
+router.get('/auto-compatibility-batches', requireAuth, async (req, res) => {
+  try {
+    const { sellerId, page = 1, limit = 20 } = req.query;
+    const filter = {};
+    if (sellerId) filter.seller = sellerId;
+    const total = await AutoCompatibilityBatch.countDocuments(filter);
+    const batches = await AutoCompatibilityBatch.find(filter)
+      .select('-items')
+      .sort({ createdAt: -1 })
+      .skip((Number(page) - 1) * Number(limit))
+      .limit(Number(limit))
+      .populate('triggeredBy', 'username')
+      .populate('seller')
+      .lean();
+    res.json({ batches, total, pages: Math.ceil(total / Number(limit)) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/ebay/listing/:itemId — Get full listing details for review
+router.get('/listing/:itemId', requireAuth, async (req, res) => {
+  try {
+    const listing = await Listing.findOne({ itemId: req.params.itemId }).lean();
+    if (!listing) return res.status(404).json({ error: 'Listing not found' });
+    res.json(listing);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
