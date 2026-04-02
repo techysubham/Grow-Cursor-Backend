@@ -32,6 +32,9 @@ import CompatibilityBatchLog from '../models/CompatibilityBatchLog.js';
 import User from '../models/User.js';
 import ItemCategoryMap from '../models/ItemCategoryMap.js';
 import AutoCompatibilityBatch from '../models/AutoCompatibilityBatch.js';
+import AsinListCategory from '../models/AsinListCategory.js';
+import AsinListRange from '../models/AsinListRange.js';
+import AsinListProduct from '../models/AsinListProduct.js';
 import OpenAI from 'openai';
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -2202,6 +2205,46 @@ router.get('/all-orders-usd', async (req, res) => {
       return orderObj;
     }));
 
+    // Calculate counts for categories, ranges, and products based on current filters
+    // Get unique category IDs and populate with names
+    const categoryData = await Order.aggregate([
+      { $match: query },
+      { $group: { _id: '$orderCategoryId', count: { $sum: 1 } } },
+      { $match: { _id: { $ne: null } } }
+    ]);
+    const categoryIds = categoryData.map(c => c._id);
+    const categories = await AsinListCategory.find({ _id: { $in: categoryIds } }).select('name');
+    const categoriesWithCounts = categoryData.map(cd => {
+      const category = categories.find(c => c._id.toString() === cd._id.toString());
+      return { name: category?.name || 'Unknown', count: cd.count };
+    });
+
+    // Get unique range IDs and populate with names
+    const rangeData = await Order.aggregate([
+      { $match: query },
+      { $group: { _id: '$orderRangeId', count: { $sum: 1 } } },
+      { $match: { _id: { $ne: null } } }
+    ]);
+    const rangeIds = rangeData.map(r => r._id);
+    const ranges = await AsinListRange.find({ _id: { $in: rangeIds } }).select('name');
+    const rangesWithCounts = rangeData.map(rd => {
+      const range = ranges.find(r => r._id.toString() === rd._id.toString());
+      return { name: range?.name || 'Unknown', count: rd.count };
+    });
+
+    // Get unique product IDs and populate with names
+    const productData = await Order.aggregate([
+      { $match: query },
+      { $group: { _id: '$orderProductId', count: { $sum: 1 } } },
+      { $match: { _id: { $ne: null } } }
+    ]);
+    const productIds = productData.map(p => p._id);
+    const products = await AsinListProduct.find({ _id: { $in: productIds } }).select('name');
+    const productsWithCounts = productData.map(pd => {
+      const product = products.find(p => p._id.toString() === pd._id.toString());
+      return { name: product?.name || 'Unknown', count: pd.count };
+    });
+
     console.log(`[All Orders USD] Query: ${JSON.stringify(query)}, Page: ${pageNum}/${totalPages}, Found ${orders.length}/${totalOrders} orders`);
 
     res.json({
@@ -2213,6 +2256,14 @@ router.get('/all-orders-usd', async (req, res) => {
         ordersPerPage: limitNum,
         hasNextPage: pageNum < totalPages,
         hasPrevPage: pageNum > 1
+      },
+      counts: {
+        uniqueCategories: categories.length,
+        uniqueRanges: ranges.length,
+        uniqueProducts: products.length,
+        categoryData: categoriesWithCounts,
+        rangeData: rangesWithCounts,
+        productData: productsWithCounts
       }
     });
   } catch (err) {
