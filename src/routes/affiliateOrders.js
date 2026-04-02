@@ -2,6 +2,7 @@ import express from 'express';
 import Order from '../models/Order.js';
 import AmazonAccount from '../models/AmazonAccount.js';
 import AmazonAccountDailyBalance from '../models/AmazonAccountDailyBalance.js';
+import Seller from '../models/Seller.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -45,9 +46,10 @@ function getEffectiveSpendAmount(order) {
     return Number(amount) || 0;
 }
 
-function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = []) {
+function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = [], options = {}) {
     const { start, end } = buildDayRange(dateStr);
     const carryOverStart = buildDayRange(CARRY_OVER_START_DATE).start;
+    const { includeCompletedCarryOver = false } = options;
     const queueScopes = [{ dateSold: { $gte: start, $lte: end } }];
 
     if (start.getTime() > carryOverStart.getTime()) {
@@ -55,6 +57,14 @@ function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = []) {
             dateSold: { $gte: carryOverStart, $lt: start },
             sourcingStatus: 'Not Yet',
         });
+
+        if (includeCompletedCarryOver) {
+            queueScopes.push({
+                dateSold: { $gte: carryOverStart, $lt: start },
+                sourcingStatus: 'Done',
+                sourcingCompletedAt: { $gte: start, $lte: end },
+            });
+        }
     }
 
     const filters = [
@@ -115,21 +125,84 @@ function buildAffiliateSpendQuery(dateStr, excludeLowValue, extraFilters = []) {
 }
 
 // ---------------------------------------------------------------------------
-// TAB 1 — Daily Orders
-// GET /api/affiliate-orders/daily?date=YYYY-MM-DD
-// Returns all orders sold on that date, with seller name populated
+// TAB 1 — Daily Order Sellers
+// GET /api/affiliate-orders/daily/sellers?date=YYYY-MM-DD
+// Returns seller options for the current daily queue filters
 // ---------------------------------------------------------------------------
-router.get('/daily', async (req, res) => {
+router.get('/daily/sellers', async (req, res) => {
     try {
         const { date, excludeLowValue, includeDone } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
+        const shouldIncludeDone = includeDone === 'true';
 
         const extraFilters = [];
-        if (includeDone !== 'true') {
+        if (!shouldIncludeDone) {
             extraFilters.push({ sourcingStatus: { $ne: 'Done' } });
         }
 
-        const { query } = buildAffiliateQueueQuery(date, excludeLowValue, extraFilters);
+        const { query } = buildAffiliateQueueQuery(date, excludeLowValue, extraFilters, {
+            includeCompletedCarryOver: shouldIncludeDone,
+        });
+
+        const groupedSellers = await Order.aggregate([
+            { $match: query },
+            {
+                $group: {
+                    _id: '$seller',
+                    count: { $sum: 1 },
+                },
+            },
+        ]);
+
+        const sellerIds = groupedSellers
+            .map((row) => row._id)
+            .filter(Boolean);
+
+        const sellers = await Seller.find({ _id: { $in: sellerIds } })
+            .populate({ path: 'user', select: 'username' })
+            .lean();
+
+        const sellerNameById = new Map(
+            sellers.map((seller) => [String(seller._id), seller.user?.username || 'Unknown Seller'])
+        );
+
+        const sellerOptions = groupedSellers
+            .map((row) => ({
+                value: String(row._id),
+                label: sellerNameById.get(String(row._id)) || 'Unknown Seller',
+                count: row.count || 0,
+            }))
+            .sort((left, right) => left.label.localeCompare(right.label));
+
+        res.json(sellerOptions);
+    } catch (err) {
+        console.error('GET /affiliate-orders/daily/sellers error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// TAB 1 — Daily Orders
+// GET /api/affiliate-orders/daily?date=YYYY-MM-DD
+// Returns daily queue orders, optionally filtered by seller
+// ---------------------------------------------------------------------------
+router.get('/daily', async (req, res) => {
+    try {
+        const { date, excludeLowValue, includeDone, sellerId } = req.query;
+        if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
+        const shouldIncludeDone = includeDone === 'true';
+
+        const extraFilters = [];
+        if (!shouldIncludeDone) {
+            extraFilters.push({ sourcingStatus: { $ne: 'Done' } });
+        }
+        if (sellerId) {
+            extraFilters.push({ seller: sellerId });
+        }
+
+        const { query } = buildAffiliateQueueQuery(date, excludeLowValue, extraFilters, {
+            includeCompletedCarryOver: shouldIncludeDone,
+        });
 
         const orders = await Order.find(query)
             .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
@@ -392,7 +465,9 @@ router.get('/summary', async (req, res) => {
         const { date, excludeLowValue } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
-        const { start, end, query: queueQuery } = buildAffiliateQueueQuery(date, excludeLowValue);
+        const { start, end, query: queueQuery } = buildAffiliateQueueQuery(date, excludeLowValue, [], {
+            includeCompletedCarryOver: true,
+        });
         const { query: spendQuery } = buildAffiliateSpendQuery(date, excludeLowValue);
 
         // All orders in the active sourcing queue for the selected day
