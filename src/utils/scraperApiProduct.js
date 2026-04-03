@@ -564,9 +564,21 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         const brand = cleanText(data.brand?.replace(/^Visit the /, '').replace(/ Store$/, '') || '');
         const price = extractPriceFromStructured(data);
         
-        // Extract description from feature bullets (best source)
+        // Extract description — layered fallback chain:
+        // 1. feature_bullets (bulleted list, best source)
+        // 2. full_description (prose text from product description section)
+        // 3. empty string (logged for debugging)
         const features = data.feature_bullets || [];
-        const description = features.join('\n');
+        let description = features.join('\n');
+        if (!description) {
+          if (data.full_description) {
+            description = cleanText(data.full_description);
+            console.log(`[ScraperAPI] ℹ️ Used fallback full_description for ${asin}`);
+          } else {
+            // Debug: surface available top-level keys to identify new fallback fields
+            console.warn(`[ScraperAPI] ⚠️ No description found for ${asin}. Top-level keys: ${Object.keys(data).join(', ')}`);
+          }
+        }
         
         // Extract color, compatibility and new enrichment fields
         const color = extractColor(data);
