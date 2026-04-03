@@ -62,8 +62,13 @@ export async function fetchAmazonData(asin, region = 'US') {
       rawData: scrapedData // Store scraped data for debugging
     };
     
-    // Cache the result for future requests
-    setCachedAsinData(asin, result, region);
+    // Cache the result — skip if description is empty so the next request
+    // triggers a fresh scrape rather than serving a stale empty-description entry
+    if (result.description) {
+      setCachedAsinData(asin, result, region);
+    } else {
+      console.log(`[fetchAmazonData] ⚠️ Skipping cache for ${asin} (no description) — will retry on next request`);
+    }
     
     return result;
   } catch (error) {
