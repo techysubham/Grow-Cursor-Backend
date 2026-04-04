@@ -115,41 +115,48 @@ router.put('/:id', requireAuth, async (req, res) => {
 // Copy selected products (by id) into a target range
 router.post('/copy-to-range', requireAuth, async (req, res) => {
   try {
-    const { productIds, targetRangeId } = req.body;
+    const { productIds, targetRangeId, targetRangeIds } = req.body;
     if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
       return res.status(400).json({ error: 'productIds array is required' });
     }
-    if (!targetRangeId) {
-      return res.status(400).json({ error: 'targetRangeId is required' });
+
+    // Support both singular (legacy) and plural form
+    const rangeIds = targetRangeIds && targetRangeIds.length > 0
+      ? targetRangeIds
+      : targetRangeId ? [targetRangeId] : [];
+    if (rangeIds.length === 0) {
+      return res.status(400).json({ error: 'targetRangeId or targetRangeIds is required' });
     }
 
-    // Import range model to get categoryId of target range
     const AsinListRange = (await import('../models/AsinListRange.js')).default;
-    const targetRange = await AsinListRange.findById(targetRangeId).lean();
-    if (!targetRange) return res.status(404).json({ error: 'Target range not found' });
-
     const sourceProducts = await AsinListProduct.find({ _id: { $in: productIds } }).lean();
 
     let copied = 0;
     const skippedNames = [];
-    for (const src of sourceProducts) {
-      try {
-        await AsinListProduct.create({
-          name: src.name,
-          rangeId: targetRangeId,
-          categoryId: targetRange.categoryId
-        });
-        copied++;
-      } catch (err) {
-        if (err.code === 11000) {
-          skippedNames.push(src.name);
-        } else {
-          throw err;
+
+    for (const rangeId of rangeIds) {
+      const targetRange = await AsinListRange.findById(rangeId).lean();
+      if (!targetRange) continue;
+
+      for (const src of sourceProducts) {
+        try {
+          await AsinListProduct.create({
+            name: src.name,
+            rangeId,
+            categoryId: targetRange.categoryId
+          });
+          copied++;
+        } catch (err) {
+          if (err.code === 11000) {
+            skippedNames.push(src.name);
+          } else {
+            throw err;
+          }
         }
       }
     }
 
-    res.json({ copied, skipped: skippedNames.length, skippedNames });
+    res.json({ copied, skipped: skippedNames.length, skippedNames, rangesProcessed: rangeIds.length });
   } catch (error) {
     console.error('Error copying products to range:', error);
     res.status(500).json({ error: 'Failed to copy products' });
