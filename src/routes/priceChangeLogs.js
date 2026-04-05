@@ -1,11 +1,11 @@
 import express from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import PriceChangeLog from '../models/PriceChangeLog.js';
 
 const router = express.Router();
 
 // GET /api/price-change-logs — Get price change history with filters
-router.get('/', requireAuth, async (req, res) => {
+router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req, res) => {
   try {
     const {
       page = 1,
