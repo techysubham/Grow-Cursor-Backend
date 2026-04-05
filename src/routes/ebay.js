@@ -35,6 +35,7 @@ import AutoCompatibilityBatch from '../models/AutoCompatibilityBatch.js';
 import AsinListCategory from '../models/AsinListCategory.js';
 import AsinListRange from '../models/AsinListRange.js';
 import AsinListProduct from '../models/AsinListProduct.js';
+import PriceChangeLog from '../models/PriceChangeLog.js';
 import OpenAI from 'openai';
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -1950,7 +1951,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 
 // NEW ENDPOINT: All Orders with USD conversion
 router.get('/all-orders-usd', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemNumber, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
 
   try {
     let query = {};
@@ -2001,6 +2002,19 @@ router.get('/all-orders-usd', async (req, res) => {
         query.$and.push(buyerClause);
       } else {
         query.$or = buyerClause.$or;
+      }
+    }
+
+    // Search by item number (legacy item ID in lineItems)
+    if (searchItemNumber) {
+      const itemClause = {
+        'lineItems.legacyItemId': { $regex: searchItemNumber, $options: 'i' }
+      };
+
+      if (query.$and) {
+        query.$and.push(itemClause);
+      } else {
+        Object.assign(query, itemClause);
       }
     }
 
@@ -7810,6 +7824,26 @@ const escapeXml = (unsafe) => {
   });
 };
 
+// Helper: Create price change log entry
+async function createPriceChangeLog({ userId, sellerId, orderObjectId, itemId, orderId, productTitle, originalPrice, newPrice, success, errorMessage, ip, userAgent }) {
+  await PriceChangeLog.create({
+    user: userId,
+    seller: sellerId,
+    order: orderObjectId,
+    legacyItemId: itemId,
+    orderId: orderId || null,
+    productTitle: productTitle || null,
+    originalPrice,
+    newPrice,
+    priceDifference: newPrice - originalPrice,
+    changeSource: 'all_orders_sheet',
+    success,
+    errorMessage: errorMessage || undefined,
+    ipAddress: ip,
+    userAgent
+  });
+}
+
 // ============================================
 // API USAGE STATS CACHE (5-minute TTL)
 // ============================================
@@ -8625,13 +8659,22 @@ router.get('/all-listings', requireAuth, async (req, res) => {
 
 // UPDATE LISTING (Title, Description, Price)
 router.post('/update-listing', requireAuth, async (req, res) => {
-  const { sellerId, itemId, title, description, price } = req.body;
+  const { sellerId, itemId, title, description, price, orderId, productTitle } = req.body;
 
   try {
     const seller = await Seller.findById(sellerId);
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
 
     const token = await ensureValidToken(seller);
+
+    // Get original price from order subtotal for price change tracking
+    let originalPrice = null;
+    let orderObjectId = null;
+    if (price !== undefined && price !== null && orderId) {
+      const order = await Order.findOne({ orderId });
+      originalPrice = order?.subtotal ? parseFloat(order.subtotal) : null;
+      orderObjectId = order?._id || null;
+    }
 
     // Build Item XML content
     let itemContent = `<ItemID>${itemId}</ItemID>`;
@@ -8677,6 +8720,25 @@ router.post('/update-listing', requireAuth, async (req, res) => {
     if (ack === 'Failure') {
       const errors = result.ReviseFixedPriceItemResponse.Errors || [];
       const errorMessage = errors.map(e => e.LongMessage?.[0]).join('; ');
+      
+      // Log failed price change attempt
+      if (price !== undefined && price !== null && originalPrice !== null) {
+        await createPriceChangeLog({
+          userId: req.user.userId,
+          sellerId,
+          orderObjectId,
+          itemId,
+          orderId,
+          productTitle,
+          originalPrice,
+          newPrice: parseFloat(price),
+          success: false,
+          errorMessage,
+          ip: req.ip,
+          userAgent: req.get('user-agent')
+        });
+      }
+      
       throw new Error(`eBay Error: ${errorMessage}`);
     }
 
@@ -8689,17 +8751,33 @@ router.post('/update-listing', requireAuth, async (req, res) => {
 
     console.log(`[Update Listing] Success! ItemID: ${result.ReviseFixedPriceItemResponse.ItemID?.[0]}`);
 
-    // Update local DB
-    const updateFields = {};
-    if (title) updateFields.title = title;
-    if (description !== undefined) updateFields.descriptionPreview = extractCleanDescription(description);
-    if (price !== undefined && price !== null) updateFields.currentPrice = parseFloat(price);
+    // Log successful price change
+    if (price !== undefined && price !== null && originalPrice !== null) {
+      await createPriceChangeLog({
+        userId: req.user.userId,
+        sellerId,
+        orderObjectId,
+        itemId,
+        orderId,
+        productTitle,
+        originalPrice,
+        newPrice: parseFloat(price),
+        success: true,
+        errorMessage: null,
+        ip: req.ip,
+        userAgent: req.get('user-agent')
+      });
 
-    if (Object.keys(updateFields).length > 0) {
-      await ActiveListing.findOneAndUpdate(
-        { itemId: itemId },
-        updateFields
+      // Mark ALL orders with this legacy item ID as having price updated
+      // This matches all orders where any lineItem has this legacyItemId
+      const updateResult = await Order.updateMany(
+        { 'lineItems.legacyItemId': itemId },
+        {
+          priceUpdatedViaSheet: true,
+          lastPriceUpdateDate: new Date()
+        }
       );
+      console.log(`[Price Update] Marked ${updateResult.modifiedCount} orders with itemId ${itemId} as price-updated`);
     }
 
     res.json({ success: true, warning: warningMessage });
