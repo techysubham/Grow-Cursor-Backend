@@ -167,6 +167,10 @@ const OrderSchema = new mongoose.Schema(
       enum: ['Being Processed', 'Late Message', 'Cancellation Message', 'Alternative Message', 'Confirmation Message'],
       default: 'Being Processed'
     },
+
+    // Track if listing price was updated via All Orders Sheet
+    priceUpdatedViaSheet: { type: Boolean, default: false },
+    lastPriceUpdateDate: { type: Date, default: null },
   },
   { timestamps: true }
 );
