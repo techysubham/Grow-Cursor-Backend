@@ -16,7 +16,8 @@ router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req
       sellerId,
       startDate,
       endDate,
-      successOnly
+      successOnly,
+      failedOnly
     } = req.query;
 
     const query = {};
@@ -26,6 +27,7 @@ router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req
     if (userId) query.user = userId;
     if (sellerId) query.seller = sellerId;
     if (successOnly === 'true') query.success = true;
+    if (failedOnly === 'true') query.success = false;
 
     if (startDate || endDate) {
       query.createdAt = {};
