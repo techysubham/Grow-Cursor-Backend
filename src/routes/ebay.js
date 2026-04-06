@@ -46,7 +46,7 @@ const router = express.Router();
 // ============================================
 router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res) => {
   try {
-    const { sellerId, feedType = 'FX_LISTING', schemaVersion = '1.0' } = req.body;
+    const { sellerId, feedType = 'FX_LISTING', schemaVersion = '1.0', country = 'US' } = req.body;
     const file = req.file;
 
     if (!file) {
@@ -135,6 +135,7 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
       taskId: taskId,
       fileName: file.originalname,
       feedType: feedType,
+      country: country,
       schemaVersion: schemaVersion,
       status: 'CREATED' // Initial status
     });
@@ -239,7 +240,7 @@ router.get('/feed/tasks', requireAuth, async (req, res) => {
               if ((ebayTask.status === 'COMPLETED' || ebayTask.status === 'COMPLETED_WITH_ERROR') &&
                 oldStatus !== 'COMPLETED' && oldStatus !== 'COMPLETED_WITH_ERROR') {
                 newlyCompletedSuccessCount = ebayTask.uploadSummary.successCount;
-              }
+              }   
             }
             task.lastUpdated = new Date();
             await task.save();
@@ -10662,53 +10663,90 @@ export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDa
 // ============================================
 router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId } = req.query;
+    const { startDate, endDate, sellerId, country } = req.query;
 
     const matchStage = {
       status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
       'uploadSummary.successCount': { $gt: 0 }
     };
     if (sellerId) matchStage.seller = new mongoose.Types.ObjectId(sellerId);
+    
+    // Handle country filtering: if US, include records without country field (old data)
+    if (country) {
+      if (country === 'US') {
+        matchStage.$or = [
+          { country: 'US' },
+          { country: null },
+          { country: { $exists: false } }
+        ];
+      } else {
+        matchStage.country = country;
+      }
+    }
+    
     if (startDate || endDate) {
       matchStage.creationDate = {};
-      if (startDate) matchStage.creationDate.$gte = new Date(startDate);
+      if (startDate) {
+        // Convert IST date to UTC: subtract 5 hours 30 minutes (19800000 ms)
+        // Parse as UTC to avoid local timezone interpretation
+        const start = new Date(startDate + 'T00:00:00Z');
+        matchStage.creationDate.$gte = new Date(start.getTime() - (5.5 * 60 * 60 * 1000));
+      }
       if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        matchStage.creationDate.$lte = end;
+        // Convert IST date to UTC: subtract 5 hours 30 minutes from end of day
+        const end = new Date(endDate + 'T23:59:59.999Z');
+        matchStage.creationDate.$lte = new Date(end.getTime() - (5.5 * 60 * 60 * 1000));
       }
     }
 
     const rows = await FeedUpload.aggregate([
       { $match: matchStage },
+      // Add computed country field before grouping to handle null/missing
+      {
+        $addFields: {
+          normalizedCountry: { $ifNull: ['$country', 'US'] }
+        }
+      },
+      // Lookup seller to get username for grouping
+      {
+        $lookup: {
+          from: 'sellers',
+          localField: 'seller',
+          foreignField: '_id',
+          as: 'sellerDoc'
+        }
+      },
+      { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: false } },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'sellerDoc.user',
+          foreignField: '_id',
+          as: 'userDoc'
+        }
+      },
+      { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: false } },
       {
         $group: {
           _id: {
-            seller: '$seller',
-            date: { $dateToString: { format: '%Y-%m-%d', date: '$creationDate' } }
+            sellerName: '$userDoc.username',
+            date: { $dateToString: { format: '%Y-%m-%d', date: '$creationDate', timezone: 'Asia/Kolkata' } },
+            country: '$normalizedCountry'
           },
+          sellerId: { $first: '$seller' },
           totalSuccess: { $sum: '$uploadSummary.successCount' },
           totalFailure: { $sum: { $ifNull: ['$uploadSummary.failureCount', 0] } },
           taskCount: { $sum: 1 }
         }
       },
-      { $sort: { '_id.date': -1, '_id.seller': 1 } }
+      { $sort: { '_id.date': -1, '_id.sellerName': 1 } }
     ]);
 
-    // Collect unique seller IDs and populate usernames
-    const sellerIds = [...new Set(rows.map(r => r._id.seller.toString()))];
-    const sellers = await Seller.find({ _id: { $in: sellerIds } })
-      .populate('user', 'username')
-      .lean();
-    const sellerMap = {};
-    sellers.forEach(s => {
-      sellerMap[s._id.toString()] = s.user?.username || s._id.toString();
-    });
-
     const result = rows.map(r => ({
-      sellerId: r._id.seller,
-      sellerName: sellerMap[r._id.seller.toString()] || r._id.seller.toString(),
+      sellerId: r.sellerId,
+      sellerName: r._id.sellerName,
       date: r._id.date,
+      country: r._id.country || 'US',
       totalSuccess: r.totalSuccess,
       totalFailure: r.totalFailure,
       taskCount: r.taskCount

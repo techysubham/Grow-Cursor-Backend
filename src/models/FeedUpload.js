@@ -19,6 +19,12 @@ const feedUploadSchema = new mongoose.Schema({
         type: String,
         default: 'FX_LISTING'
     },
+    country: {
+        type: String,
+        enum: ['US', 'UK', 'AU', 'Canada'],
+        default: 'US',
+        required: true
+    },
     schemaVersion: {
         type: String,
         default: '1.0'
