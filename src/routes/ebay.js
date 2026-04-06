@@ -1908,10 +1908,34 @@ router.get('/stored-orders', async (req, res) => {
       .skip(skip)
       .limit(limitNum);
 
+    // Lookup ConversationMeta for each order to get category (Case) and caseStatus
+    const orderIds = orders.map(order => order.orderId).filter(Boolean);
+    const conversationMetas = await ConversationMeta.find({
+      orderId: { $in: orderIds }
+    }).select('orderId category caseStatus').lean();
+
+    // Create a map for quick lookup
+    const conversationMetaMap = new Map();
+    conversationMetas.forEach(meta => {
+      conversationMetaMap.set(meta.orderId, {
+        category: meta.category,
+        caseStatus: meta.caseStatus
+      });
+    });
+
+    // Add fromConvoManagement fields to each order
+    const ordersWithConvoData = orders.map(order => {
+      const orderObj = order.toObject();
+      const convoData = conversationMetaMap.get(order.orderId);
+      orderObj.convoCategory = convoData?.category || null;
+      orderObj.convoCaseStatus = convoData?.caseStatus || null;
+      return orderObj;
+    });
+
     console.log(`[Stored Orders] Query: ${JSON.stringify(query)}, Page: ${pageNum}/${totalPages}, Found ${orders.length}/${totalOrders} orders`);
 
     res.json({
-      orders,
+      orders: ordersWithConvoData,
       pagination: {
         currentPage: pageNum,
         totalPages,
