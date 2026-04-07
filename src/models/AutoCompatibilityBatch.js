@@ -16,6 +16,14 @@ const AutoCompatibilityBatchSchema = new mongoose.Schema({
   ebayErrorCount: { type: Number, default: 0 },
   aiFailedCount: { type: Number, default: 0 },
 
+  // Manual review summary (filled when user does manual review after batch)
+  manualReviewDone: { type: Boolean, default: false },
+  manualCorrectCount: { type: Number, default: 0 },
+  manualSkippedCount: { type: Number, default: 0 },
+  manualEndedCount: { type: Number, default: 0 },
+  reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  reviewedAt: { type: Date, default: null },
+
   // Currently processing item (for live progress)
   currentItemTitle: { type: String, default: '' },
   currentStep: { type: String, default: '' }, // e.g. 'ai_suggest', 'fetching_models', 'sending_to_ebay'

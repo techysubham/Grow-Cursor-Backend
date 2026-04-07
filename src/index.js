@@ -70,6 +70,7 @@ import aiRoutes from './routes/ai.js';
 import affiliateOrdersRoutes from './routes/affiliateOrders.js';
 import listingStatsRoutes from './routes/listingStats.js';
 import itemCategoryMapRoutes from './routes/itemCategoryMap.js';
+import AutoCompatibilityBatch from './models/AutoCompatibilityBatch.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
@@ -193,6 +194,23 @@ connectToDatabase()
 
     // Initialize scheduled jobs (e.g., daily timer auto-stop)
     initializeScheduledJobs();
+
+    // Recover any auto-compat batches that were left 'running' due to a previous server crash/restart
+    try {
+      const stuckBatches = await AutoCompatibilityBatch.updateMany(
+        { status: 'running' },
+        {
+          status: 'failed',
+          completedAt: new Date(),
+          currentStep: 'failed: server restarted while batch was running'
+        }
+      );
+      if (stuckBatches.modifiedCount > 0) {
+        console.log(`[AutoCompat] Marked ${stuckBatches.modifiedCount} stuck batch(es) as failed due to server restart`);
+      }
+    } catch (e) {
+      console.error('[AutoCompat] Failed to recover stuck batches:', e.message);
+    }
 
     // Start image cache auto-cleanup (removes expired entries every 10 minutes)
     imageCache.startAutoCleanup();

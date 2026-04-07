@@ -11627,6 +11627,14 @@ router.get('/auto-compatibility-batches', requireAuth, async (req, res) => {
     const { sellerId, page = 1, limit = 20 } = req.query;
     const filter = {};
     if (sellerId) filter.seller = sellerId;
+    if (req.query.manualReviewDone === 'true') filter.manualReviewDone = true;
+    if (req.query.triggeredBy) filter.triggeredBy = req.query.triggeredBy;
+    if (req.query.reviewedBy) filter.reviewedBy = req.query.reviewedBy;
+    if (req.query.dateFrom || req.query.dateTo) {
+      filter.targetDate = {};
+      if (req.query.dateFrom) filter.targetDate.$gte = req.query.dateFrom;
+      if (req.query.dateTo) filter.targetDate.$lte = req.query.dateTo;
+    }
     const total = await AutoCompatibilityBatch.countDocuments(filter);
     const batches = await AutoCompatibilityBatch.find(filter)
       .select('-items')
@@ -11634,9 +11642,33 @@ router.get('/auto-compatibility-batches', requireAuth, async (req, res) => {
       .skip((Number(page) - 1) * Number(limit))
       .limit(Number(limit))
       .populate('triggeredBy', 'username')
-      .populate('seller')
+      .populate('reviewedBy', 'username')
+      .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
       .lean();
     res.json({ batches, total, pages: Math.ceil(total / Number(limit)) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/ebay/auto-compatibility-batch/:batchId/review-summary — Save manual review action counts
+router.patch('/auto-compatibility-batch/:batchId/review-summary', requireAuth, async (req, res) => {
+  try {
+    const { correctCount, skippedCount, endedCount } = req.body;
+    const batch = await AutoCompatibilityBatch.findByIdAndUpdate(
+      req.params.batchId,
+      {
+        manualReviewDone: true,
+        manualCorrectCount: correctCount || 0,
+        manualSkippedCount: skippedCount || 0,
+        manualEndedCount: endedCount || 0,
+        reviewedBy: req.user.userId,
+        reviewedAt: new Date(),
+      },
+      { new: true }
+    );
+    if (!batch) return res.status(404).json({ error: 'Batch not found' });
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
