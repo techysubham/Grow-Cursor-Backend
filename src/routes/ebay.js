@@ -11602,6 +11602,7 @@ router.get('/auto-compatibility-status/:batchId', requireAuth, async (req, res) 
   try {
     const batch = await AutoCompatibilityBatch.findById(req.params.batchId)
       .select('-items.compatibilityList') // Exclude large compat lists from polling
+      .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
       .lean();
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
     res.json(batch);
@@ -11613,7 +11614,9 @@ router.get('/auto-compatibility-status/:batchId', requireAuth, async (req, res) 
 // GET /api/ebay/auto-compatibility-batch/:batchId — Full batch with compat lists (for manual review)
 router.get('/auto-compatibility-batch/:batchId', requireAuth, async (req, res) => {
   try {
-    const batch = await AutoCompatibilityBatch.findById(req.params.batchId).lean();
+    const batch = await AutoCompatibilityBatch.findById(req.params.batchId)
+      .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+      .lean();
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
     res.json(batch);
   } catch (err) {
