@@ -42,6 +42,29 @@ const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
 const activeAutoCompatBatchRuns = new Set();
 
+const DEFAULT_NEW_SELLER_SYNC_START = new Date(Date.UTC(2026, 2, 1, 0, 0, 0, 0));
+const EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS = 120;
+
+function getDefaultNewSellerSyncStart() {
+  return new Date(DEFAULT_NEW_SELLER_SYNC_START);
+}
+
+function getEffectiveInitialSyncDate(initialSyncDate) {
+  const defaultStart = getDefaultNewSellerSyncStart();
+  if (!initialSyncDate) return defaultStart;
+
+  const configuredStart = new Date(initialSyncDate);
+  return configuredStart < defaultStart ? defaultStart : configuredStart;
+}
+
+function getClampedSellerListStart(startTimeFrom, startTimeTo) {
+  const requestedStart = new Date(startTimeFrom);
+  const maxRangeStart = new Date(startTimeTo);
+  maxRangeStart.setUTCDate(maxRangeStart.getUTCDate() - EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS);
+
+  return requestedStart < maxRangeStart ? maxRangeStart : requestedStart;
+}
+
 function summarizeAutoCompatItems(items = []) {
   return items.reduce((acc, item) => {
     acc.processedCount += 1;
@@ -3766,8 +3789,8 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
         const latestOrder = await Order.findOne({ seller: seller._id }).sort({ creationDate: -1 });
         const latestCreationDate = latestOrder ? latestOrder.creationDate : null;
         const lastPolledAt = seller.lastPolledAt || null;
-        // Default initial sync date: Nov 1, 2025 00:00:00 UTC
-        const initialSyncDate = seller.initialSyncDate || new Date(Date.UTC(2025, 10, 1, 0, 0, 0, 0));
+        // Default initial sync date: Mar 1, 2026 00:00:00 UTC
+        const initialSyncDate = getEffectiveInitialSyncDate(seller.initialSyncDate);
 
         console.log(`[${sellerName}] Orders in DB: ${orderCount}, Latest: ${latestCreationDate?.toISOString() || 'NONE'}, LastPolled: ${lastPolledAt?.toISOString() || 'NEVER'}`);
 
@@ -4129,8 +4152,8 @@ router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), a
         const orderCount = await Order.countDocuments({ seller: seller._id });
         const latestOrder = await Order.findOne({ seller: seller._id }).sort({ creationDate: -1 });
         const latestCreationDate = latestOrder ? latestOrder.creationDate : null;
-        // Default initial sync date: Nov 1, 2025 00:00:00 UTC
-        const initialSyncDate = seller.initialSyncDate || new Date(Date.UTC(2025, 10, 1, 0, 0, 0, 0));
+        // Default initial sync date: Mar 1, 2026 00:00:00 UTC
+        const initialSyncDate = getEffectiveInitialSyncDate(seller.initialSyncDate);
         // Use current time without buffer - Render's servers have accurate NTP sync
         const currentTimeUTC = new Date(nowUTC);
 
@@ -7719,31 +7742,20 @@ router.post('/sync-listings', requireAuth, async (req, res) => {
     const token = await ensureValidToken(seller);
 
     // --- DATE LOGIC ---
-    // Req: Nov 27, 2025 at 5:00 AM IST -> Nov 26, 23:30 UTC
-    const hardStartDate = new Date('2025-11-26T23:30:00Z');
-    const nov11StartDate = new Date('2025-11-11T09:00:00Z');
-
-    // 1. Calculate count (This is correct now!)
     const listingCount = await Listing.countDocuments({ seller: sellerId, listingStatus: 'Active' });
+    const orderCount = await Order.countDocuments({ seller: sellerId });
+    const defaultStartDate = getEffectiveInitialSyncDate(seller.initialSyncDate);
+    const startTimeTo = new Date();
 
     let startTimeFrom;
 
-    if (listingCount === 0) {
-      // CASE A: NEW SELLER (Zero Listings)
-      console.log(`[Sync Listings] New seller detected (0 listings). Starting sync from Nov 11 (PST).`);
-      startTimeFrom = nov11StartDate;
+    if (listingCount === 0 && orderCount === 0) {
+      console.log(`[Sync Listings] New seller detected (0 listings, 0 orders). Starting sync from ${defaultStartDate.toISOString()}.`);
+      startTimeFrom = defaultStartDate;
     } else {
-      // CASE B: EXISTING SELLER
-      // FIX: Use 'hardStartDate' variable name here
-      startTimeFrom = seller.lastListingPolledAt || hardStartDate;
-
-      // Safety: If their last poll was somehow older than the old default
-      if (new Date(startTimeFrom) < hardStartDate) {
-        startTimeFrom = hardStartDate;
-      }
+      startTimeFrom = seller.lastListingPolledAt || defaultStartDate;
     }
-
-    const startTimeTo = new Date();
+    startTimeFrom = getClampedSellerListStart(startTimeFrom, startTimeTo);
     let page = 1;
     let totalPages = 1;
     let processedCount = 0;
@@ -7936,21 +7948,18 @@ router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
           const token = await ensureValidToken(seller);
 
           // --- DATE LOGIC (same as single-seller sync) ---
-          const hardStartDate = new Date('2025-11-26T23:30:00Z');
-          const nov11StartDate = new Date('2025-11-11T09:00:00Z');
           const listingCount = await Listing.countDocuments({ seller: seller._id, listingStatus: 'Active' });
+          const orderCount = await Order.countDocuments({ seller: seller._id });
+          const defaultStartDate = getEffectiveInitialSyncDate(seller.initialSyncDate);
+          const startTimeTo = new Date();
 
           let startTimeFrom;
-          if (listingCount === 0) {
-            startTimeFrom = nov11StartDate;
+          if (listingCount === 0 && orderCount === 0) {
+            startTimeFrom = defaultStartDate;
           } else {
-            startTimeFrom = seller.lastListingPolledAt || hardStartDate;
-            if (new Date(startTimeFrom) < hardStartDate) {
-              startTimeFrom = hardStartDate;
-            }
+            startTimeFrom = seller.lastListingPolledAt || defaultStartDate;
           }
-
-          const startTimeTo = new Date();
+          startTimeFrom = getClampedSellerListStart(startTimeFrom, startTimeTo);
           let page = 1;
           let totalPages = 1;
           let processedCount = 0;
