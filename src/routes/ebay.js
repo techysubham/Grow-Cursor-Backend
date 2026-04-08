@@ -2365,6 +2365,18 @@ router.get('/all-orders-usd', async (req, res) => {
   const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemNumber, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
 
   try {
+    const computedProfitExpression = {
+      $subtract: [
+        {
+          $subtract: [
+            { $ifNull: ['$pBalanceINR', 0] },
+            { $ifNull: ['$amazonTotalINR', 0] }
+          ]
+        },
+        { $ifNull: ['$totalCC', 0] }
+      ]
+    };
+
     let query = {};
     if (sellerId) {
       // Convert sellerId to ObjectId for proper matching in MongoDB
@@ -2502,21 +2514,27 @@ router.get('/all-orders-usd', async (req, res) => {
       });
     }
 
-    // Filter by profit range
+    // Filter by live-computed profit so stale stored profit values don't leak into the results.
     if (minProfit !== undefined || maxProfit !== undefined) {
       query.$and = query.$and || [];
-      const profitCondition = {};
+      const profitConditions = [];
       
       if (minProfit !== undefined && minProfit !== '') {
-        profitCondition.$gte = parseFloat(minProfit);
+        profitConditions.push({
+          $gte: [computedProfitExpression, parseFloat(minProfit)]
+        });
       }
       
       if (maxProfit !== undefined && maxProfit !== '') {
-        profitCondition.$lte = parseFloat(maxProfit);
+        profitConditions.push({
+          $lte: [computedProfitExpression, parseFloat(maxProfit)]
+        });
       }
       
-      if (Object.keys(profitCondition).length > 0) {
-        query.$and.push({ profit: profitCondition });
+      if (profitConditions.length === 1) {
+        query.$and.push({ $expr: profitConditions[0] });
+      } else if (profitConditions.length > 1) {
+        query.$and.push({ $expr: { $and: profitConditions } });
       }
     }
 
@@ -2627,6 +2645,7 @@ router.get('/all-orders-usd', async (req, res) => {
         + (orderObj.discountUSD || 0);
 
       orderObj.pBalance = parseFloat((net * orderObj.exchangeRate).toFixed(2));
+      orderObj.profit = parseFloat((((orderObj.pBalanceINR || 0) - (orderObj.amazonTotalINR || 0) - (orderObj.totalCC || 0)).toFixed(2)));
 
       return orderObj;
     }));
