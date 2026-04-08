@@ -5,6 +5,14 @@ import User from '../models/User.js';
 import Seller from '../models/Seller.js';
 import EmployeeProfile from '../models/EmployeeProfile.js';
 import Attendance from '../models/Attendance.js';
+import PageAccessAuditLog from '../models/PageAccessAuditLog.js';
+import {
+  buildPermissionSnapshot,
+  createPageAccessAuditLog,
+  diffPermissionSnapshots,
+  getRequestMetadata,
+  normalizePagePermissions,
+} from '../lib/pageAccessAudit.js';
 
 const router = Router();
 
@@ -94,6 +102,24 @@ router.post('/', requireAuth, async (req, res) => {
     await Seller.create({ user: user._id, ebayMarketplaces: [] });
   }
 
+  try {
+    const actorUser = await User.findById(req.user.userId).select('username email role').lean();
+    const afterSnapshot = buildPermissionSnapshot(user);
+    await createPageAccessAuditLog({
+      actor: actorUser || { id: req.user.userId, username: 'Unknown', role: req.user.role },
+      target: user,
+      before: null,
+      after: afterSnapshot,
+      diff: diffPermissionSnapshots(null, afterSnapshot),
+      eventType: 'user_created',
+      source: 'user_creation',
+      sessionInvalidated: false,
+      metadata: getRequestMetadata(req),
+    });
+  } catch (auditError) {
+    console.error('Failed to write page access audit log for user creation:', auditError);
+  }
+
   if (['superadmin', 'hradmin', 'operationhead'].includes(role)) {
     // Return user info for superadmin record-keeping (password NOT included — displayed from local state on frontend)
     res.json({
@@ -144,6 +170,82 @@ router.get('/', requireAuth, async (req, res) => {
     res.json(users);
   } catch (e) {
     res.status(500).json({ error: 'Error fetching users' });
+  }
+});
+
+// GET /page-access-audit-logs - Fetch page access audit history
+router.get('/page-access-audit-logs', requireAuth, requirePageAccess('PageAccessAuditLog'), async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 50,
+      targetUserId,
+      actorUserId,
+      pageId,
+      eventType = 'all',
+      effectiveChangesOnly = 'false',
+      fromDate,
+      toDate,
+    } = req.query;
+
+    const safePage = Math.max(parseInt(page, 10) || 1, 1);
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+    const skip = (safePage - 1) * safeLimit;
+    const query = {};
+
+    if (targetUserId) {
+      query['target.id'] = targetUserId;
+    }
+
+    if (actorUserId) {
+      query['actor.id'] = actorUserId;
+    }
+
+    if (pageId) {
+      query.affectedPageIds = pageId;
+    }
+
+    if (eventType && eventType !== 'all') {
+      query.eventType = eventType;
+    }
+
+    if (effectiveChangesOnly === 'true') {
+      query.effectiveAccessChanged = true;
+    }
+
+    if (fromDate || toDate) {
+      query.createdAt = {};
+      if (fromDate) {
+        query.createdAt.$gte = new Date(fromDate);
+      }
+      if (toDate) {
+        const end = new Date(toDate);
+        end.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = end;
+      }
+    }
+
+    const [logs, total] = await Promise.all([
+      PageAccessAuditLog.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(safeLimit)
+        .lean(),
+      PageAccessAuditLog.countDocuments(query),
+    ]);
+
+    res.json({
+      logs,
+      pagination: {
+        total,
+        page: safePage,
+        limit: safeLimit,
+        totalPages: Math.ceil(total / safeLimit),
+      },
+    });
+  } catch (err) {
+    console.error('Error fetching page access audit logs:', err);
+    res.status(500).json({ error: 'Failed to fetch page access audit logs' });
   }
 });
 
@@ -229,21 +331,75 @@ router.put('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessMa
       return res.status(400).json({ error: 'useCustomPermissions must be a boolean' });
     }
 
-    // Increment permissionsVersion to invalidate existing sessions when permissions change
-    const currentUser = await User.findById(req.params.id).select('permissionsVersion');
-    const newPermissionsVersion = (currentUser.permissionsVersion || 1) + 1;
+    const normalizedPagePermissions = normalizePagePermissions(pagePermissions);
+
+    const [currentUser, actorUser] = await Promise.all([
+      User.findById(req.params.id).select('username email role pagePermissions useCustomPermissions permissionsVersion'),
+      User.findById(req.user.userId).select('username email role').lean(),
+    ]);
+
+    if (!currentUser) return res.status(404).json({ error: 'User not found' });
+
+    const beforeSnapshot = buildPermissionSnapshot(currentUser);
+    const provisionalAfterSnapshot = buildPermissionSnapshot({
+      role: currentUser.role,
+      pagePermissions: normalizedPagePermissions,
+      useCustomPermissions,
+      permissionsVersion: beforeSnapshot.permissionsVersion,
+    });
+
+    let diff = diffPermissionSnapshots(beforeSnapshot, provisionalAfterSnapshot);
+
+    if (!diff.configurationChanged) {
+      return res.json({
+        message: `No permission changes detected for ${currentUser.username}`,
+        userId: currentUser._id,
+        username: currentUser.username,
+        role: currentUser.role,
+        pagePermissions: beforeSnapshot.pagePermissions,
+        useCustomPermissions: beforeSnapshot.useCustomPermissions,
+        permissionsVersion: beforeSnapshot.permissionsVersion,
+        effectiveAccessChanged: false,
+      });
+    }
+
+    const nextPermissionsVersion = beforeSnapshot.permissionsVersion + (diff.effectiveAccessChanged ? 1 : 0);
+    const afterSnapshot = buildPermissionSnapshot({
+      role: currentUser.role,
+      pagePermissions: normalizedPagePermissions,
+      useCustomPermissions,
+      permissionsVersion: nextPermissionsVersion,
+    });
+
+    diff = diffPermissionSnapshots(beforeSnapshot, afterSnapshot);
 
     const user = await User.findByIdAndUpdate(
       req.params.id,
       { 
-        pagePermissions, 
-        useCustomPermissions,
-        permissionsVersion: newPermissionsVersion
+        pagePermissions: afterSnapshot.pagePermissions,
+        useCustomPermissions: afterSnapshot.useCustomPermissions,
+        permissionsVersion: afterSnapshot.permissionsVersion,
       },
-      { new: true, select: 'username role pagePermissions useCustomPermissions permissionsVersion' }
+      { new: true, select: 'username email role pagePermissions useCustomPermissions permissionsVersion' }
     );
 
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    try {
+      await createPageAccessAuditLog({
+        actor: actorUser || { id: req.user.userId, username: 'Unknown', role: req.user.role },
+        target: user,
+        before: beforeSnapshot,
+        after: afterSnapshot,
+        diff,
+        eventType: 'page_permissions_updated',
+        source: 'page_access_management',
+        sessionInvalidated: diff.effectiveAccessChanged,
+        metadata: getRequestMetadata(req),
+      });
+    } catch (auditError) {
+      console.error('Failed to write page access audit log for permission update:', auditError);
+    }
 
     res.json({
       message: `Page permissions updated for ${user.username}`,
@@ -251,7 +407,14 @@ router.put('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessMa
       username: user.username,
       role: user.role,
       pagePermissions: user.pagePermissions,
-      useCustomPermissions: user.useCustomPermissions
+      useCustomPermissions: user.useCustomPermissions,
+      permissionsVersion: user.permissionsVersion,
+      effectiveAccessChanged: diff.effectiveAccessChanged,
+      useCustomPermissionsChanged: diff.useCustomPermissionsChanged,
+      addedStoredPermissions: diff.addedStoredPermissions,
+      removedStoredPermissions: diff.removedStoredPermissions,
+      grantedEffectivePermissions: diff.grantedEffectivePermissions,
+      revokedEffectivePermissions: diff.revokedEffectivePermissions,
     });
   } catch (err) {
     console.error('Error updating page permissions:', err);

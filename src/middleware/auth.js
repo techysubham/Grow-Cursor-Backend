@@ -49,6 +49,7 @@ export const PAGE_DEFAULT_ROLES = {
   'CreditCardNames': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'Salary': ['superadmin'],
   'AllOrdersSheet': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'PriceChangeHistory': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'SellerAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
 
   // Compliance & Support
@@ -75,6 +76,7 @@ export const PAGE_DEFAULT_ROLES = {
   'ViewAllMessages': ['superadmin'],
   'Attendance': ['superadmin'],
   'PageAccessManagement': ['superadmin'],
+  'PageAccessAuditLog': ['superadmin'],
   'UserPasswordManagement': ['superadmin'],
 
   // Others (superadmin only by default)
