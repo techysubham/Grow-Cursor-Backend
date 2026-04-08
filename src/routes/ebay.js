@@ -395,7 +395,12 @@ export async function resumeRunningAutoCompatibilityBatches() {
   const runningBatches = await AutoCompatibilityBatch.find({ status: 'running' }).select('_id').lean();
   if (runningBatches.length === 0) return 0;
 
-  await Promise.allSettled(runningBatches.map(batch => processAutoCompatibilityBatch(batch._id)));
+  runningBatches.forEach((batch) => {
+    processAutoCompatibilityBatch(batch._id).catch(err => {
+      console.error(`[AutoCompat] Failed to resume batch ${batch._id}:`, err.message);
+    });
+  });
+
   return runningBatches.length;
 }
 

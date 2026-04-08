@@ -194,21 +194,22 @@ connectToDatabase()
     // Initialize scheduled jobs (e.g., daily timer auto-stop)
     initializeScheduledJobs();
 
-    // Resume any auto-compat batches that were left 'running' due to a previous server crash/restart
-    try {
-      const resumedBatchCount = await resumeRunningAutoCompatibilityBatches();
-      if (resumedBatchCount > 0) {
-        console.log(`[AutoCompat] Resumed ${resumedBatchCount} running batch(es) after server restart`);
-      }
-    } catch (e) {
-      console.error('[AutoCompat] Failed to resume running batches:', e.message);
-    }
-
     // Start image cache auto-cleanup (removes expired entries every 10 minutes)
     imageCache.startAutoCleanup();
 
     app.listen(port, () => {
       console.log(`API listening on :${port}`);
+
+      // Resume any auto-compat batches that were left 'running' due to a previous server crash/restart
+      resumeRunningAutoCompatibilityBatches()
+        .then((resumedBatchCount) => {
+          if (resumedBatchCount > 0) {
+            console.log(`[AutoCompat] Resumed ${resumedBatchCount} running batch(es) after server restart`);
+          }
+        })
+        .catch((e) => {
+          console.error('[AutoCompat] Failed to resume running batches:', e.message);
+        });
     });
   })
   .catch((err) => {
