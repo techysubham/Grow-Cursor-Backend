@@ -6,6 +6,7 @@ const AutoCompatibilityBatchSchema = new mongoose.Schema({
   status: { type: String, enum: ['running', 'completed', 'failed'], default: 'running' },
   targetDate: { type: String, required: true }, // YYYY-MM-DD — listing startTime filter
   itemLimit: { type: Number, default: 0 }, // 0 = no limit, >0 = max items to process
+  sourceItemIds: [{ type: String }],
 
   // Counters
   totalListings: { type: Number, default: 0 },

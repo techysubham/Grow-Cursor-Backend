@@ -40,6 +40,364 @@ import OpenAI from 'openai';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
+const activeAutoCompatBatchRuns = new Set();
+
+function summarizeAutoCompatItems(items = []) {
+  return items.reduce((acc, item) => {
+    acc.processedCount += 1;
+    if (item.status === 'success') acc.successCount += 1;
+    else if (item.status === 'warning') acc.warningCount += 1;
+    else if (item.status === 'needs_manual') acc.needsManualCount += 1;
+    else if (item.status === 'ebay_error') acc.ebayErrorCount += 1;
+    else if (item.status === 'ai_failed') acc.aiFailedCount += 1;
+    return acc;
+  }, {
+    processedCount: 0,
+    successCount: 0,
+    warningCount: 0,
+    needsManualCount: 0,
+    ebayErrorCount: 0,
+    aiFailedCount: 0,
+  });
+}
+
+async function getAutoCompatibilitySourceListings(batch) {
+  if (Array.isArray(batch.sourceItemIds) && batch.sourceItemIds.length > 0) {
+    const listings = await Listing.find({
+      seller: batch.seller,
+      itemId: { $in: batch.sourceItemIds }
+    }).lean();
+    const byItemId = new Map(listings.map(listing => [listing.itemId, listing]));
+    return batch.sourceItemIds.map(itemId => byItemId.get(itemId)).filter(Boolean);
+  }
+
+  const dayStart = new Date(batch.targetDate + 'T00:00:00Z');
+  const dayEnd = new Date(batch.targetDate + 'T23:59:59.999Z');
+  const query = {
+    seller: batch.seller,
+    listingStatus: 'Active',
+    startTime: { $gte: dayStart, $lte: dayEnd },
+    $or: [
+      { compatibility: { $exists: false } },
+      { compatibility: { $size: 0 } },
+      { compatibility: null }
+    ]
+  };
+
+  let listings = await Listing.find(query).sort({ startTime: 1 }).lean();
+  if (batch.itemLimit > 0) listings = listings.slice(0, batch.itemLimit);
+  return listings;
+}
+
+export async function processAutoCompatibilityBatch(batchId) {
+  const batchKey = String(batchId);
+  if (activeAutoCompatBatchRuns.has(batchKey)) return;
+
+  activeAutoCompatBatchRuns.add(batchKey);
+  try {
+    const batch = await AutoCompatibilityBatch.findById(batchId).lean();
+    if (!batch || batch.status === 'completed') return;
+
+    const seller = await Seller.findById(batch.seller);
+    if (!seller) {
+      await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+        status: 'failed',
+        completedAt: new Date(),
+        currentStep: 'failed: seller not found'
+      });
+      return;
+    }
+
+    const allListings = await getAutoCompatibilitySourceListings(batch);
+    const processedItemIds = new Set((batch.items || []).map(item => item.itemId));
+    const pendingListings = allListings.filter(listing => !processedItemIds.has(listing.itemId));
+    const counts = summarizeAutoCompatItems(batch.items || []);
+
+    await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+      status: 'running',
+      completedAt: null,
+      processedCount: counts.processedCount,
+      successCount: counts.successCount,
+      warningCount: counts.warningCount,
+      needsManualCount: counts.needsManualCount,
+      ebayErrorCount: counts.ebayErrorCount,
+      aiFailedCount: counts.aiFailedCount,
+      currentItemTitle: pendingListings[0]?.title || '',
+      currentStep: pendingListings.length > 0 ? 'resuming' : 'done'
+    });
+
+    if (pendingListings.length === 0) {
+      await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+        status: 'completed',
+        completedAt: batch.completedAt || new Date(),
+        currentItemTitle: '',
+        currentStep: 'done'
+      });
+      return;
+    }
+
+    const token = await ensureValidToken(seller);
+
+    for (const listing of pendingListings) {
+      const itemResult = {
+        itemId: listing.itemId,
+        title: listing.title,
+        sku: listing.sku || '',
+        status: 'ai_failed',
+        aiSuggestion: null,
+        resolvedMake: null,
+        resolvedModel: null,
+        failureReason: null,
+        compatibilityList: [],
+        ebayWarning: null,
+        ebayError: null,
+        strippedCount: 0
+      };
+
+      await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+        processedCount: counts.processedCount,
+        currentItemTitle: listing.title || listing.itemId,
+        currentStep: 'ai_suggest'
+      });
+
+      try {
+        const aiData = await aiSuggestFitment(listing.title, listing.descriptionPreview);
+        itemResult.aiSuggestion = aiData;
+
+        if (!aiData.make) {
+          itemResult.status = 'ai_failed';
+          itemResult.failureReason = 'AI could not extract fitment info from this listing';
+          counts.aiFailedCount += 1;
+          counts.processedCount += 1;
+          await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+            $push: { items: itemResult },
+            aiFailedCount: counts.aiFailedCount,
+            processedCount: counts.processedCount
+          });
+          continue;
+        }
+
+        const resolvedMake = resolveMake(aiData.make);
+        const resolvedModelStep1 = resolveModel(resolvedMake, aiData.model);
+        const resolvedModelInput = resolveModelWithYear(resolvedMake, resolvedModelStep1, aiData.startYear, aiData.endYear);
+        itemResult.resolvedMake = resolvedMake;
+
+        await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { currentStep: 'fetching_models' });
+
+        const modelOpts = await fetchCompatValues(token, 'Model', [{ name: 'Make', value: resolvedMake }]);
+        const canonicalModel = fuzzyMatchModel(resolvedModelInput, modelOpts);
+
+        if (!canonicalModel) {
+          itemResult.status = 'needs_manual';
+          itemResult.resolvedModel = resolvedModelInput;
+          itemResult.failureReason = `Model "${aiData.model}" (resolved: "${resolvedModelInput}") not found in eBay DB for ${resolvedMake}`;
+          counts.needsManualCount += 1;
+          counts.processedCount += 1;
+          await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+            $push: { items: itemResult },
+            needsManualCount: counts.needsManualCount,
+            processedCount: counts.processedCount
+          });
+          continue;
+        }
+        itemResult.resolvedModel = canonicalModel;
+
+        await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { currentStep: 'fetching_years' });
+
+        const yearOpts = (await fetchCompatValues(token, 'Year', [
+          { name: 'Make', value: resolvedMake },
+          { name: 'Model', value: canonicalModel }
+        ])).map(y => String(y)).sort((a, b) => Number(b) - Number(a));
+
+        let resolvedYears = [];
+        if (aiData.startYear && aiData.endYear) {
+          const clamped = clampYearRange(resolvedMake, canonicalModel, aiData.startYear, aiData.endYear);
+          const min = Math.min(Number(clamped.startYear), Number(clamped.endYear));
+          const max = Math.max(Number(clamped.startYear), Number(clamped.endYear));
+          resolvedYears = yearOpts.filter(y => Number(y) >= min && Number(y) <= max);
+        }
+
+        if (resolvedYears.length === 0) {
+          itemResult.status = 'needs_manual';
+          itemResult.failureReason = `Years ${aiData.startYear}-${aiData.endYear} not found in eBay DB for ${resolvedMake} ${canonicalModel}`;
+          counts.needsManualCount += 1;
+          counts.processedCount += 1;
+          await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+            $push: { items: itemResult },
+            needsManualCount: counts.needsManualCount,
+            processedCount: counts.processedCount
+          });
+          continue;
+        }
+
+        await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { currentStep: 'fetching_trims' });
+
+        const compatibilityList = [];
+        for (const year of resolvedYears) {
+          const trims = await fetchCompatValues(token, 'Trim', [
+            { name: 'Make', value: resolvedMake },
+            { name: 'Model', value: canonicalModel },
+            { name: 'Year', value: year }
+          ]);
+
+          if (trims.length === 0) {
+            compatibilityList.push({
+              notes: '',
+              nameValueList: [
+                { name: 'Year', value: year },
+                { name: 'Make', value: resolvedMake },
+                { name: 'Model', value: canonicalModel }
+              ]
+            });
+          } else {
+            for (const trim of trims) {
+              const engines = await fetchCompatValues(token, 'Engine', [
+                { name: 'Make', value: resolvedMake },
+                { name: 'Model', value: canonicalModel },
+                { name: 'Year', value: year },
+                { name: 'Trim', value: trim }
+              ]);
+
+              if (engines.length === 0) {
+                compatibilityList.push({
+                  notes: '',
+                  nameValueList: [
+                    { name: 'Year', value: year },
+                    { name: 'Make', value: resolvedMake },
+                    { name: 'Model', value: canonicalModel },
+                    { name: 'Trim', value: trim }
+                  ]
+                });
+              } else {
+                for (const engine of engines) {
+                  compatibilityList.push({
+                    notes: '',
+                    nameValueList: [
+                      { name: 'Year', value: year },
+                      { name: 'Make', value: resolvedMake },
+                      { name: 'Model', value: canonicalModel },
+                      { name: 'Trim', value: trim },
+                      { name: 'Engine', value: engine }
+                    ]
+                  });
+                }
+              }
+            }
+          }
+        }
+
+        itemResult.compatibilityList = compatibilityList;
+
+        await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { currentStep: 'sending_to_ebay' });
+
+        const sanitized = sanitizeCompatibilityList(compatibilityList);
+        const compatXml = buildCompatXml(sanitized);
+        const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+              <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+                <ErrorLanguage>en_US</ErrorLanguage>
+                <WarningLevel>High</WarningLevel>
+                <Item><ItemID>${listing.itemId}</ItemID>${compatXml}</Item>
+              </ReviseFixedPriceItemRequest>`;
+
+        const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+          headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
+        });
+        const result = await parseStringPromise(response.data);
+        const ack = result.ReviseFixedPriceItemResponse.Ack[0];
+
+        if (ack === 'Failure') {
+          const errors = result.ReviseFixedPriceItemResponse.Errors || [];
+          const errorMessage = errors.map(e => e.LongMessage[0]).join('; ');
+
+          if (isDuplicateListingError(errorMessage)) {
+            try {
+              const { newPrice, newTitle, warning: retryWarning } = await retryCompatWithTitleDiff(token, listing.itemId, sanitized);
+              await Listing.findOneAndUpdate({ itemId: listing.itemId }, { compatibility: sanitized, currentPrice: newPrice, title: newTitle });
+              itemResult.status = 'success';
+              itemResult.ebayWarning = retryWarning || `Title updated to "${newTitle}" (duplicate listing resolved)`;
+              counts.successCount += 1;
+            } catch (retryErr) {
+              itemResult.status = 'ebay_error';
+              itemResult.ebayError = `Duplicate listing — retry failed: ${retryErr.message}`;
+              counts.ebayErrorCount += 1;
+            }
+          } else {
+            itemResult.status = 'ebay_error';
+            itemResult.ebayError = parseInvalidCombos(errorMessage);
+            counts.ebayErrorCount += 1;
+            purgeInvalidFromCache(errorMessage).catch(() => {});
+          }
+        } else {
+          let savedList = sanitized;
+          if (ack === 'Warning') {
+            const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
+            const meaningful = warnings.filter(err => {
+              const msg = err.LongMessage[0];
+              return !msg.includes('Best Offer') && !msg.includes('Funds from your sales');
+            });
+            if (meaningful.length > 0) {
+              const rawWarning = meaningful.map(e => e.LongMessage[0]).join('; ');
+              itemResult.ebayWarning = meaningful.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
+              savedList = filterOutInvalidCombos(sanitized, rawWarning);
+              itemResult.strippedCount = sanitized.length - savedList.length;
+              purgeInvalidFromCache(rawWarning).catch(() => {});
+              counts.warningCount += 1;
+            } else {
+              counts.successCount += 1;
+            }
+            itemResult.status = 'warning';
+          } else {
+            itemResult.status = 'success';
+            counts.successCount += 1;
+          }
+          itemResult.compatibilityList = savedList;
+          await Listing.findOneAndUpdate({ itemId: listing.itemId }, { compatibility: savedList });
+        }
+      } catch (itemErr) {
+        itemResult.status = 'ebay_error';
+        itemResult.ebayError = itemErr.message;
+        counts.ebayErrorCount += 1;
+      }
+
+      counts.processedCount += 1;
+      await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+        $push: { items: itemResult },
+        processedCount: counts.processedCount,
+        successCount: counts.successCount,
+        warningCount: counts.warningCount,
+        needsManualCount: counts.needsManualCount,
+        ebayErrorCount: counts.ebayErrorCount,
+        aiFailedCount: counts.aiFailedCount
+      });
+    }
+
+    await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+      status: 'completed',
+      completedAt: new Date(),
+      currentItemTitle: '',
+      currentStep: 'done'
+    });
+    console.log(`[AutoCompat] Batch ${batchId} completed: ${counts.successCount} success, ${counts.warningCount} warning, ${counts.needsManualCount} manual, ${counts.ebayErrorCount} error, ${counts.aiFailedCount} ai_failed`);
+  } catch (batchErr) {
+    console.error(`[AutoCompat] Batch ${batchId} failed:`, batchErr.message);
+    await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+      status: 'failed',
+      completedAt: new Date(),
+      currentStep: 'failed: ' + batchErr.message
+    });
+  } finally {
+    activeAutoCompatBatchRuns.delete(batchKey);
+  }
+}
+
+export async function resumeRunningAutoCompatibilityBatches() {
+  const runningBatches = await AutoCompatibilityBatch.find({ status: 'running' }).select('_id').lean();
+  if (runningBatches.length === 0) return 0;
+
+  await Promise.allSettled(runningBatches.map(batch => processAutoCompatibilityBatch(batch._id)));
+  return runningBatches.length;
+}
 
 // ============================================
 // UPLOAD FEED TO EBAY
@@ -11323,6 +11681,7 @@ router.post('/auto-compatibility', requireAuth, async (req, res) => {
       triggeredBy: req.user.userId,
       targetDate,
       itemLimit: itemLimit || 0,
+      sourceItemIds: listings.map(listing => listing.itemId),
       totalListings: listings.length,
       status: 'running',
       startedAt: new Date()
@@ -11331,267 +11690,9 @@ router.post('/auto-compatibility', requireAuth, async (req, res) => {
     // Respond immediately with batchId
     res.json({ success: true, batchId: batch._id, totalListings: listings.length });
 
-    // --- BACKGROUND PROCESSING ---
-    (async () => {
-      try {
-        const token = await ensureValidToken(seller);
-        let successCount = 0, warningCount = 0, needsManualCount = 0, ebayErrorCount = 0, aiFailedCount = 0;
-
-        for (let i = 0; i < listings.length; i++) {
-          const listing = listings[i];
-          const itemResult = {
-            itemId: listing.itemId,
-            title: listing.title,
-            sku: listing.sku || '',
-            status: 'ai_failed',
-            aiSuggestion: null,
-            resolvedMake: null,
-            resolvedModel: null,
-            failureReason: null,
-            compatibilityList: [],
-            ebayWarning: null,
-            ebayError: null,
-            strippedCount: 0
-          };
-
-          // Update live progress
-          await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
-            processedCount: i,
-            currentItemTitle: listing.title || listing.itemId,
-            currentStep: 'ai_suggest'
-          });
-
-          try {
-            // Step 1: AI suggest
-            const aiData = await aiSuggestFitment(listing.title, listing.descriptionPreview);
-            itemResult.aiSuggestion = aiData;
-
-            if (!aiData.make) {
-              itemResult.status = 'ai_failed';
-              itemResult.failureReason = 'AI could not extract fitment info from this listing';
-              aiFailedCount++;
-              await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
-                $push: { items: itemResult },
-                aiFailedCount,
-                processedCount: i + 1
-              });
-              continue;
-            }
-
-            // Step 2: Resolve make/model
-            const resolvedMake = resolveMake(aiData.make);
-            const resolvedModelStep1 = resolveModel(resolvedMake, aiData.model);
-            const resolvedModelInput = resolveModelWithYear(resolvedMake, resolvedModelStep1, aiData.startYear, aiData.endYear);
-            itemResult.resolvedMake = resolvedMake;
-
-            await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, { currentStep: 'fetching_models' });
-
-            // Step 3: Fetch models from eBay + fuzzy match
-            const modelOpts = await fetchCompatValues(token, 'Model', [{ name: 'Make', value: resolvedMake }]);
-            const canonicalModel = fuzzyMatchModel(resolvedModelInput, modelOpts);
-
-            if (!canonicalModel) {
-              itemResult.status = 'needs_manual';
-              itemResult.resolvedModel = resolvedModelInput;
-              itemResult.failureReason = `Model "${aiData.model}" (resolved: "${resolvedModelInput}") not found in eBay DB for ${resolvedMake}`;
-              needsManualCount++;
-              await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
-                $push: { items: itemResult },
-                needsManualCount,
-                processedCount: i + 1
-              });
-              continue;
-            }
-            itemResult.resolvedModel = canonicalModel;
-
-            await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, { currentStep: 'fetching_years' });
-
-            // Step 4: Fetch years + clamp to AI range
-            const yearOpts = (await fetchCompatValues(token, 'Year', [
-              { name: 'Make', value: resolvedMake },
-              { name: 'Model', value: canonicalModel }
-            ])).map(y => String(y)).sort((a, b) => Number(b) - Number(a));
-
-            let resolvedYears = [];
-            if (aiData.startYear && aiData.endYear) {
-              const clamped = clampYearRange(resolvedMake, canonicalModel, aiData.startYear, aiData.endYear);
-              const min = Math.min(Number(clamped.startYear), Number(clamped.endYear));
-              const max = Math.max(Number(clamped.startYear), Number(clamped.endYear));
-              resolvedYears = yearOpts.filter(y => Number(y) >= min && Number(y) <= max);
-            }
-
-            if (resolvedYears.length === 0) {
-              itemResult.status = 'needs_manual';
-              itemResult.failureReason = `Years ${aiData.startYear}-${aiData.endYear} not found in eBay DB for ${resolvedMake} ${canonicalModel}`;
-              needsManualCount++;
-              await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
-                $push: { items: itemResult },
-                needsManualCount,
-                processedCount: i + 1
-              });
-              continue;
-            }
-
-            await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, { currentStep: 'fetching_trims' });
-
-            // Step 5: Fetch trims + engines for all years (include ALL trims)
-            const compatibilityList = [];
-            for (const year of resolvedYears) {
-              const trims = await fetchCompatValues(token, 'Trim', [
-                { name: 'Make', value: resolvedMake },
-                { name: 'Model', value: canonicalModel },
-                { name: 'Year', value: year }
-              ]);
-
-              if (trims.length === 0) {
-                // No trims available — add Year/Make/Model only
-                compatibilityList.push({
-                  notes: '',
-                  nameValueList: [
-                    { name: 'Year', value: year },
-                    { name: 'Make', value: resolvedMake },
-                    { name: 'Model', value: canonicalModel }
-                  ]
-                });
-              } else {
-                for (const trim of trims) {
-                  const engines = await fetchCompatValues(token, 'Engine', [
-                    { name: 'Make', value: resolvedMake },
-                    { name: 'Model', value: canonicalModel },
-                    { name: 'Year', value: year },
-                    { name: 'Trim', value: trim }
-                  ]);
-
-                  if (engines.length === 0) {
-                    compatibilityList.push({
-                      notes: '',
-                      nameValueList: [
-                        { name: 'Year', value: year },
-                        { name: 'Make', value: resolvedMake },
-                        { name: 'Model', value: canonicalModel },
-                        { name: 'Trim', value: trim }
-                      ]
-                    });
-                  } else {
-                    for (const engine of engines) {
-                      compatibilityList.push({
-                        notes: '',
-                        nameValueList: [
-                          { name: 'Year', value: year },
-                          { name: 'Make', value: resolvedMake },
-                          { name: 'Model', value: canonicalModel },
-                          { name: 'Trim', value: trim },
-                          { name: 'Engine', value: engine }
-                        ]
-                      });
-                    }
-                  }
-                }
-              }
-            }
-
-            itemResult.compatibilityList = compatibilityList;
-
-            await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, { currentStep: 'sending_to_ebay' });
-
-            // Step 6: Send to eBay
-            const sanitized = sanitizeCompatibilityList(compatibilityList);
-            const compatXml = buildCompatXml(sanitized);
-            const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
-              <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-                <ErrorLanguage>en_US</ErrorLanguage>
-                <WarningLevel>High</WarningLevel>
-                <Item><ItemID>${listing.itemId}</ItemID>${compatXml}</Item>
-              </ReviseFixedPriceItemRequest>`;
-
-            const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-              headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
-            });
-            const result = await parseStringPromise(response.data);
-            const ack = result.ReviseFixedPriceItemResponse.Ack[0];
-
-            if (ack === 'Failure') {
-              const errors = result.ReviseFixedPriceItemResponse.Errors || [];
-              const errorMessage = errors.map(e => e.LongMessage[0]).join('; ');
-
-              // Try duplicate-listing retry
-              if (isDuplicateListingError(errorMessage)) {
-                try {
-                  const { newPrice, newTitle, warning: retryWarning } = await retryCompatWithTitleDiff(token, listing.itemId, sanitized);
-                  await Listing.findOneAndUpdate({ itemId: listing.itemId }, { compatibility: sanitized, currentPrice: newPrice, title: newTitle });
-                  itemResult.status = 'success';
-                  itemResult.ebayWarning = retryWarning || `Title updated to "${newTitle}" (duplicate listing resolved)`;
-                  successCount++;
-                } catch (retryErr) {
-                  itemResult.status = 'ebay_error';
-                  itemResult.ebayError = `Duplicate listing — retry failed: ${retryErr.message}`;
-                  ebayErrorCount++;
-                }
-              } else {
-                itemResult.status = 'ebay_error';
-                itemResult.ebayError = parseInvalidCombos(errorMessage);
-                ebayErrorCount++;
-                purgeInvalidFromCache(errorMessage).catch(() => {});
-              }
-            } else {
-              // Success or Warning
-              let savedList = sanitized;
-              if (ack === 'Warning') {
-                const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
-                const meaningful = warnings.filter(err => {
-                  const msg = err.LongMessage[0];
-                  return !msg.includes('Best Offer') && !msg.includes('Funds from your sales');
-                });
-                if (meaningful.length > 0) {
-                  const rawWarning = meaningful.map(e => e.LongMessage[0]).join('; ');
-                  itemResult.ebayWarning = meaningful.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
-                  savedList = filterOutInvalidCombos(sanitized, rawWarning);
-                  itemResult.strippedCount = sanitized.length - savedList.length;
-                  purgeInvalidFromCache(rawWarning).catch(() => {});
-                  warningCount++;
-                } else {
-                  successCount++;
-                }
-                itemResult.status = 'warning';
-              } else {
-                itemResult.status = 'success';
-                successCount++;
-              }
-              itemResult.compatibilityList = savedList;
-              await Listing.findOneAndUpdate({ itemId: listing.itemId }, { compatibility: savedList });
-            }
-          } catch (itemErr) {
-            itemResult.status = 'ebay_error';
-            itemResult.ebayError = itemErr.message;
-            ebayErrorCount++;
-          }
-
-          // Save this item result
-          await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
-            $push: { items: itemResult },
-            processedCount: i + 1,
-            successCount, warningCount, needsManualCount, ebayErrorCount, aiFailedCount
-          });
-        }
-
-        // Mark batch complete
-        await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
-          status: 'completed',
-          completedAt: new Date(),
-          currentItemTitle: '',
-          currentStep: 'done'
-        });
-        console.log(`[AutoCompat] Batch ${batch._id} completed: ${successCount} success, ${warningCount} warning, ${needsManualCount} manual, ${ebayErrorCount} error, ${aiFailedCount} ai_failed`);
-      } catch (batchErr) {
-        console.error(`[AutoCompat] Batch ${batch._id} failed:`, batchErr.message);
-        await AutoCompatibilityBatch.findByIdAndUpdate(batch._id, {
-          status: 'failed',
-          completedAt: new Date(),
-          currentStep: 'failed: ' + batchErr.message
-        });
-      }
-    })();
+    processAutoCompatibilityBatch(batch._id).catch(err => {
+      console.error(`[AutoCompat] Failed to start background processing for batch ${batch._id}:`, err.message);
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
