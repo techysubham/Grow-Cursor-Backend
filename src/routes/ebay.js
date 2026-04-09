@@ -2122,12 +2122,12 @@ router.get('/stored-orders', async (req, res) => {
       const normalizedTokens = String(productName)
         .trim()
         .split(/\s+/)
-        .map(token => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .map(token => '\\b' + token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
         .filter(Boolean);
 
       const productNamePattern = normalizedTokens.length > 0
         ? normalizedTokens.join('.*')
-        : String(productName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        : '\\b' + String(productName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
       const productClause = {
         $or: [
