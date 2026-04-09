@@ -2122,12 +2122,12 @@ router.get('/stored-orders', async (req, res) => {
       const normalizedTokens = String(productName)
         .trim()
         .split(/\s+/)
-        .map(token => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .map(token => '\\b' + token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
         .filter(Boolean);
 
       const productNamePattern = normalizedTokens.length > 0
         ? normalizedTokens.join('.*')
-        : String(productName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        : '\\b' + String(productName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
       const productClause = {
         $or: [
@@ -2362,7 +2362,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 
 // NEW ENDPOINT: All Orders with USD conversion
 router.get('/all-orders-usd', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemNumber, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemNumber, productName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
 
   try {
     const computedProfitExpression = {
@@ -2438,6 +2438,36 @@ router.get('/all-orders-usd', async (req, res) => {
         query.$and.push(itemClause);
       } else {
         Object.assign(query, itemClause);
+      }
+    }
+
+    if (productName) {
+      const normalizedTokens = String(productName)
+        .trim()
+        .split(/\s+/)
+        .map(token => '\\b' + token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .filter(Boolean);
+
+      const productNamePattern = normalizedTokens.length > 0
+        ? normalizedTokens.join('.*')
+        : '\\b' + String(productName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+      const productClause = {
+        $or: [
+          { productName: { $regex: productNamePattern, $options: 'i' } },
+          { 'lineItems.title': { $regex: productNamePattern, $options: 'i' } }
+        ]
+      };
+
+      if (query.$or) {
+        if (!query.$and) query.$and = [];
+        query.$and.push({ $or: query.$or });
+        delete query.$or;
+        query.$and.push(productClause);
+      } else if (query.$and) {
+        query.$and.push(productClause);
+      } else {
+        query.$or = productClause.$or;
       }
     }
 

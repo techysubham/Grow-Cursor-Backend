@@ -34,14 +34,7 @@ function getPtDateString(date = new Date()) {
 }
 
 function getPtDayRange(dateStr) {
-  const PST_OFFSET_HOURS = 8;
-  const start = new Date(dateStr);
-  start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
-
-  const end = new Date(dateStr);
-  end.setDate(end.getDate() + 1);
-  end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
-  return { start, end };
+  return getPTDayBoundsUTC(dateStr);
 }
 
 // DST-aware: resolves midnight PT for any date string (handles PST=UTC-8 and PDT=UTC-7)
@@ -425,22 +418,16 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
     const query = {};
 
     // Add date filter if provided
-    // Use the SAME timezone logic as FulfillmentDashboard (PST - UTC-8)
+    // Use the SAME timezone logic as FulfillmentDashboard (PST/PDT aware)
     if (startDate || endDate) {
       query.dateSold = {}; // Use dateSold field, not creationDate
-      const PST_OFFSET_HOURS = 8;
 
       if (startDate) {
-        const start = new Date(startDate);
-        start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
-        query.dateSold.$gte = start;
+        query.dateSold.$gte = getPTDayBoundsUTC(startDate).start;
       }
 
       if (endDate) {
-        const end = new Date(endDate);
-        end.setDate(end.getDate() + 1);
-        end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
-        query.dateSold.$lte = end;
+        query.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
       }
     }
 
