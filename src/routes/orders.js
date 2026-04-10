@@ -171,9 +171,9 @@ router.get('/dashboard/monthly-delta', requireAuth, requirePageAccess('OrdersDas
     const sellerMatch = sellerId ? { seller: new mongoose.Types.ObjectId(sellerId) } : {};
     const baseMatch = req.query.excludeLowValue === 'true'
       ? {
-          ...sellerMatch,
-          $or: [{ subtotalUSD: { $gte: 3 } }, { subtotal: { $gte: 3 } }]
-        }
+        ...sellerMatch,
+        $or: [{ subtotalUSD: { $gte: 3 } }, { subtotal: { $gte: 3 } }]
+      }
       : sellerMatch;
 
     const [currentRows, previousRows, sellers] = await Promise.all([
@@ -412,7 +412,7 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
 // Get daily order statistics for all sellers
 router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId } = req.query;
+    const { startDate, endDate, sellerId, marketplace } = req.query;
 
     // Build the query - NO CANCELSTATE FILTER (matches FulfillmentDashboard)
     const query = {};
@@ -433,7 +433,17 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
 
     // Add seller filter if provided
     if (sellerId) {
-      query.seller = sellerId;
+      query.seller = new mongoose.Types.ObjectId(sellerId);
+    }
+
+    if (marketplace) {
+      if (marketplace === 'EBAY_CA') {
+        query.purchaseMarketplaceId = { $in: ['EBAY_CA', 'EBAY_ENCA'] };
+      } else if (marketplace === 'GB' || marketplace === 'EBAY_GB') {
+        query.purchaseMarketplaceId = { $in: ['GB', 'EBAY_GB'] };
+      } else {
+        query.purchaseMarketplaceId = marketplace;
+      }
     }
 
     // Filter out low value orders if requested (< $3)
@@ -468,8 +478,8 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
           sellerUsername: '$userInfo.username',
           orderDate: {
             // Convert UTC date to PST date string (matching FulfillmentDashboard)
-            $dateToString: { 
-              format: '%Y-%m-%d', 
+            $dateToString: {
+              format: '%Y-%m-%d',
               date: '$dateSold', // Use dateSold field
               timezone: 'America/Los_Angeles' // PST/PDT timezone
             }
@@ -542,7 +552,7 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
     if (startDate || endDate) {
       match.dateSold = {};
       if (startDate) match.dateSold.$gte = getPTDayBoundsUTC(startDate).start;
-      if (endDate)   match.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
+      if (endDate) match.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
     }
 
     if (sellerId) match.seller = new mongoose.Types.ObjectId(sellerId);
@@ -551,8 +561,8 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
     // Determine which field and lookup collection to use
     const groupFieldMap = {
       category: { field: 'orderCategoryId', from: 'asinlistcategories' },
-      range:    { field: 'orderRangeId',    from: 'asinlistranges' },
-      product:  { field: 'orderProductId',  from: 'asinlistproducts' },
+      range: { field: 'orderRangeId', from: 'asinlistranges' },
+      product: { field: 'orderProductId', from: 'asinlistproducts' },
     };
     const { field, from } = groupFieldMap[groupBy] || groupFieldMap.category;
 
