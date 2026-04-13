@@ -1,6 +1,8 @@
 import express from 'express';
 import ExtraExpense from '../models/ExtraExpense.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createExtraExpenseSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -15,7 +17,7 @@ router.get('/', requireAuth, requirePageAccess('ExtraExpenses'), async (req, res
 });
 
 // POST /api/extra-expenses - Create
-router.post('/', requireAuth, requirePageAccess('ExtraExpenses'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('ExtraExpenses'), validate(createExtraExpenseSchema), async (req, res) => {
     try {
         const { date, name, amount, paidBy } = req.body;
 

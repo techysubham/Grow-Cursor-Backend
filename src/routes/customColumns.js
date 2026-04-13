@@ -1,5 +1,7 @@
 import express from 'express';
 import { requireAuth } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createCustomColumnSchema } from '../schemas/index.js';
 import CustomColumn from '../models/CustomColumn.js';
 
 const router = express.Router();
@@ -18,7 +20,7 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Create custom column
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, validate(createCustomColumnSchema), async (req, res) => {
   try {
     const { name, prompt, dataType, description } = req.body;
 

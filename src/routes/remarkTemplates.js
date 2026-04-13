@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { updateRemarkTemplatesSchema } from '../schemas/index.js';
 import RemarkTemplate from '../models/RemarkTemplate.js';
 
 const router = Router();
@@ -92,7 +94,7 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-router.put('/', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
+router.put('/', requireAuth, requirePageAccess('BuyerMessages'), validate(updateRemarkTemplatesSchema), async (req, res) => {
   try {
     const incoming = Array.isArray(req.body?.templates) ? req.body.templates : null;
     if (!incoming) {

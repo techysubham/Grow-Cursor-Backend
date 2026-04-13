@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createSalarySchema } from '../schemas/index.js';
 import Salary from '../models/Salary.js';
 
 const router = Router();
@@ -42,7 +44,7 @@ router.get('/', requireAuth, requirePageAccess('Salary'), async (req, res) => {
 });
 
 // POST /api/salary - Create a new empty salary row
-router.post('/', requireAuth, requirePageAccess('Salary'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('Salary'), validate(createSalarySchema), async (req, res) => {
     try {
         const { year, name, designation } = req.body;
 

@@ -1,10 +1,12 @@
 import { Router } from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createPlatformSchema } from '../schemas/index.js';
 import Platform from '../models/Platform.js';
 
 const router = Router();
 
-router.post('/', requireAuth, requirePageAccess('ManagePlatforms'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('ManagePlatforms'), validate(createPlatformSchema), async (req, res) => {
   const { name, type } = req.body || {};
   if (!name || !type) return res.status(400).json({ error: 'name and type required' });
   try {

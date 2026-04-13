@@ -1,4 +1,6 @@
 import express from 'express';
+import { validate } from '../utils/validate.js';
+import { createIdeaSchema, addIdeaCommentSchema } from '../schemas/index.js';
 import Idea from '../models/Idea.js';
 
 const router = express.Router();
@@ -62,15 +64,9 @@ router.get('/:id', async (req, res) => {
 
 // Create new idea/ticket
 // PUBLIC ROUTE - Anyone can submit
-router.post('/', async (req, res) => {
+router.post('/', validate(createIdeaSchema), async (req, res) => {
   try {
     const { title, description, type, priority, createdBy, completeByDate } = req.body;
-
-    if (!title || !description || !createdBy) {
-      return res.status(400).json({ 
-        error: 'Title, description, and createdBy are required' 
-      });
-    }
 
     const newIdea = await Idea.create({
       title,
@@ -132,7 +128,7 @@ router.patch('/:id', async (req, res) => {
 
 // Add comment to an idea
 // PUBLIC ROUTE
-router.post('/:id/comments', async (req, res) => {
+router.post('/:id/comments', validate(addIdeaCommentSchema), async (req, res) => {
   try {
     const { text, commentedBy } = req.body;
 

@@ -1,6 +1,8 @@
 // routes/amazonAccounts.js
 import { Router } from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createAmazonAccountSchema } from '../schemas/index.js';
 import AmazonAccount from '../models/AmazonAccount.js';
 
 const router = Router();
@@ -16,7 +18,7 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // POST: Add new Amazon Account (Restricted to specific roles)
-router.post('/', requireAuth, requirePageAccess('AmazonAccounts'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('AmazonAccounts'), validate(createAmazonAccountSchema), async (req, res) => {
   const { name, addressLine1, addressLine2, city, state, postalCode, country, phoneNumber, notes } = req.body;
   if (!name) return res.status(400).json({ error: 'Account name is required' });
   

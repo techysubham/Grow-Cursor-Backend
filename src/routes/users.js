@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createUserSchema } from '../schemas/index.js';
 import User from '../models/User.js';
 import Seller from '../models/Seller.js';
 import EmployeeProfile from '../models/EmployeeProfile.js';
@@ -17,7 +19,7 @@ import {
 const router = Router();
 
 // Superadmin creates all (productadmin, listingadmin, lister); Listing Admin creates listers only
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
   const { role } = req.user;
   const { email, username, password, newUserRole, department } = req.body || {};
   if (!username || !password || !newUserRole) {

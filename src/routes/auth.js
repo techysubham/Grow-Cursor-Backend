@@ -4,6 +4,8 @@ import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import User from '../models/User.js';
 import UserSellerAssignment from '../models/UserSellerAssignment.js';
+import { validate } from '../utils/validate.js';
+import { loginSchema } from '../schemas/index.js';
 
 const router = Router();
 
@@ -16,7 +18,7 @@ const loginLimiter = rateLimit({
   message: { error: 'Too many login attempts. Please try again after 15 minutes.' }
 });
 
-router.post('/login', loginLimiter, async (req, res) => {
+router.post('/login', loginLimiter, validate(loginSchema), async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   const user = await User.findOne({ username });

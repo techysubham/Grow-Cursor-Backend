@@ -1,13 +1,15 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createTaskSchema, createAssignmentSchema } from '../schemas/index.js';
 import Task from '../models/Task.js';
 import User from '../models/User.js';
 
 const router = Router();
 
 // Create a product research entry (productadmin or superadmin or users with ProductResearch permission)
-router.post('/', requireAuth, requirePageAccess(['TaskList', 'ProductResearch']), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess(['TaskList', 'ProductResearch']), validate(createTaskSchema), async (req, res) => {
   const body = req.body || {};
   try {
     // normalize legacy field names and defaults

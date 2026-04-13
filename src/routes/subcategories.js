@@ -1,10 +1,12 @@
 import { Router } from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createSubcategorySchema } from '../schemas/index.js';
 import Subcategory from '../models/Subcategory.js';
 
 const router = Router();
 
-router.post('/', requireAuth, requirePageAccess('ManageCategories'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('ManageCategories'), validate(createSubcategorySchema), async (req, res) => {
   const { name, categoryId } = req.body || {};
   if (!name || !categoryId) return res.status(400).json({ error: 'name and categoryId required' });
   try {
