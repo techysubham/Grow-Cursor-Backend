@@ -5264,7 +5264,7 @@ async function fetchAllOrdersWithPagination(accessToken, filter, sellerName) {
 // Add exact (case-sensitive) username/email substrings here to permanently exclude a seller.
 // Any seller whose username or email *contains* one of these strings is skipped.
 const AUTO_COMPAT_EXCLUDED_USERNAMES = [
-  'vergo',   // Vergo seller — managed separately, exclude from bulk runs
+  'Vergo',   // Vergo seller — managed separately, exclude from bulk runs
 ];
 // ─────────────────────────────────────────────────────────────────────────────
 
