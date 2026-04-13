@@ -3,6 +3,8 @@ import mongoose from 'mongoose';
 import Transaction from '../models/Transaction.js';
 import Order from '../models/Order.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createTransactionSchema, updateTransactionSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -191,7 +193,7 @@ router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res)
 });
 
 // POST /api/transactions - Create Manual Transaction
-router.post('/', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('Transactions'), validate(createTransactionSchema), async (req, res) => {
     try {
         const { date, bankAccount, transactionType, amount, remark, creditCardName } = req.body;
 
@@ -220,7 +222,7 @@ router.post('/', requireAuth, requirePageAccess('Transactions'), async (req, res
 });
 
 // PUT /api/transactions/:id - Update Manual Transaction
-router.put('/:id', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
+router.put('/:id', requireAuth, requirePageAccess('Transactions'), validate(updateTransactionSchema), async (req, res) => {
     try {
         const { id } = req.params;
         const { date, bankAccount, transactionType, amount, remark, creditCardName } = req.body;

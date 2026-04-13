@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import User from '../models/User.js';
+import { validate } from '../utils/validate.js';
+import { createLeaveSchema, updateLeaveStatusSchema } from '../schemas/index.js';
 
 const router = Router();
 
@@ -37,7 +39,7 @@ function getDateRange(startDate, endDate) {
 }
 
 // POST / - Create a new leave request
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, validate(createLeaveSchema), async (req, res) => {
     try {
         const { startDate, endDate, reason } = req.body;
         const userId = req.user.userId;
@@ -198,7 +200,7 @@ router.get('/admin', requireAuth, requirePageAccess('LeaveAdmin'), async (req, r
 });
 
 // PUT /:id/status - Approve or reject a leave request (HR Admin and Superadmin only)
-router.put('/:id/status', requireAuth, requirePageAccess('LeaveAdmin'), async (req, res) => {
+router.put('/:id/status', requireAuth, requirePageAccess('LeaveAdmin'), validate(updateLeaveStatusSchema), async (req, res) => {
     try {
         const { id } = req.params;
         const { status, rejectionReason } = req.body;

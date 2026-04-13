@@ -2,6 +2,8 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createAssignmentSchema } from '../schemas/index.js';
 import Assignment from '../models/Assignment.js';
 import Task from '../models/Task.js';
 import Range from '../models/Range.js';
@@ -82,7 +84,7 @@ router.get('/filter-options', requireAuth, requirePageAccess('Assignments'), asy
   }
 });
 
-router.post('/', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('Assignments'), validate(createAssignmentSchema), async (req, res) => {
   try {
     const { taskId, listerId, quantity, listingPlatformId, storeId, notes, scheduledDate } = req.body || {};
     if (!taskId || !listerId || !quantity || !listingPlatformId || !storeId) {

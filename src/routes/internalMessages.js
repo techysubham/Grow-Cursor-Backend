@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { sendMessageSchema } from '../schemas/index.js';
 import InternalMessage from '../models/InternalMessage.js';
 import User from '../models/User.js';
 
@@ -157,7 +159,7 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
 });
 
 // 4. SEND MESSAGE
-router.post('/send', requireAuth, async (req, res) => {
+router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) => {
   try {
     const { recipientId, body, mediaUrls } = req.body;
     const currentUserId = req.user.userId;

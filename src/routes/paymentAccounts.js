@@ -1,6 +1,8 @@
 import express from 'express';
 import PaymentAccount from '../models/PaymentAccount.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createPaymentAccountSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -17,7 +19,7 @@ router.get('/', requireAuth, requirePageAccess('BankAccounts'), async (req, res)
 });
 
 // POST /api/payment-accounts - Create
-router.post('/', requireAuth, requirePageAccess('BankAccounts'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('BankAccounts'), validate(createPaymentAccountSchema), async (req, res) => {
     try {
         const { name, bankAccount } = req.body;
         if (!name || !bankAccount) {

@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createColumnPresetSchema } from '../schemas/index.js';
 import ColumnPreset from '../models/ColumnPreset.js';
 
 const router = Router();
@@ -19,7 +21,7 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // CREATE a new preset
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, validate(createColumnPresetSchema), async (req, res) => {
   const { name, columns, page = 'dashboard' } = req.body || {};
   if (!name || !columns) {
     return res.status(400).json({ error: 'name and columns required' });

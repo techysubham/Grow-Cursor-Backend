@@ -1,6 +1,8 @@
 import express from 'express';
 import CreditCard from '../models/CreditCard.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createCreditCardSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -16,7 +18,7 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Create a new credit card
-router.post('/', requireAuth, requirePageAccess('CreditCards'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('CreditCards'), validate(createCreditCardSchema), async (req, res) => {
   try {
     const { name } = req.body;
     if (!name || !name.trim()) {

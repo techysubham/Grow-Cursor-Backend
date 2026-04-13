@@ -1,5 +1,7 @@
  import { Router } from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createChatTemplateSchema } from '../schemas/index.js';
 import ChatTemplate from '../models/ChatTemplate.js';
 
 const router = Router();
@@ -141,7 +143,7 @@ router.get('/all', requireAuth, requirePageAccess('BuyerMessages'), async (req, 
  * POST /chat-templates
  * Create a new template
  */
-router.post('/', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('BuyerMessages'), validate(createChatTemplateSchema), async (req, res) => {
   try {
     const { category, label, text } = req.body;
 
