@@ -8653,7 +8653,7 @@ const retryCompatWithTitleDiff = async (token, itemId, compatibilityList) => {
 };
 
 router.post('/update-compatibility', requireAuth, async (req, res) => {
-  const { sellerId, itemId, sku, compatibilityList: rawCompatibilityList } = req.body;
+  const { sellerId, itemId, sku, compatibilityList: rawCompatibilityList, batchId } = req.body;
   try {
     const seller = await Seller.findById(sellerId);
     const token = await ensureValidToken(seller);
@@ -8798,6 +8798,15 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
       { itemId: itemId },
       { compatibility: filteredCompatibilityList }
     );
+
+    // 4. Also sync the batch item so re-opening the review modal shows fresh data
+    if (batchId) {
+      await AutoCompatibilityBatch.findOneAndUpdate(
+        { _id: batchId, 'items.itemId': itemId },
+        { $set: { 'items.$[el].compatibilityList': filteredCompatibilityList } },
+        { arrayFilters: [{ 'el.itemId': itemId }] }
+      );
+    }
 
     const strippedCount = (compatibilityList?.length || 0) - (filteredCompatibilityList?.length || 0);
     res.json({ success: true, warning: warningMessage, strippedCount });
