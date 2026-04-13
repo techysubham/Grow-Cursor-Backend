@@ -11858,6 +11858,7 @@ router.get('/auto-compatibility-batches', requireAuth, async (req, res) => {
     const { sellerId, page = 1, limit = 20 } = req.query;
     const filter = {};
     if (sellerId) filter.seller = sellerId;
+    if (req.query.status) filter.status = req.query.status;
     if (req.query.manualReviewDone === 'true') filter.manualReviewDone = true;
     if (req.query.triggeredBy) filter.triggeredBy = req.query.triggeredBy;
     if (req.query.reviewedBy) filter.reviewedBy = req.query.reviewedBy;
