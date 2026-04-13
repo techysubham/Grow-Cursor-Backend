@@ -53,6 +53,10 @@ const AutoCompatibilityBatchSchema = new mongoose.Schema({
 
   startedAt: { type: Date, default: Date.now },
   completedAt: { type: Date, default: null },
+
+  // Which server instance owns this batch (prevents cross-environment resume conflicts)
+  runnerId: { type: String, default: null },
+  lastHeartbeatAt: { type: Date, default: null },
 }, { timestamps: true });
 
 AutoCompatibilityBatchSchema.index({ seller: 1, createdAt: -1 });

@@ -42,6 +42,10 @@ const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
 const activeAutoCompatBatchRuns = new Set();
 
+// Identifies which server instance owns/resumes batches.
+// Set RUNNER_ID=render in Render's env vars, leave unset (defaults to 'local') locally.
+const RUNNER_ID = process.env.RUNNER_ID || 'local';
+
 const DEFAULT_NEW_SELLER_SYNC_START = new Date(Date.UTC(2026, 2, 1, 0, 0, 0, 0));
 const EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS = 120;
 
@@ -116,7 +120,36 @@ export async function processAutoCompatibilityBatch(batchId) {
   const batchKey = String(batchId);
   if (activeAutoCompatBatchRuns.has(batchKey)) return;
 
+  // Atomically claim the batch — only proceed if this instance owns it or it is unclaimed.
+  // This prevents a local dev server from stealing a batch that Render is running, and vice versa.
+  const claimed = await AutoCompatibilityBatch.findOneAndUpdate(
+    {
+      _id: batchId,
+      status: 'running',
+      $or: [
+        { runnerId: null },
+        { runnerId: { $exists: false } },
+        { runnerId: RUNNER_ID },
+      ],
+    },
+    { $set: { runnerId: RUNNER_ID, lastHeartbeatAt: new Date() } }
+  );
+
+  if (!claimed) {
+    const current = await AutoCompatibilityBatch.findById(batchId).select('status runnerId').lean();
+    if (current?.status === 'running' && current.runnerId && current.runnerId !== RUNNER_ID) {
+      console.log(`[AutoCompat] Batch ${batchId} is owned by runner '${current.runnerId}', skipping on '${RUNNER_ID}'`);
+    }
+    return;
+  }
+
   activeAutoCompatBatchRuns.add(batchKey);
+
+  // Keep lastHeartbeatAt fresh so a stale-batch detector can see this runner is alive
+  const heartbeatTimer = setInterval(async () => {
+    try { await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { lastHeartbeatAt: new Date() }); } catch { /* ignore */ }
+  }, 30_000);
+
   try {
     const batch = await AutoCompatibilityBatch.findById(batchId).lean();
     if (!batch || batch.status === 'completed') return;
@@ -410,12 +443,22 @@ export async function processAutoCompatibilityBatch(batchId) {
       currentStep: 'failed: ' + batchErr.message
     });
   } finally {
+    clearInterval(heartbeatTimer);
     activeAutoCompatBatchRuns.delete(batchKey);
   }
 }
 
 export async function resumeRunningAutoCompatibilityBatches() {
-  const runningBatches = await AutoCompatibilityBatch.find({ status: 'running' }).select('_id').lean();
+  // Only resume batches that belong to THIS runner instance (or legacy unclaimed ones).
+  // This prevents the local dev server from resuming Render's batches and vice versa.
+  const runningBatches = await AutoCompatibilityBatch.find({
+    status: 'running',
+    $or: [
+      { runnerId: null },
+      { runnerId: { $exists: false } },
+      { runnerId: RUNNER_ID },
+    ],
+  }).select('_id runnerId').lean();
   if (runningBatches.length === 0) return 0;
 
   runningBatches.forEach((batch) => {
@@ -11766,6 +11809,7 @@ router.post('/auto-compatibility', requireAuth, async (req, res) => {
       itemLimit: itemLimit || 0,
       sourceItemIds: listings.map(listing => listing.itemId),
       totalListings: listings.length,
+      runnerId: RUNNER_ID,
       status: 'running',
       startedAt: new Date()
     });
@@ -11867,6 +11911,137 @@ router.get('/listing/:itemId', requireAuth, async (req, res) => {
     const listing = await Listing.findOne({ itemId: req.params.itemId }).lean();
     if (!listing) return res.status(404).json({ error: 'Listing not found' });
     res.json(listing);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/ebay/auto-compatibility/run-for-date
+// Body: { targetDate, itemLimit?, excludeSellerIds? }
+// Creates batches for every seller (except those matching "vergo") and processes them sequentially.
+router.post('/auto-compatibility/run-for-date', requireAuth, async (req, res) => {
+  const { targetDate, itemLimit = 0, excludeSellerIds = [] } = req.body;
+  if (!targetDate) {
+    return res.status(400).json({ error: 'targetDate is required' });
+  }
+
+  try {
+    const allSellers = await Seller.find({}).populate('user', 'username email').lean();
+
+    // Exclude sellers whose username/email contains "vergo" (case-insensitive) or are in the explicit exclude list
+    const eligible = allSellers.filter(s => {
+      if (excludeSellerIds.includes(String(s._id))) return false;
+      const identifier = (s.user?.username || s.user?.email || '').toLowerCase();
+      return !identifier.includes('vergo');
+    });
+
+    if (eligible.length === 0) {
+      return res.json({ success: true, message: 'No eligible sellers found', batches: [] });
+    }
+
+    const dayStart = new Date(targetDate + 'T00:00:00Z');
+    const dayEnd   = new Date(targetDate + 'T23:59:59.999Z');
+    const result   = [];
+
+    for (const seller of eligible) {
+      // Reuse an existing running/completed batch for this seller + date rather than creating a duplicate
+      const existing = await AutoCompatibilityBatch.findOne({
+        seller: seller._id,
+        targetDate,
+        status: { $in: ['running', 'completed'] },
+      }).select('_id status totalListings').lean();
+
+      if (existing) {
+        result.push({
+          sellerId: seller._id,
+          username: seller.user?.username || seller.user?.email,
+          batchId: existing._id,
+          status: existing.status,
+          totalListings: existing.totalListings,
+          reused: true,
+        });
+        continue;
+      }
+
+      const baseQuery = {
+        seller: seller._id,
+        listingStatus: 'Active',
+        startTime: { $gte: dayStart, $lte: dayEnd },
+        $or: [{ compatibility: { $exists: false } }, { compatibility: { $size: 0 } }, { compatibility: null }],
+      };
+      let listings = await Listing.find(baseQuery).sort({ startTime: 1 }).select('itemId').lean();
+      if (itemLimit > 0) listings = listings.slice(0, itemLimit);
+
+      if (listings.length === 0) {
+        result.push({
+          sellerId: seller._id,
+          username: seller.user?.username || seller.user?.email,
+          batchId: null,
+          status: 'skipped',
+          reason: 'no_listings',
+        });
+        continue;
+      }
+
+      const batch = await AutoCompatibilityBatch.create({
+        seller: seller._id,
+        triggeredBy: req.user.userId,
+        targetDate,
+        itemLimit: itemLimit || 0,
+        sourceItemIds: listings.map(l => l.itemId),
+        totalListings: listings.length,
+        runnerId: RUNNER_ID,
+        status: 'running',
+        startedAt: new Date(),
+      });
+
+      result.push({
+        sellerId: seller._id,
+        username: seller.user?.username || seller.user?.email,
+        batchId: batch._id,
+        status: 'running',
+        totalListings: listings.length,
+        reused: false,
+      });
+    }
+
+    // Respond immediately so the client can start polling
+    res.json({ success: true, batches: result });
+
+    // Process new batches sequentially in the background (one store at a time)
+    const newBatchIds = result.filter(r => !r.reused && r.status === 'running').map(r => r.batchId);
+    (async () => {
+      for (const bid of newBatchIds) {
+        try {
+          await processAutoCompatibilityBatch(bid);
+        } catch (err) {
+          console.error(`[AutoCompat] run-for-date: batch ${bid} failed:`, err.message);
+        }
+      }
+      console.log(`[AutoCompat] run-for-date ${targetDate}: all ${newBatchIds.length} new batch(es) finished`);
+    })();
+  } catch (err) {
+    console.error('[AutoCompat] run-for-date error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/ebay/auto-compatibility-batches-for-date?targetDate=YYYY-MM-DD
+// Returns all batches for a given date (all sellers), used by the "Run All" dashboard.
+router.get('/auto-compatibility-batches-for-date', requireAuth, async (req, res) => {
+  try {
+    const { targetDate } = req.query;
+    if (!targetDate) return res.status(400).json({ error: 'targetDate is required' });
+
+    const batches = await AutoCompatibilityBatch.find({ targetDate })
+      .select('-items')
+      .sort({ createdAt: 1 })
+      .populate('triggeredBy', 'username')
+      .populate('reviewedBy', 'username')
+      .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+      .lean();
+
+    res.json({ batches });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
