@@ -398,11 +398,10 @@ export async function processAutoCompatibilityBatch(batchId) {
               savedList = filterOutInvalidCombos(sanitized, rawWarning);
               itemResult.strippedCount = sanitized.length - savedList.length;
               purgeInvalidFromCache(rawWarning).catch(() => {});
-              counts.warningCount += 1;
-            } else {
-              counts.successCount += 1;
             }
-            itemResult.status = 'warning';
+            // eBay Warning == still sent successfully; treat as success
+            itemResult.status = 'success';
+            counts.successCount += 1;
           } else {
             itemResult.status = 'success';
             counts.successCount += 1;
@@ -434,7 +433,7 @@ export async function processAutoCompatibilityBatch(batchId) {
       currentItemTitle: '',
       currentStep: 'done'
     });
-    console.log(`[AutoCompat] Batch ${batchId} completed: ${counts.successCount} success, ${counts.warningCount} warning, ${counts.needsManualCount} manual, ${counts.ebayErrorCount} error, ${counts.aiFailedCount} ai_failed`);
+    console.log(`[AutoCompat] Batch ${batchId} completed: ${counts.successCount} success (incl. w/ notes), ${counts.needsManualCount} manual, ${counts.ebayErrorCount} error, ${counts.aiFailedCount} ai_failed`);
   } catch (batchErr) {
     console.error(`[AutoCompat] Batch ${batchId} failed:`, batchErr.message);
     await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
@@ -11862,10 +11861,32 @@ router.get('/auto-compatibility-batches', requireAuth, async (req, res) => {
     if (req.query.manualReviewDone === 'true') filter.manualReviewDone = true;
     if (req.query.triggeredBy) filter.triggeredBy = req.query.triggeredBy;
     if (req.query.reviewedBy) filter.reviewedBy = req.query.reviewedBy;
-    if (req.query.dateFrom || req.query.dateTo) {
+    if (req.query.listingDate) {
+      // Exact listing date match (overrides dateFrom/dateTo)
+      filter.targetDate = req.query.listingDate;
+    } else if (req.query.dateFrom || req.query.dateTo) {
       filter.targetDate = {};
       if (req.query.dateFrom) filter.targetDate.$gte = req.query.dateFrom;
       if (req.query.dateTo) filter.targetDate.$lte = req.query.dateTo;
+    }
+    // Run On (createdAt) filter — IST-aware: IST = UTC+5:30
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    if (req.query.runOnDate) {
+      const d = new Date(req.query.runOnDate + 'T00:00:00.000Z');
+      filter.createdAt = {
+        $gte: new Date(d.getTime() - IST_OFFSET_MS),
+        $lt: new Date(d.getTime() - IST_OFFSET_MS + 86400000),
+      };
+    } else if (req.query.runOnFrom || req.query.runOnTo) {
+      filter.createdAt = {};
+      if (req.query.runOnFrom) {
+        const d = new Date(req.query.runOnFrom + 'T00:00:00.000Z');
+        filter.createdAt.$gte = new Date(d.getTime() - IST_OFFSET_MS);
+      }
+      if (req.query.runOnTo) {
+        const d = new Date(req.query.runOnTo + 'T00:00:00.000Z');
+        filter.createdAt.$lt = new Date(d.getTime() - IST_OFFSET_MS + 86400000);
+      }
     }
     const total = await AutoCompatibilityBatch.countDocuments(filter);
     const batches = await AutoCompatibilityBatch.find(filter)
@@ -11890,12 +11911,16 @@ router.patch('/auto-compatibility-batch/:batchId/review-summary', requireAuth, a
     const batch = await AutoCompatibilityBatch.findByIdAndUpdate(
       req.params.batchId,
       {
-        manualReviewDone: true,
-        manualCorrectCount: correctCount || 0,
-        manualSkippedCount: skippedCount || 0,
-        manualEndedCount: endedCount || 0,
-        reviewedBy: req.user.userId,
-        reviewedAt: new Date(),
+        $inc: {
+          manualCorrectCount: correctCount || 0,
+          manualSkippedCount: skippedCount || 0,
+          manualEndedCount: endedCount || 0,
+        },
+        $set: {
+          manualReviewDone: true,
+          reviewedBy: req.user.userId,
+          reviewedAt: new Date(),
+        },
       },
       { new: true }
     );
