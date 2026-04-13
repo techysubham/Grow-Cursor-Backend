@@ -5260,6 +5260,14 @@ async function fetchAllOrdersWithPagination(accessToken, filter, sellerName) {
   return allOrders;
 }
 
+// ─── Auto-Compatibility: sellers excluded from "Run All Sellers" ──────────────
+// Add exact (case-sensitive) username/email substrings here to permanently exclude a seller.
+// Any seller whose username or email *contains* one of these strings is skipped.
+const AUTO_COMPAT_EXCLUDED_USERNAMES = [
+  'vergo',   // Vergo seller — managed separately, exclude from bulk runs
+];
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Item IDs that should NOT have their quantity updated when ordered
 const QUANTITY_UPDATE_EXCLUDED_ITEMS = new Set([
   '127311585410',
@@ -11953,7 +11961,7 @@ router.get('/listing/:itemId', requireAuth, async (req, res) => {
 
 // POST /api/ebay/auto-compatibility/run-for-date
 // Body: { targetDate, itemLimit?, excludeSellerIds? }
-// Creates batches for every seller (except those matching "vergo") and processes them sequentially.
+// Creates batches for every seller (except those in AUTO_COMPAT_EXCLUDED_USERNAMES) and processes them sequentially.
 router.post('/auto-compatibility/run-for-date', requireAuth, async (req, res) => {
   const { targetDate, itemLimit = 0, excludeSellerIds = [] } = req.body;
   if (!targetDate) {
@@ -11963,11 +11971,12 @@ router.post('/auto-compatibility/run-for-date', requireAuth, async (req, res) =>
   try {
     const allSellers = await Seller.find({}).populate('user', 'username email').lean();
 
-    // Exclude sellers whose username/email contains "vergo" (case-insensitive) or are in the explicit exclude list
+    // Exclude sellers whose username/email matches any entry in AUTO_COMPAT_EXCLUDED_USERNAMES,
+    // or are in the explicit run-time excludeSellerIds list.
     const eligible = allSellers.filter(s => {
       if (excludeSellerIds.includes(String(s._id))) return false;
-      const identifier = (s.user?.username || s.user?.email || '').toLowerCase();
-      return !identifier.includes('vergo');
+      const identifier = (s.user?.username || s.user?.email || '');
+      return !AUTO_COMPAT_EXCLUDED_USERNAMES.some(excl => identifier.includes(excl));
     });
 
     if (eligible.length === 0) {
