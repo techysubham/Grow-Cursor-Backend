@@ -1,5 +1,5 @@
 import express from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireAuthSSE } from '../middleware/auth.js';
 import TemplateListing from '../models/TemplateListing.js';
 import ListingTemplate from '../models/ListingTemplate.js';
 import Seller from '../models/Seller.js';
@@ -398,7 +398,7 @@ router.get('/analytics', requireAuth, async (req, res) => {
 });
 
 // Bulk preview with SSE streaming (real-time updates) - MUST be before /:id route
-router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
+router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
   try {
     const { templateId, sellerId, asins: asinsParam, region = 'US' } = req.query;
     
@@ -669,7 +669,7 @@ router.get('/bulk-preview-stream', requireAuth, async (req, res) => {
 });
 
 // Bulk preview from ASIN Directory (no scraping — reads stored data) with SSE streaming
-router.get('/bulk-preview-from-directory-stream', requireAuth, async (req, res) => {
+router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, res) => {
   try {
     const { templateId, sellerId, asins: asinsParam } = req.query;
 

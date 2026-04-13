@@ -110,13 +110,12 @@ export const PAGE_DEFAULT_ROLES = {
 
 export async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization || '';
-  let token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-  
-  // Fallback: check query param for token (e.g., for eBay OAuth redirects)
-  if (!token && req.query.token) {
-    token = req.query.token;
-  }
-  
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  // NOTE: The former req.query.token fallback has been removed — passing JWTs in
+  // query parameters leaks them into server logs, browser history, and Referer
+  // headers. SSE endpoints that cannot use Authorization headers should use the
+  // dedicated requireAuthSSE middleware below instead.
+
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
@@ -143,6 +142,66 @@ export async function requireAuth(req, res, next) {
     }
     
     req.user = payload; // { userId, role, tokenVersion, permissionsVersion }
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+/**
+ * SSE-only auth middleware.
+ * The browser's native EventSource API cannot set custom headers, so SSE
+ * endpoints must accept the token via ?token= query param. This middleware
+ * is intentionally scoped to SSE routes only — all other routes use requireAuth.
+ */
+export async function requireAuthSSE(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const token = (authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null)
+    || req.query.token || null;
+
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(payload.userId).select('tokenVersion permissionsVersion').lean();
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    if ((payload.tokenVersion || 1) !== (user.tokenVersion || 1)) {
+      return res.status(401).json({ error: 'Token expired. Please login again.' });
+    }
+    if ((payload.permissionsVersion || 1) !== (user.permissionsVersion || 1)) {
+      return res.status(401).json({ error: 'Your access permissions have been updated. Please login again.' });
+    }
+    req.user = payload;
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+/**
+ * File-serving auth middleware.
+ * Browser <img src> tags cannot set custom headers, so file-retrieval endpoints
+ * must accept the token via ?token= query param in addition to the Authorization
+ * header. This is intentionally scoped to file-serving GET routes only.
+ */
+export async function requireAuthFile(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const token = (authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null)
+    || req.query.token || null;
+
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(payload.userId).select('tokenVersion permissionsVersion').lean();
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    if ((payload.tokenVersion || 1) !== (user.tokenVersion || 1)) {
+      return res.status(401).json({ error: 'Token expired. Please login again.' });
+    }
+    if ((payload.permissionsVersion || 1) !== (user.permissionsVersion || 1)) {
+      return res.status(401).json({ error: 'Your access permissions have been updated. Please login again.' });
+    }
+    req.user = payload;
     return next();
   } catch (e) {
     return res.status(401).json({ error: 'Invalid token' });

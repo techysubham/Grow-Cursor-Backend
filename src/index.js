@@ -78,9 +78,21 @@ import imageCache from './lib/imageCache.js';
 const app = express();
 
 app.use(helmet());
-// TODO: Lock down CORS — replace origin '*' with actual frontend domains (e.g. Vercel URL, localhost) once all consuming origins are identified
+// CORS: allowed origins are driven by CLIENT_ORIGIN env var (comma-separated) + localhost defaults
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  ...((process.env.CLIENT_ORIGIN || '')
+    .split(',')
+    .map(o => o.trim())
+    .filter(Boolean)),
+];
 app.use(cors({
-  origin: '*',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, server-to-server)
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS: origin '${origin}' not allowed`));
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   exposedHeaders: ['Content-Disposition']
@@ -89,8 +101,12 @@ app.use(express.json({ limit: '10mb' })); // Increased limit for bulk operations
 app.use(mongoSanitize()); // Sanitize user input to prevent NoSQL injection (strips $ and . from req.body/query/params)
 app.use(morgan('dev'));
 
-// Serve static uploads
-app.use('/uploads', express.static(path.join(process.cwd(), 'public/uploads')));
+// Serve static uploads — browser-cacheable for 1 day (ETag enables conditional revalidation)
+app.use('/uploads', express.static(path.join(process.cwd(), 'public/uploads'), {
+  maxAge: '1d',
+  etag: true,
+  lastModified: true,
+}));
 
 // Disable caching globally for all API routes
 app.use('/api', (req, res, next) => {
@@ -173,6 +189,22 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/affiliate-orders', affiliateOrdersRoutes);
 app.use('/api/listing-stats', listingStatsRoutes);
 app.use('/api/item-category-map', itemCategoryMapRoutes);
+
+// ── Global error handler ─────────────────────────────────────────────────────
+// Must be registered AFTER all routes. Catches any error passed via next(err)
+// or thrown inside an asyncHandler-wrapped route.
+app.use((err, req, res, _next) => {
+  // CORS errors surfaced from the cors() middleware
+  if (err.message?.startsWith('CORS:')) {
+    return res.status(403).json({ error: err.message });
+  }
+  const status = err.status || err.statusCode || 500;
+  const message = err.message || 'Internal server error';
+  if (status >= 500) {
+    console.error(`[${req.method}] ${req.path}`, err);
+  }
+  return res.status(status).json({ error: message });
+});
 
 const port = process.env.PORT || 5000;
 

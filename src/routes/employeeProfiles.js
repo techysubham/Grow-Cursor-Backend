@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireAuthFile } from '../middleware/auth.js';
 import EmployeeProfile from '../models/EmployeeProfile.js';
 import User from '../models/User.js';
 import multer from 'multer';
@@ -311,7 +311,7 @@ router.post('/me/upload/pan', requireAuth, upload.single('file'), async (req, re
 // ===== FILE RETRIEVAL ENDPOINTS =====
 
 // GET /api/employee-profiles/me/file/profile-pic - Get my profile picture
-router.get('/me/file/profile-pic', requireAuth, async (req, res) => {
+router.get('/me/file/profile-pic', requireAuthFile, async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id || req.user.id;
     const profile = await EmployeeProfile.findOne({ user: userId });
@@ -335,7 +335,7 @@ router.get('/me/file/profile-pic', requireAuth, async (req, res) => {
 });
 
 // GET /api/employee-profiles/me/file/aadhar - Get my Aadhaar document
-router.get('/me/file/aadhar', requireAuth, async (req, res) => {
+router.get('/me/file/aadhar', requireAuthFile, async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id || req.user.id;
     const profile = await EmployeeProfile.findOne({ user: userId });
@@ -356,7 +356,7 @@ router.get('/me/file/aadhar', requireAuth, async (req, res) => {
 });
 
 // GET /api/employee-profiles/me/file/pan - Get my PAN document
-router.get('/me/file/pan', requireAuth, async (req, res) => {
+router.get('/me/file/pan', requireAuthFile, async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id || req.user.id;
     const profile = await EmployeeProfile.findOne({ user: userId });
@@ -377,7 +377,7 @@ router.get('/me/file/pan', requireAuth, async (req, res) => {
 });
 
 // GET /api/employee-profiles/:id/file/profile-pic - Get employee's profile picture (admin access)
-router.get('/:id/file/profile-pic', requireAuth, async (req, res) => {
+router.get('/:id/file/profile-pic', requireAuthFile, async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Forbidden' });
@@ -401,7 +401,7 @@ router.get('/:id/file/profile-pic', requireAuth, async (req, res) => {
 });
 
 // GET /api/employee-profiles/:id/file/aadhar - Get employee's Aadhaar document (admin access)
-router.get('/:id/file/aadhar', requireAuth, async (req, res) => {
+router.get('/:id/file/aadhar', requireAuthFile, async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Forbidden' });
@@ -425,7 +425,7 @@ router.get('/:id/file/aadhar', requireAuth, async (req, res) => {
 });
 
 // GET /api/employee-profiles/:id/file/pan - Get employee's PAN document (admin access)
-router.get('/:id/file/pan', requireAuth, async (req, res) => {
+router.get('/:id/file/pan', requireAuthFile, async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Forbidden' });

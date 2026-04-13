@@ -1,7 +1,7 @@
 import express from 'express';
 import AsinDirectory from '../models/AsinDirectory.js';
 import AsinListProduct from '../models/AsinListProduct.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireAuthSSE } from '../middleware/auth.js';
 import { fetchAmazonData } from '../utils/asinAutofill.js';
 
 // Scrape a batch of ASINs in parallel (max 5 at a time) and return enrichment map
@@ -166,7 +166,7 @@ router.get('/stats', requireAuth, async (req, res) => {
 });
 
 // Bulk add ASINs manually — streaming SSE version (GET, token via query param)
-router.get('/bulk-manual-stream', requireAuth, async (req, res) => {
+router.get('/bulk-manual-stream', requireAuthSSE, async (req, res) => {
   const asinsParam = req.query.asins || '';
   const region = req.query.region || 'US';
 
