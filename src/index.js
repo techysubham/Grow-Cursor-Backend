@@ -101,8 +101,12 @@ app.use(express.json({ limit: '10mb' })); // Increased limit for bulk operations
 app.use(mongoSanitize()); // Sanitize user input to prevent NoSQL injection (strips $ and . from req.body/query/params)
 app.use(morgan('dev'));
 
-// Serve static uploads
-app.use('/uploads', express.static(path.join(process.cwd(), 'public/uploads')));
+// Serve static uploads — browser-cacheable for 1 day (ETag enables conditional revalidation)
+app.use('/uploads', express.static(path.join(process.cwd(), 'public/uploads'), {
+  maxAge: '1d',
+  etag: true,
+  lastModified: true,
+}));
 
 // Disable caching globally for all API routes
 app.use('/api', (req, res, next) => {
