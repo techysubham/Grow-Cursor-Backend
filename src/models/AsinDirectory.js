@@ -20,6 +20,12 @@ const asinDirectorySchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
+  addedByUserId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+    index: true
+  },
 
   // Enrichment fields from ScraperAPI
   title: { type: String, default: '' },
@@ -75,5 +81,6 @@ const asinDirectorySchema = new mongoose.Schema({
 
 // Indexes
 asinDirectorySchema.index({ addedAt: -1 });
+asinDirectorySchema.index({ addedByUserId: 1, listProductId: 1, addedAt: -1 });
 
 export default mongoose.model('AsinDirectory', asinDirectorySchema);

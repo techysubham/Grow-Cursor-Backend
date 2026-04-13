@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import AsinDirectory from '../models/AsinDirectory.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import { requireAuth, requireAuthSSE } from '../middleware/auth.js';
@@ -44,6 +45,7 @@ router.get('/', requireAuth, async (req, res) => {
     const rangeId = req.query.rangeId || '';
     const priceMin = req.query.priceMin !== undefined && req.query.priceMin !== '' ? parseFloat(req.query.priceMin) : null;
     const priceMax = req.query.priceMax !== undefined && req.query.priceMax !== '' ? parseFloat(req.query.priceMax) : null;
+    const addedByUserId = req.query.addedByUserId || '';
 
     const skip = (page - 1) * limit;
 
@@ -69,6 +71,13 @@ router.get('/', requireAuth, async (req, res) => {
 
     const region = req.query.region || '';
     if (region) query.region = region;
+
+    if (addedByUserId) {
+      if (!mongoose.Types.ObjectId.isValid(addedByUserId)) {
+        return res.status(400).json({ error: 'Invalid addedByUserId' });
+      }
+      query.addedByUserId = addedByUserId;
+    }
 
     // Moved-to-list date range filter
     const movedAfter = req.query.movedAfter || '';
@@ -137,17 +146,27 @@ router.get('/by-asins', requireAuth, async (req, res) => {
 // Get statistics
 router.get('/stats', requireAuth, async (req, res) => {
   try {
-    const total = await AsinDirectory.countDocuments();
-    const unassigned = await AsinDirectory.countDocuments({ listProductId: null });
+    const addedByUserId = req.query.addedByUserId || '';
+    const baseQuery = {};
+
+    if (addedByUserId) {
+      if (!mongoose.Types.ObjectId.isValid(addedByUserId)) {
+        return res.status(400).json({ error: 'Invalid addedByUserId' });
+      }
+      baseQuery.addedByUserId = addedByUserId;
+    }
+
+    const total = await AsinDirectory.countDocuments(baseQuery);
+    const unassigned = await AsinDirectory.countDocuments({ ...baseQuery, listProductId: null });
 
     const now = new Date();
     const todayStart = new Date(now.setHours(0, 0, 0, 0));
     const weekStart = new Date(now.setDate(now.getDate() - now.getDay()));
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    const today = await AsinDirectory.countDocuments({ addedAt: { $gte: todayStart } });
-    const thisWeek = await AsinDirectory.countDocuments({ addedAt: { $gte: weekStart } });
-    const thisMonth = await AsinDirectory.countDocuments({ addedAt: { $gte: monthStart } });
+    const today = await AsinDirectory.countDocuments({ ...baseQuery, addedAt: { $gte: todayStart } });
+    const thisWeek = await AsinDirectory.countDocuments({ ...baseQuery, addedAt: { $gte: weekStart } });
+    const thisMonth = await AsinDirectory.countDocuments({ ...baseQuery, addedAt: { $gte: monthStart } });
 
     res.json({
       total,
@@ -202,7 +221,10 @@ router.get('/bulk-manual-stream', requireAuthSSE, async (req, res) => {
     for (const asin of validAsins) {
       try {
         const enrichment = enrichmentMap.get(asin);
-        const doc = { asin };
+        const doc = {
+          asin,
+          addedByUserId: req.user.userId || null,
+        };
         if (enrichment?.ok) {
           const d = enrichment.data;
           doc.title = d.title || '';
@@ -282,7 +304,10 @@ router.post('/bulk-manual', requireAuth, async (req, res) => {
     for (const asin of validAsins) {
       try {
         const enrichment = enrichmentMap.get(asin);
-        const doc = { asin };
+        const doc = {
+          asin,
+          addedByUserId: req.user.userId || null,
+        };
 
         if (enrichment?.ok) {
           const d = enrichment.data;
@@ -387,7 +412,10 @@ router.post('/bulk-csv', requireAuth, async (req, res) => {
     for (const { asin, row } of asins) {
       try {
         const enrichment = enrichmentMap.get(asin);
-        const doc = { asin };
+        const doc = {
+          asin,
+          addedByUserId: req.user.userId || null,
+        };
 
         if (enrichment?.ok) {
           const d = enrichment.data;
