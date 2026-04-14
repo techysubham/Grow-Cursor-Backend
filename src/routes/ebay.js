@@ -192,7 +192,7 @@ export async function processAutoCompatibilityBatch(batchId) {
       return;
     }
 
-    const token = await ensureValidToken(seller);
+    let token = await ensureValidToken(seller);
 
     for (const listing of pendingListings) {
       const itemResult = {
@@ -366,7 +366,59 @@ export async function processAutoCompatibilityBatch(batchId) {
           const errors = result.ReviseFixedPriceItemResponse.Errors || [];
           const errorMessage = errors.map(e => e.LongMessage[0]).join('; ');
 
-          if (isDuplicateListingError(errorMessage)) {
+          // 931 = hard expired (refresh token dead), 932 = soft expired (access token expired mid-batch)
+          const isTokenExpired = errors.some(e =>
+            (e.ErrorCode?.[0] === '931') ||
+            (e.ErrorCode?.[0] === '932') ||
+            (e.LongMessage?.[0] || '').toLowerCase().includes('hard expired') ||
+            (e.LongMessage?.[0] || '').toLowerCase().includes('soft expired') ||
+            (e.LongMessage?.[0] || '').toLowerCase().includes('token is expired') ||
+            (e.LongMessage?.[0] || '').toLowerCase().includes('invalid access token')
+          );
+
+          if (isTokenExpired) {
+            // Force-refresh the token (ignore local cache) and retry the ReviseFixedPriceItem call once
+            console.log(`[AutoCompat] Token expired (mid-batch) for seller ${seller._id}, force-refreshing...`);
+            seller.ebayTokens.fetchedAt = new Date(0);
+            token = await ensureValidToken(seller);
+            const retryXml = `<?xml version="1.0" encoding="utf-8"?>
+              <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+                <ErrorLanguage>en_US</ErrorLanguage>
+                <WarningLevel>High</WarningLevel>
+                <Item><ItemID>${listing.itemId}</ItemID>${compatXml}</Item>
+              </ReviseFixedPriceItemRequest>`;
+            const retryResp = await axios.post('https://api.ebay.com/ws/api.dll', retryXml, {
+              headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
+            });
+            const retryResult = await parseStringPromise(retryResp.data);
+            const retryAck = retryResult.ReviseFixedPriceItemResponse.Ack[0];
+            if (retryAck === 'Failure') {
+              const retryErrors = retryResult.ReviseFixedPriceItemResponse.Errors || [];
+              itemResult.status = 'ebay_error';
+              itemResult.ebayError = parseInvalidCombos(retryErrors.map(e => e.LongMessage[0]).join('; '));
+              counts.ebayErrorCount += 1;
+            } else {
+              let savedList = sanitized;
+              if (retryAck === 'Warning') {
+                const meaningful = (retryResult.ReviseFixedPriceItemResponse.Errors || []).filter(e => {
+                  const msg = e.LongMessage[0];
+                  return !msg.includes('Best Offer') && !msg.includes('Funds from your sales');
+                });
+                if (meaningful.length > 0) {
+                  const rawWarning = meaningful.map(e => e.LongMessage[0]).join('; ');
+                  itemResult.ebayWarning = meaningful.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
+                  savedList = filterOutInvalidCombos(sanitized, rawWarning);
+                  itemResult.strippedCount = sanitized.length - savedList.length;
+                  purgeInvalidFromCache(rawWarning).catch(() => {});
+                }
+              }
+              itemResult.status = 'success';
+              itemResult.compatibilityList = savedList;
+              counts.successCount += 1;
+              await Listing.findOneAndUpdate({ itemId: listing.itemId }, { compatibility: savedList });
+            }
+          } else if (isDuplicateListingError(errorMessage)) {
             try {
               const { newPrice, newTitle, warning: retryWarning } = await retryCompatWithTitleDiff(token, listing.itemId, sanitized);
               await Listing.findOneAndUpdate({ itemId: listing.itemId }, { compatibility: sanitized, currentPrice: newPrice, title: newTitle });
