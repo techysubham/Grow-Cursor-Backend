@@ -98,8 +98,9 @@ async function getAutoCompatibilitySourceListings(batch) {
     return batch.sourceItemIds.map(itemId => byItemId.get(itemId)).filter(Boolean);
   }
 
-  const dayStart = new Date(batch.targetDate + 'T00:00:00Z');
-  const dayEnd = new Date(batch.targetDate + 'T23:59:59.999Z');
+  // targetDate is in IST (YYYY-MM-DD). Convert IST midnight/end-of-day to UTC for the query.
+  const dayStart = new Date(batch.targetDate + 'T00:00:00+05:30');
+  const dayEnd = new Date(batch.targetDate + 'T23:59:59.999+05:30');
   const query = {
     seller: batch.seller,
     listingStatus: 'Active',
