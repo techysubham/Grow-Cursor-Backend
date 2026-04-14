@@ -11923,19 +11923,20 @@ router.post('/auto-compatibility-status/bulk', requireAuth, async (req, res) => 
 // GET /api/ebay/auto-compatibility-status/:batchId
 router.get('/auto-compatibility-status/:batchId', requireAuth, async (req, res) => {
   try {
-    const [batch, newItems] = await Promise.all([
-      AutoCompatibilityBatch.findById(req.params.batchId)
-        .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
-        .lean(),
-      AutoCompatibilityBatchItem.find({ batchId: req.params.batchId })
-        .select('-compatibilityList')
-        .lean(),
-    ]);
+    const batch = await AutoCompatibilityBatch.findById(req.params.batchId)
+      .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+      .lean();
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
-    // Backward compat: old batches stored items[] embedded in the batch document
-    let items = newItems;
-    if (items.length === 0 && batch.items?.length) {
-      items = batch.items.map(({ compatibilityList, ...rest }) => rest);
+
+    // Skip fetching items while the batch is still running — the live progress UI only needs
+    // counts/currentStep. Items are fetched once the batch completes (avoids growing payload each poll).
+    let items = [];
+    if (batch.status !== 'running') {
+      const newItems = await AutoCompatibilityBatchItem.find({ batchId: req.params.batchId })
+        .select('-compatibilityList')
+        .lean();
+      // Backward compat: old batches stored items[] embedded in the batch document
+      items = newItems.length > 0 ? newItems : (batch.items || []).map(({ compatibilityList, ...rest }) => rest);
     }
     res.json({ ...batch, items });
   } catch (err) {
