@@ -32,6 +32,7 @@ import CompatibilityBatchLog from '../models/CompatibilityBatchLog.js';
 import User from '../models/User.js';
 import ItemCategoryMap from '../models/ItemCategoryMap.js';
 import AutoCompatibilityBatch from '../models/AutoCompatibilityBatch.js';
+import AutoCompatibilityBatchItem from '../models/AutoCompatibilityBatchItem.js';
 import AsinListCategory from '../models/AsinListCategory.js';
 import AsinListRange from '../models/AsinListRange.js';
 import AsinListProduct from '../models/AsinListProduct.js';
@@ -166,9 +167,10 @@ export async function processAutoCompatibilityBatch(batchId) {
     }
 
     const allListings = await getAutoCompatibilitySourceListings(batch);
-    const processedItemIds = new Set((batch.items || []).map(item => item.itemId));
+    const existingItems = await AutoCompatibilityBatchItem.find({ batchId }).select('itemId status').lean();
+    const processedItemIds = new Set(existingItems.map(item => item.itemId));
     const pendingListings = allListings.filter(listing => !processedItemIds.has(listing.itemId));
-    const counts = summarizeAutoCompatItems(batch.items || []);
+    const counts = summarizeAutoCompatItems(existingItems);
 
     await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
       status: 'running',
@@ -226,8 +228,8 @@ export async function processAutoCompatibilityBatch(batchId) {
           itemResult.failureReason = 'AI could not extract fitment info from this listing';
           counts.aiFailedCount += 1;
           counts.processedCount += 1;
+          await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
           await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
-            $push: { items: itemResult },
             aiFailedCount: counts.aiFailedCount,
             processedCount: counts.processedCount
           });
@@ -250,8 +252,8 @@ export async function processAutoCompatibilityBatch(batchId) {
           itemResult.failureReason = `Model "${aiData.model}" (resolved: "${resolvedModelInput}") not found in eBay DB for ${resolvedMake}`;
           counts.needsManualCount += 1;
           counts.processedCount += 1;
+          await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
           await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
-            $push: { items: itemResult },
             needsManualCount: counts.needsManualCount,
             processedCount: counts.processedCount
           });
@@ -279,8 +281,8 @@ export async function processAutoCompatibilityBatch(batchId) {
           itemResult.failureReason = `Years ${aiData.startYear}-${aiData.endYear} not found in eBay DB for ${resolvedMake} ${canonicalModel}`;
           counts.needsManualCount += 1;
           counts.processedCount += 1;
+          await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
           await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
-            $push: { items: itemResult },
             needsManualCount: counts.needsManualCount,
             processedCount: counts.processedCount
           });
@@ -469,8 +471,8 @@ export async function processAutoCompatibilityBatch(batchId) {
       }
 
       counts.processedCount += 1;
+      await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
       await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
-        $push: { items: itemResult },
         processedCount: counts.processedCount,
         successCount: counts.successCount,
         warningCount: counts.warningCount,
@@ -11921,12 +11923,21 @@ router.post('/auto-compatibility-status/bulk', requireAuth, async (req, res) => 
 // GET /api/ebay/auto-compatibility-status/:batchId
 router.get('/auto-compatibility-status/:batchId', requireAuth, async (req, res) => {
   try {
-    const batch = await AutoCompatibilityBatch.findById(req.params.batchId)
-      .select('-items.compatibilityList') // Exclude large compat lists from polling
-      .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
-      .lean();
+    const [batch, newItems] = await Promise.all([
+      AutoCompatibilityBatch.findById(req.params.batchId)
+        .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+        .lean(),
+      AutoCompatibilityBatchItem.find({ batchId: req.params.batchId })
+        .select('-compatibilityList')
+        .lean(),
+    ]);
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
-    res.json(batch);
+    // Backward compat: old batches stored items[] embedded in the batch document
+    let items = newItems;
+    if (items.length === 0 && batch.items?.length) {
+      items = batch.items.map(({ compatibilityList, ...rest }) => rest);
+    }
+    res.json({ ...batch, items });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -11935,11 +11946,16 @@ router.get('/auto-compatibility-status/:batchId', requireAuth, async (req, res) 
 // GET /api/ebay/auto-compatibility-batch/:batchId — Full batch with compat lists (for manual review)
 router.get('/auto-compatibility-batch/:batchId', requireAuth, async (req, res) => {
   try {
-    const batch = await AutoCompatibilityBatch.findById(req.params.batchId)
-      .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
-      .lean();
+    const [batch, newItems] = await Promise.all([
+      AutoCompatibilityBatch.findById(req.params.batchId)
+        .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+        .lean(),
+      AutoCompatibilityBatchItem.find({ batchId: req.params.batchId }).lean(),
+    ]);
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
-    res.json(batch);
+    // Backward compat: old batches stored items[] embedded in the batch document
+    const items = newItems.length > 0 ? newItems : (batch.items || []);
+    res.json({ ...batch, items });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

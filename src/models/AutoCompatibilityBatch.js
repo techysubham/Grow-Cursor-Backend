@@ -29,28 +29,6 @@ const AutoCompatibilityBatchSchema = new mongoose.Schema({
   currentItemTitle: { type: String, default: '' },
   currentStep: { type: String, default: '' }, // e.g. 'ai_suggest', 'fetching_models', 'sending_to_ebay'
 
-  // Per-item results
-  items: [{
-    itemId: { type: String, required: true },
-    title: { type: String },
-    sku: { type: String },
-    status: { type: String, enum: ['success', 'warning', 'needs_manual', 'ebay_error', 'ai_failed'], required: true },
-    aiSuggestion: {
-      make: String,
-      model: String,
-      startYear: String,
-      endYear: String,
-      allFitments: [mongoose.Schema.Types.Mixed]
-    },
-    resolvedMake: String,
-    resolvedModel: String,
-    failureReason: String,
-    compatibilityList: [mongoose.Schema.Types.Mixed],
-    ebayWarning: String,
-    ebayError: String,
-    strippedCount: { type: Number, default: 0 }
-  }],
-
   startedAt: { type: Date, default: Date.now },
   completedAt: { type: Date, default: null },
 
