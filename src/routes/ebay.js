@@ -8274,7 +8274,7 @@ router.get('/sync-all-sellers-status', requireAuth, async (req, res) => {
 
 // 2. GET LISTINGS (With Search & Sort) - For Compatibility Dashboard (Uses Listing collection)
 router.get('/listings', requireAuth, async (req, res) => {
-  const { sellerId, page = 1, limit = 50, search } = req.query;
+  const { sellerId, page = 1, limit = 50, search, listedFrom, listedTo } = req.query;
   try {
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
@@ -8282,6 +8282,13 @@ router.get('/listings', requireAuth, async (req, res) => {
 
     // Base Query
     let query = { seller: sellerId, listingStatus: 'Active' };
+
+    // --- DATE FILTER (IST-aware) ---
+    if (listedFrom || listedTo) {
+      query.startTime = {};
+      if (listedFrom) query.startTime.$gte = new Date(listedFrom + 'T00:00:00+05:30');
+      if (listedTo)   query.startTime.$lte = new Date(listedTo   + 'T23:59:59.999+05:30');
+    }
 
     // --- SEARCH LOGIC ---
     if (search && search.trim() !== '') {
