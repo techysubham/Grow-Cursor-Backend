@@ -11894,6 +11894,23 @@ router.post('/auto-compatibility', requireAuth, async (req, res) => {
   }
 });
 
+// POST /api/ebay/auto-compatibility-status/bulk — lightweight bulk status for All-Sellers dashboard
+// Returns only the fields needed for the cards (no items array)
+router.post('/auto-compatibility-status/bulk', requireAuth, async (req, res) => {
+  try {
+    const { batchIds } = req.body;
+    if (!Array.isArray(batchIds) || batchIds.length === 0) return res.json({ batches: {} });
+    const docs = await AutoCompatibilityBatch.find({ _id: { $in: batchIds } })
+      .select('status totalListings processedCount needsManualCount successCount warningCount ebayErrorCount aiFailedCount manualReviewDone currentItemTitle')
+      .lean();
+    const batches = {};
+    docs.forEach(b => { batches[String(b._id)] = b; });
+    res.json({ batches });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/ebay/auto-compatibility-status/:batchId
 router.get('/auto-compatibility-status/:batchId', requireAuth, async (req, res) => {
   try {
