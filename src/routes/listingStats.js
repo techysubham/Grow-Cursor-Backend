@@ -53,21 +53,12 @@ router.get('/day-wise-counts', requireAuth, async (req, res) => {
     if (startDate || endDate) {
       matchCriteria.startTime = {};
       if (startDate) {
-        // Convert PST date to UTC for query
-        // Create date in PST by using a date string that will be interpreted correctly
-        const pstDate = new Date(startDate + 'T00:00:00.000Z');
-        // Adjust for PST offset (we need to shift the UTC date to represent PST midnight)
-        // Since PST is UTC-8, midnight PST is 8am UTC the same day
-        pstDate.setUTCHours(8, 0, 0, 0);
-        matchCriteria.startTime.$gte = pstDate;
+        // IST midnight → UTC: e.g. 2026-04-14T00:00:00+05:30 = 2026-04-13T18:30:00Z
+        matchCriteria.startTime.$gte = new Date(startDate + 'T00:00:00+05:30');
       }
       if (endDate) {
-        // Add one day to include the entire end date, convert PST to UTC
-        const pstDate = new Date(endDate + 'T23:59:59.999Z');
-        // Adjust for PST offset - end of day PST is 7:59:59.999 UTC next day
-        pstDate.setUTCHours(7, 59, 59, 999);
-        pstDate.setUTCDate(pstDate.getUTCDate() + 1);
-        matchCriteria.startTime.$lte = pstDate;
+        // IST end of day → UTC: e.g. 2026-04-14T23:59:59.999+05:30 = 2026-04-14T18:29:59.999Z
+        matchCriteria.startTime.$lte = new Date(endDate + 'T23:59:59.999+05:30');
       }
     }
 
@@ -82,7 +73,7 @@ router.get('/day-wise-counts', requireAuth, async (req, res) => {
               $dateToString: { 
                 format: '%Y-%m-%d', 
                 date: '$startTime',
-                timezone: 'America/Los_Angeles'
+                timezone: 'Asia/Kolkata'
               }
             }
           },
@@ -189,12 +180,11 @@ router.get('/summary', requireAuth, async (req, res) => {
       matchCriteria.startTime = {};
       if (startDate) {
         // Convert PST date to UTC for query
-        const startDateUTC = new Date(startDate + 'T00:00:00-08:00');
+        const startDateUTC = new Date(startDate + 'T00:00:00+05:30');
         matchCriteria.startTime.$gte = startDateUTC;
       }
       if (endDate) {
-        // Add one day to include the entire end date, convert PST to UTC
-        const endDateUTC = new Date(endDate + 'T23:59:59-08:00');
+        const endDateUTC = new Date(endDate + 'T23:59:59.999+05:30');
         matchCriteria.startTime.$lte = endDateUTC;
       }
     }
