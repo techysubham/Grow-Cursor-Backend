@@ -10425,6 +10425,56 @@ router.patch('/orders/:orderId/auto-message-toggle', requireAuth, async (req, re
   }
 });
 
+// Fetch ship-by date for a single order from eBay and store it (without touching lastModifiedDate)
+router.post('/orders/:orderId/fetch-ship-by-date', requireAuth, async (req, res) => {
+  try {
+    const { orderId } = req.params; // MongoDB _id
+
+    const order = await Order.findById(orderId).populate('seller');
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    const seller = order.seller;
+    if (!seller?.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller does not have a connected eBay account' });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+
+    // Fetch the single order from eBay Fulfillment API
+    const ebayRes = await axios.get(
+      `https://api.ebay.com/sell/fulfillment/v1/order/${encodeURIComponent(order.orderId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const ebayOrder = ebayRes.data;
+    const shipByDate = ebayOrder?.lineItems?.[0]?.lineItemFulfillmentInstructions?.shipByDate;
+
+    if (!shipByDate) {
+      return res.status(404).json({ error: 'Ship by date not available on eBay for this order' });
+    }
+
+    // Update ONLY shipByDate — explicitly exclude lastModifiedDate from the update
+    await Order.findByIdAndUpdate(
+      orderId,
+      { $set: { shipByDate: new Date(shipByDate) } },
+      { timestamps: false }
+    );
+
+    res.json({ success: true, shipByDate });
+  } catch (err) {
+    console.error('[FetchShipByDate] Error:', err.message);
+    if (err.response?.status === 404) {
+      return res.status(404).json({ error: 'Order not found on eBay' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Compatibility endpoint kept for existing UI wiring
 router.get('/orders/auto-message-stats', requireAuth, async (req, res) => {
   try {
