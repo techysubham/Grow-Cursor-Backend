@@ -8871,10 +8871,9 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
 
     // 4. Also sync the batch item so re-opening the review modal shows fresh data
     if (batchId) {
-      await AutoCompatibilityBatch.findOneAndUpdate(
-        { _id: batchId, 'items.itemId': itemId },
-        { $set: { 'items.$[el].compatibilityList': filteredCompatibilityList } },
-        { arrayFilters: [{ 'el.itemId': itemId }] }
+      await AutoCompatibilityBatchItem.findOneAndUpdate(
+        { batchId, itemId },
+        { $set: { compatibilityList: filteredCompatibilityList } }
       );
     }
 
