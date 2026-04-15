@@ -65,10 +65,10 @@ export function initializeScheduledJobs() {
 
     console.log('[CRON] Scheduled job initialized: Poll All Sellers at 1:00 AM IST');
 
-    // Run Auto-Compat for the previous IST day at 3:00 AM IST daily.
-    // By 3 AM the 12:10 AM poll has already finished (~2h50m buffer), so all
+    // Run Auto-Compat for the previous IST day at 3:18 AM IST daily.
+    // By 3:18 AM the 1:00 AM poll has already finished (~2h18m buffer), so all
     // previous-day listings are in the DB.
-    cron.schedule('0 3 * * *', async () => {
+    cron.schedule('18 3 * * *', async () => {
         try {
             // Compute yesterday's date in IST (UTC+5:30 = 330 minutes offset)
             const now = new Date();
