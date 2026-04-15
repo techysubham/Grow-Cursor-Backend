@@ -8068,203 +8068,28 @@ let syncAllStatus = {
 };
 
 router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
-  // Prevent duplicate runs
   if (syncAllStatus.running) {
     return res.status(409).json({
       success: false,
       message: `Sync already in progress — currently on seller "${syncAllStatus.currentSeller}" (${syncAllStatus.sellersComplete}/${syncAllStatus.sellersTotal})`,
     });
   }
-
   try {
-    const allSellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
-      .populate('user', 'username email');
-
-    if (allSellers.length === 0) {
+    // Peek at seller count so we can include it in the immediate response,
+    // then hand off all real work to the shared cron function.
+    const sellersTotal = await Seller.countDocuments({ 'ebayTokens.access_token': { $exists: true } });
+    if (sellersTotal === 0) {
       return res.json({ success: true, message: 'No sellers with eBay tokens found', results: [] });
     }
-
-    // Reset status and mark as running
-    syncAllStatus = {
-      running: true,
-      sellersTotal: allSellers.length,
-      sellersComplete: 0,
-      currentSeller: '',
-      currentPage: 0,
-      currentTotalPages: 0,
-      results: [],
-      errors: [],
-      totalProcessed: 0,
-      totalSkipped: 0,
-      startedAt: new Date().toISOString(),
-      completedAt: null
-    };
-
-    // Respond immediately — sync runs in background
     res.json({
       success: true,
-      message: `Sync started for ${allSellers.length} seller(s). Poll GET /ebay/sync-all-sellers-status for progress.`,
-      sellersTotal: allSellers.length
+      message: `Sync started for ${sellersTotal} seller(s). Poll GET /ebay/sync-all-sellers-status for progress.`,
+      sellersTotal,
     });
-
-    // --- BACKGROUND PROCESSING (not awaited by the request) ---
-    const VALID_MOTORS_CATEGORIES = ["eBay Motors", "Parts & Accessories", "Automotive Tools", "Tools & Supplies"];
-
-    (async () => {
-      for (const seller of allSellers) {
-        const sellerName = seller.user?.username || seller.user?.email || seller._id;
-        syncAllStatus.currentSeller = sellerName;
-        syncAllStatus.currentPage = 0;
-        syncAllStatus.currentTotalPages = 0;
-        console.log(`[Sync All] Starting sync for seller: ${sellerName}`);
-
-        try {
-          const token = await ensureValidToken(seller);
-
-          // --- DATE LOGIC (same as single-seller sync) ---
-          const listingCount = await Listing.countDocuments({ seller: seller._id, listingStatus: 'Active' });
-          const orderCount = await Order.countDocuments({ seller: seller._id });
-          const defaultStartDate = getEffectiveInitialSyncDate(seller.initialSyncDate);
-          const startTimeTo = new Date();
-
-          let startTimeFrom;
-          if (listingCount === 0 && orderCount === 0) {
-            startTimeFrom = defaultStartDate;
-          } else {
-            startTimeFrom = seller.lastListingPolledAt || defaultStartDate;
-          }
-          startTimeFrom = getClampedSellerListStart(startTimeFrom, startTimeTo);
-          let page = 1;
-          let totalPages = 1;
-          let processedCount = 0;
-          let skippedCount = 0;
-
-          do {
-            syncAllStatus.currentPage = page;
-            console.log(`[Sync All] ${sellerName} — Fetching Page ${page}...`);
-
-            const xmlRequest = `
-              <?xml version="1.0" encoding="utf-8"?>
-              <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-                <ErrorLanguage>en_US</ErrorLanguage>
-                <WarningLevel>High</WarningLevel>
-                <DetailLevel>ItemReturnDescription</DetailLevel>
-                <StartTimeFrom>${new Date(startTimeFrom).toISOString()}</StartTimeFrom>
-                <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
-                <IncludeWatchCount>true</IncludeWatchCount>
-                <Pagination>
-                  <EntriesPerPage>100</EntriesPerPage>
-                  <PageNumber>${page}</PageNumber>
-                </Pagination>
-                <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
-                <OutputSelector>ItemArray.Item.Title</OutputSelector>
-                <OutputSelector>ItemArray.Item.SKU</OutputSelector>
-                <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
-                <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
-                <OutputSelector>ItemArray.Item.Description</OutputSelector>
-                <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
-                <OutputSelector>ItemArray.Item.ItemCompatibilityList</OutputSelector>
-                <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
-                <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
-                <OutputSelector>PaginationResult</OutputSelector>
-              </GetSellerListRequest>
-            `;
-
-            const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-              headers: {
-                'X-EBAY-API-SITEID': '100',
-                'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-                'X-EBAY-API-CALL-NAME': 'GetSellerList',
-                'Content-Type': 'text/xml'
-              }
-            });
-
-            const result = await parseStringPromise(response.data);
-            if (result.GetSellerListResponse.Ack[0] === 'Failure') {
-              throw new Error(result.GetSellerListResponse.Errors[0].LongMessage[0]);
-            }
-
-            const pagination = result.GetSellerListResponse.PaginationResult[0];
-            totalPages = parseInt(pagination.TotalNumberOfPages[0]);
-            syncAllStatus.currentTotalPages = totalPages;
-            const items = result.GetSellerListResponse.ItemArray?.[0]?.Item || [];
-
-            for (const item of items) {
-              const status = item.SellingStatus?.[0]?.ListingStatus?.[0];
-              if (status !== 'Active') continue;
-
-              // Filter by Category — eBay Motors only
-              const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
-              const isMotorsItem = VALID_MOTORS_CATEGORIES.some(keyword => categoryName.includes(keyword));
-              if (!isMotorsItem) {
-                skippedCount++;
-                continue;
-              }
-
-              const rawHtml = item.Description ? item.Description[0] : '';
-              const cleanHtml = extractCleanDescription(rawHtml);
-
-              let parsedCompatibility = [];
-              if (item.ItemCompatibilityList && item.ItemCompatibilityList[0].Compatibility) {
-                parsedCompatibility = item.ItemCompatibilityList[0].Compatibility.map(comp => ({
-                  notes: comp.CompatibilityNotes ? comp.CompatibilityNotes[0] : '',
-                  nameValueList: comp.NameValueList.map(nv => ({
-                    name: nv.Name[0],
-                    value: nv.Value[0]
-                  }))
-                }));
-              }
-
-              await Listing.findOneAndUpdate(
-                { itemId: item.ItemID[0] },
-                {
-                  seller: seller._id,
-                  title: item.Title[0],
-                  sku: item.SKU ? item.SKU[0] : '',
-                  currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
-                  currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
-                  listingStatus: status,
-                  mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
-                  categoryName: categoryName,
-                  descriptionPreview: cleanHtml,
-                  compatibility: parsedCompatibility,
-                  startTime: item.ListingDetails?.[0]?.StartTime?.[0]
-                },
-                { upsert: true }
-              );
-              processedCount++;
-            }
-            page++;
-          } while (page <= totalPages);
-
-          seller.lastListingPolledAt = startTimeTo;
-          await seller.save();
-
-          console.log(`[Sync All] ${sellerName} — Done: ${processedCount} processed, ${skippedCount} skipped`);
-          syncAllStatus.results.push({ sellerName, processedCount, skippedCount });
-          syncAllStatus.totalProcessed += processedCount;
-          syncAllStatus.totalSkipped += skippedCount;
-
-        } catch (sellerErr) {
-          console.error(`[Sync All] Error for seller ${sellerName}:`, sellerErr.message);
-          syncAllStatus.errors.push(`${sellerName}: ${sellerErr.message}`);
-          syncAllStatus.results.push({ sellerName, processedCount: 0, skippedCount: 0, error: sellerErr.message });
-        }
-
-        syncAllStatus.sellersComplete++;
-      }
-
-      // Mark as done
-      syncAllStatus.running = false;
-      syncAllStatus.currentSeller = '';
-      syncAllStatus.completedAt = new Date().toISOString();
-      console.log(`[Sync All] All done: ${syncAllStatus.totalProcessed} processed, ${syncAllStatus.totalSkipped} skipped, ${syncAllStatus.errors.length} errors`);
-    })();
-
+    // Fire-and-forget — all logic lives in the shared function
+    scheduledSyncAllSellers();
   } catch (err) {
     console.error('[Sync All] Error:', err.message);
-    syncAllStatus.running = false;
     res.status(500).json({ error: err.message });
   }
 });
@@ -12060,103 +11885,14 @@ router.post('/auto-compatibility/run-for-date', requireAuth, async (req, res) =>
   if (!targetDate) {
     return res.status(400).json({ error: 'targetDate is required' });
   }
-
   try {
-    const allSellers = await Seller.find({}).populate('user', 'username email').lean();
-
-    // Exclude sellers whose username/email matches any entry in AUTO_COMPAT_EXCLUDED_USERNAMES,
-    // or are in the explicit run-time excludeSellerIds list.
-    const eligible = allSellers.filter(s => {
-      if (excludeSellerIds.includes(String(s._id))) return false;
-      const identifier = (s.user?.username || s.user?.email || '');
-      return !AUTO_COMPAT_EXCLUDED_USERNAMES.some(excl => identifier.includes(excl));
+    // Hand off all logic to the shared function; pass the logged-in user as triggeredBy.
+    const batches = await scheduledRunAutoCompatForDate(targetDate, {
+      triggeredBy: req.user.userId,
+      itemLimit,
+      excludeSellerIds,
     });
-
-    if (eligible.length === 0) {
-      return res.json({ success: true, message: 'No eligible sellers found', batches: [] });
-    }
-
-    const dayStart = new Date(targetDate + 'T00:00:00Z');
-    const dayEnd   = new Date(targetDate + 'T23:59:59.999Z');
-    const result   = [];
-
-    for (const seller of eligible) {
-      // Reuse an existing running/completed batch for this seller + date rather than creating a duplicate
-      const existing = await AutoCompatibilityBatch.findOne({
-        seller: seller._id,
-        targetDate,
-        status: { $in: ['running', 'completed'] },
-      }).select('_id status totalListings').lean();
-
-      if (existing) {
-        result.push({
-          sellerId: seller._id,
-          username: seller.user?.username || seller.user?.email,
-          batchId: existing._id,
-          status: existing.status,
-          totalListings: existing.totalListings,
-          reused: true,
-        });
-        continue;
-      }
-
-      const baseQuery = {
-        seller: seller._id,
-        listingStatus: 'Active',
-        startTime: { $gte: dayStart, $lte: dayEnd },
-        $or: [{ compatibility: { $exists: false } }, { compatibility: { $size: 0 } }, { compatibility: null }],
-      };
-      let listings = await Listing.find(baseQuery).sort({ startTime: 1 }).select('itemId').lean();
-      if (itemLimit > 0) listings = listings.slice(0, itemLimit);
-
-      if (listings.length === 0) {
-        result.push({
-          sellerId: seller._id,
-          username: seller.user?.username || seller.user?.email,
-          batchId: null,
-          status: 'skipped',
-          reason: 'no_listings',
-        });
-        continue;
-      }
-
-      const batch = await AutoCompatibilityBatch.create({
-        seller: seller._id,
-        triggeredBy: req.user.userId,
-        targetDate,
-        itemLimit: itemLimit || 0,
-        sourceItemIds: listings.map(l => l.itemId),
-        totalListings: listings.length,
-        runnerId: RUNNER_ID,
-        status: 'running',
-        startedAt: new Date(),
-      });
-
-      result.push({
-        sellerId: seller._id,
-        username: seller.user?.username || seller.user?.email,
-        batchId: batch._id,
-        status: 'running',
-        totalListings: listings.length,
-        reused: false,
-      });
-    }
-
-    // Respond immediately so the client can start polling
-    res.json({ success: true, batches: result });
-
-    // Process new batches sequentially in the background (one store at a time)
-    const newBatchIds = result.filter(r => !r.reused && r.status === 'running').map(r => r.batchId);
-    (async () => {
-      for (const bid of newBatchIds) {
-        try {
-          await processAutoCompatibilityBatch(bid);
-        } catch (err) {
-          console.error(`[AutoCompat] run-for-date: batch ${bid} failed:`, err.message);
-        }
-      }
-      console.log(`[AutoCompat] run-for-date ${targetDate}: all ${newBatchIds.length} new batch(es) finished`);
-    })();
+    res.json({ success: true, batches });
   } catch (err) {
     console.error('[AutoCompat] run-for-date error:', err);
     res.status(500).json({ error: err.message });
@@ -12183,6 +11919,259 @@ router.get('/auto-compatibility-batches-for-date', requireAuth, async (req, res)
     res.status(500).json({ error: err.message });
   }
 });
+
+// ============================================
+// SHARED FUNCTIONS: Called by both the HTTP routes above and by scheduledJobs.js.
+// The routes are thin wrappers around these — no logic is duplicated.
+// Set RUNNER_ID=render in Render's env vars.
+// ============================================
+
+// Core logic for "Poll All Sellers".
+// Called by: POST /sync-all-sellers-listings (button) and the 1:00 AM IST cron job.
+export async function scheduledSyncAllSellers() {
+  if (syncAllStatus.running) {
+    console.log('[Sync All] Already in progress, skipping.');
+    return;
+  }
+  const allSellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+    .populate('user', 'username email');
+  if (allSellers.length === 0) {
+    console.log('[Sync All] No sellers with eBay tokens found.');
+    return;
+  }
+  syncAllStatus = {
+    running: true,
+    sellersTotal: allSellers.length,
+    sellersComplete: 0,
+    currentSeller: '',
+    currentPage: 0,
+    currentTotalPages: 0,
+    results: [],
+    errors: [],
+    totalProcessed: 0,
+    totalSkipped: 0,
+    startedAt: new Date().toISOString(),
+    completedAt: null
+  };
+  console.log(`[Sync All] Started for ${allSellers.length} seller(s).`);
+  const VALID_MOTORS_CATEGORIES = ["eBay Motors", "Parts & Accessories", "Automotive Tools", "Tools & Supplies"];
+  (async () => {
+    for (const seller of allSellers) {
+      const sellerName = seller.user?.username || seller.user?.email || seller._id;
+      syncAllStatus.currentSeller = sellerName;
+      syncAllStatus.currentPage = 0;
+      syncAllStatus.currentTotalPages = 0;
+      console.log(`[Sync All] Starting sync for seller: ${sellerName}`);
+      try {
+        const token = await ensureValidToken(seller);
+        const listingCount = await Listing.countDocuments({ seller: seller._id, listingStatus: 'Active' });
+        const orderCount = await Order.countDocuments({ seller: seller._id });
+        const defaultStartDate = getEffectiveInitialSyncDate(seller.initialSyncDate);
+        const startTimeTo = new Date();
+        let startTimeFrom;
+        if (listingCount === 0 && orderCount === 0) {
+          startTimeFrom = defaultStartDate;
+        } else {
+          startTimeFrom = seller.lastListingPolledAt || defaultStartDate;
+        }
+        startTimeFrom = getClampedSellerListStart(startTimeFrom, startTimeTo);
+        let page = 1;
+        let totalPages = 1;
+        let processedCount = 0;
+        let skippedCount = 0;
+        do {
+          syncAllStatus.currentPage = page;
+          console.log(`[Sync All] ${sellerName} — Fetching Page ${page}...`);
+          const xmlRequest = `
+              <?xml version="1.0" encoding="utf-8"?>
+              <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+                <ErrorLanguage>en_US</ErrorLanguage>
+                <WarningLevel>High</WarningLevel>
+                <DetailLevel>ItemReturnDescription</DetailLevel>
+                <StartTimeFrom>${new Date(startTimeFrom).toISOString()}</StartTimeFrom>
+                <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
+                <IncludeWatchCount>true</IncludeWatchCount>
+                <Pagination>
+                  <EntriesPerPage>100</EntriesPerPage>
+                  <PageNumber>${page}</PageNumber>
+                </Pagination>
+                <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
+                <OutputSelector>ItemArray.Item.Title</OutputSelector>
+                <OutputSelector>ItemArray.Item.SKU</OutputSelector>
+                <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
+                <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
+                <OutputSelector>ItemArray.Item.Description</OutputSelector>
+                <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
+                <OutputSelector>ItemArray.Item.ItemCompatibilityList</OutputSelector>
+                <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
+                <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
+                <OutputSelector>PaginationResult</OutputSelector>
+              </GetSellerListRequest>
+            `;
+          const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+            headers: {
+              'X-EBAY-API-SITEID': '100',
+              'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+              'X-EBAY-API-CALL-NAME': 'GetSellerList',
+              'Content-Type': 'text/xml'
+            }
+          });
+          const result = await parseStringPromise(response.data);
+          if (result.GetSellerListResponse.Ack[0] === 'Failure') {
+            throw new Error(result.GetSellerListResponse.Errors[0].LongMessage[0]);
+          }
+          const pagination = result.GetSellerListResponse.PaginationResult[0];
+          totalPages = parseInt(pagination.TotalNumberOfPages[0]);
+          syncAllStatus.currentTotalPages = totalPages;
+          const items = result.GetSellerListResponse.ItemArray?.[0]?.Item || [];
+          for (const item of items) {
+            const status = item.SellingStatus?.[0]?.ListingStatus?.[0];
+            if (status !== 'Active') continue;
+            const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
+            const isMotorsItem = VALID_MOTORS_CATEGORIES.some(keyword => categoryName.includes(keyword));
+            if (!isMotorsItem) { skippedCount++; continue; }
+            const rawHtml = item.Description ? item.Description[0] : '';
+            const cleanHtml = extractCleanDescription(rawHtml);
+            let parsedCompatibility = [];
+            if (item.ItemCompatibilityList && item.ItemCompatibilityList[0].Compatibility) {
+              parsedCompatibility = item.ItemCompatibilityList[0].Compatibility.map(comp => ({
+                notes: comp.CompatibilityNotes ? comp.CompatibilityNotes[0] : '',
+                nameValueList: comp.NameValueList.map(nv => ({
+                  name: nv.Name[0],
+                  value: nv.Value[0]
+                }))
+              }));
+            }
+            await Listing.findOneAndUpdate(
+              { itemId: item.ItemID[0] },
+              {
+                seller: seller._id,
+                title: item.Title[0],
+                sku: item.SKU ? item.SKU[0] : '',
+                currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
+                currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
+                listingStatus: status,
+                mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
+                categoryName: categoryName,
+                descriptionPreview: cleanHtml,
+                compatibility: parsedCompatibility,
+                startTime: item.ListingDetails?.[0]?.StartTime?.[0]
+              },
+              { upsert: true }
+            );
+            processedCount++;
+          }
+          page++;
+        } while (page <= totalPages);
+        seller.lastListingPolledAt = startTimeTo;
+        await seller.save();
+        console.log(`[Sync All] ${sellerName} — Done: ${processedCount} processed, ${skippedCount} skipped`);
+        syncAllStatus.results.push({ sellerName, processedCount, skippedCount });
+        syncAllStatus.totalProcessed += processedCount;
+        syncAllStatus.totalSkipped += skippedCount;
+      } catch (sellerErr) {
+        console.error(`[Sync All] Error for seller ${sellerName}:`, sellerErr.message);
+        syncAllStatus.errors.push(`${sellerName}: ${sellerErr.message}`);
+        syncAllStatus.results.push({ sellerName, processedCount: 0, skippedCount: 0, error: sellerErr.message });
+      }
+      syncAllStatus.sellersComplete++;
+    }
+    syncAllStatus.running = false;
+    syncAllStatus.currentSeller = '';
+    syncAllStatus.completedAt = new Date().toISOString();
+    console.log(`[Sync All] Done: ${syncAllStatus.totalProcessed} processed, ${syncAllStatus.totalSkipped} skipped, ${syncAllStatus.errors.length} errors`);
+  })();
+}
+
+// Core logic for "Run All Sellers for Date".
+// Called by: POST /auto-compatibility/run-for-date (button) and the 3:00 AM IST cron job.
+// triggeredBy: user ObjectId when called from the button; null when called from cron.
+export async function scheduledRunAutoCompatForDate(targetDate, { triggeredBy = null, itemLimit = 0, excludeSellerIds = [] } = {}) {
+  console.log(`[AutoCompat] run-for-date: starting for ${targetDate}...`);
+  const allSellers = await Seller.find({}).populate('user', 'username email').lean();
+  const eligible = allSellers.filter(s => {
+    if (excludeSellerIds.includes(String(s._id))) return false;
+    const identifier = (s.user?.username || s.user?.email || '');
+    return !AUTO_COMPAT_EXCLUDED_USERNAMES.some(excl => identifier.includes(excl));
+  });
+  if (eligible.length === 0) {
+    console.log('[AutoCompat] run-for-date: no eligible sellers found.');
+    return [];
+  }
+  const dayStart = new Date(targetDate + 'T00:00:00Z');
+  const dayEnd   = new Date(targetDate + 'T23:59:59.999Z');
+  const result   = [];
+  for (const seller of eligible) {
+    const existing = await AutoCompatibilityBatch.findOne({
+      seller: seller._id,
+      targetDate,
+      status: { $in: ['running', 'completed'] },
+    }).select('_id status totalListings').lean();
+    if (existing) {
+      result.push({
+        sellerId: seller._id,
+        username: seller.user?.username || seller.user?.email,
+        batchId: existing._id,
+        status: existing.status,
+        totalListings: existing.totalListings,
+        reused: true,
+      });
+      continue;
+    }
+    const baseQuery = {
+      seller: seller._id,
+      listingStatus: 'Active',
+      startTime: { $gte: dayStart, $lte: dayEnd },
+      $or: [{ compatibility: { $exists: false } }, { compatibility: { $size: 0 } }, { compatibility: null }],
+    };
+    let listings = await Listing.find(baseQuery).sort({ startTime: 1 }).select('itemId').lean();
+    if (itemLimit > 0) listings = listings.slice(0, itemLimit);
+    if (listings.length === 0) {
+      result.push({
+        sellerId: seller._id,
+        username: seller.user?.username || seller.user?.email,
+        batchId: null,
+        status: 'skipped',
+        reason: 'no_listings',
+      });
+      continue;
+    }
+    const batch = await AutoCompatibilityBatch.create({
+      seller: seller._id,
+      triggeredBy,
+      targetDate,
+      itemLimit: itemLimit || 0,
+      sourceItemIds: listings.map(l => l.itemId),
+      totalListings: listings.length,
+      runnerId: RUNNER_ID,
+      status: 'running',
+      startedAt: new Date(),
+    });
+    result.push({
+      sellerId: seller._id,
+      username: seller.user?.username || seller.user?.email,
+      batchId: batch._id,
+      status: 'running',
+      totalListings: listings.length,
+      reused: false,
+    });
+  }
+  const newBatchIds = result.filter(r => !r.reused && r.status === 'running').map(r => r.batchId);
+  console.log(`[AutoCompat] run-for-date ${targetDate}: ${newBatchIds.length} new batch(es), ${result.filter(r => r.reused).length} reused, ${result.filter(r => r.status === 'skipped').length} skipped.`);
+  // Process new batches sequentially in the background; caller gets the result array immediately.
+  (async () => {
+    for (const bid of newBatchIds) {
+      try {
+        await processAutoCompatibilityBatch(bid);
+      } catch (err) {
+        console.error(`[AutoCompat] run-for-date: batch ${bid} failed:`, err.message);
+      }
+    }
+    console.log(`[AutoCompat] run-for-date ${targetDate}: all ${newBatchIds.length} new batch(es) finished.`);
+  })();
+  return result;
+}
 
 export default router;
 
