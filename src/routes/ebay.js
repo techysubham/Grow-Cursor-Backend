@@ -515,11 +515,16 @@ export async function resumeRunningAutoCompatibilityBatches() {
   }).select('_id runnerId').lean();
   if (runningBatches.length === 0) return 0;
 
-  runningBatches.forEach((batch) => {
-    processAutoCompatibilityBatch(batch._id).catch(err => {
-      console.error(`[AutoCompat] Failed to resume batch ${batch._id}:`, err.message);
-    });
-  });
+  // Process sequentially (same as cron path) to avoid overwhelming eBay API / AI
+  (async () => {
+    for (const batch of runningBatches) {
+      try {
+        await processAutoCompatibilityBatch(batch._id);
+      } catch (err) {
+        console.error(`[AutoCompat] Failed to resume batch ${batch._id}:`, err.message);
+      }
+    }
+  })();
 
   return runningBatches.length;
 }
