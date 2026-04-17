@@ -64,7 +64,7 @@ const OrderSchema = new mongoose.Schema(
       default: 'open'
     }, // Manual status for worksheet tracking
     refunds: Array, // Array of refund objects from paymentSummary.refunds (for display only)
-    // Simple earnings field (auto for PAID, $0 for FULLY_REFUNDED, manual for PARTIALLY_REFUNDED)
+    // Simple earnings field (auto for non-refunded orders, $0 for FULLY_REFUNDED/PARTIALLY_REFUNDED)
     orderEarnings: Number,
     trackingNumber: String, // Extracted from fulfillmentHrefs
     manualTrackingNumber: String, // Manually entered tracking number (separate from trackingNumber)
@@ -104,8 +104,9 @@ const OrderSchema = new mongoose.Schema(
       type: String,
       default: null
     },
+    orderTotal: Number, // Stored order total for sheet editing; defaults to pricingSummary.total.value + salesTax
     // Financial calculations (All Orders Sheet)
-    tds: Number, // Tax Deducted at Source (1% of orderEarnings)
+    tds: Number, // Tax Deducted at Source (1% of (pricingSummary.total.value + salesTax))
     tid: { type: Number, default: 0.24 }, // Transaction ID (fixed at $0.24)
     net: Number, // orderEarnings - tds - tid
     pBalanceINR: Number, // net * exchangeRate (for selected marketplace)

@@ -1,5 +1,19 @@
 import mongoose from 'mongoose';
 
+const EXCHANGE_RATE_MARKETPLACES = [
+  'EBAY',
+  'AMAZON',
+  'EBAY_US',
+  'EBAY_CA',
+  'EBAY_AU',
+  'EBAY_GB',
+  'AMAZON_US',
+  'AMAZON_CA',
+  'AMAZON_AU',
+  'AMAZON_GB',
+  'OTHER'
+];
+
 const ExchangeRateSchema = new mongoose.Schema(
   {
     rate: {
@@ -13,7 +27,12 @@ const ExchangeRateSchema = new mongoose.Schema(
     marketplace: {
       type: String,
       default: 'EBAY',
-      enum: ['EBAY', 'AMAZON', 'OTHER']
+      enum: EXCHANGE_RATE_MARKETPLACES
+    },
+    applicationMode: {
+      type: String,
+      enum: ['effective', 'specific-date'],
+      default: 'effective'
     },
     createdBy: {
       type: String,
