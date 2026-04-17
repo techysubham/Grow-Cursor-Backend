@@ -8,6 +8,7 @@ export const PAGE_DEFAULT_ROLES = {
   'OrdersDashboard': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'OrderAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'CRPAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'CRPComparison': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'Fulfillment': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'AwaitingShipment': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'AwaitingSheet': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],

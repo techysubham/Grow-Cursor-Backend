@@ -8,6 +8,7 @@ import Case from '../models/Case.js';
 import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import MarketMetric from '../models/MarketMetric.js';
+import TemplateListing from '../models/TemplateListing.js';
 
 const router = Router();
 
@@ -90,6 +91,349 @@ function getCurrentAccountHealthWindow() {
   windowStart.setHours(0, 0, 0, 0);
 
   return { windowStart, calculationEnd };
+}
+
+function normalizeObjectIdOrNull(value, fieldName) {
+  if (value == null || value === '' || value === 'null') {
+    return null;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(value)) {
+    const error = new Error(`Invalid ${fieldName}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return new mongoose.Types.ObjectId(value);
+}
+
+function buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeLowValue }) {
+  const match = {};
+
+  if (startDate || endDate) {
+    match.dateSold = {};
+    if (startDate) match.dateSold.$gte = getPTDayBoundsUTC(startDate).start;
+    if (endDate) match.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
+  }
+
+  const sellerObjectId = normalizeObjectIdOrNull(sellerId, 'sellerId');
+  if (sellerObjectId) {
+    match.seller = sellerObjectId;
+  }
+
+  if (excludeLowValue === 'true') {
+    match.$or = [{ subtotalUSD: { $gte: 3 } }, { subtotal: { $gte: 3 } }];
+  }
+
+  return match;
+}
+
+function buildListingsCrpMatch({ startDate, endDate, sellerId }) {
+  const match = { deletedAt: null };
+
+  if (startDate || endDate) {
+    match.createdAt = {};
+    if (startDate) match.createdAt.$gte = getPTDayBoundsUTC(startDate).start;
+    if (endDate) match.createdAt.$lte = getPTDayBoundsUTC(endDate).end;
+  }
+
+  const sellerObjectId = normalizeObjectIdOrNull(sellerId, 'sellerId');
+  if (sellerObjectId) {
+    match.sellerId = sellerObjectId;
+  }
+
+  return match;
+}
+
+function stringifyObjectId(value) {
+  return value ? String(value) : null;
+}
+
+function buildCrpKey(categoryId, rangeId, productId) {
+  return [categoryId || 'null', rangeId || 'null', productId || 'null'].join('::');
+}
+
+function normalizeComparisonRow(row, side) {
+  const categoryId = stringifyObjectId(row.categoryId);
+  const rangeId = stringifyObjectId(row.rangeId);
+  const productId = stringifyObjectId(row.productId);
+
+  return {
+    key: buildCrpKey(categoryId, rangeId, productId),
+    categoryId,
+    rangeId,
+    productId,
+    categoryName: row.categoryName || 'Unassigned',
+    rangeName: row.rangeName || null,
+    productName: row.productName || null,
+    [side]: {
+      count: row.count || 0,
+      previews: row.previews || [],
+    },
+  };
+}
+
+function mergeComparisonRows(listingRows, orderRows) {
+  const merged = new Map();
+
+  const upsert = (row, side) => {
+    const normalized = normalizeComparisonRow(row, side);
+    const existing = merged.get(normalized.key) || {
+      key: normalized.key,
+      categoryId: normalized.categoryId,
+      rangeId: normalized.rangeId,
+      productId: normalized.productId,
+      categoryName: normalized.categoryName,
+      rangeName: normalized.rangeName,
+      productName: normalized.productName,
+      listings: { count: 0, previews: [] },
+      orders: { count: 0, previews: [] },
+    };
+
+    existing.categoryName = existing.categoryName || normalized.categoryName;
+    existing.rangeName = existing.rangeName || normalized.rangeName;
+    existing.productName = existing.productName || normalized.productName;
+    existing[side] = normalized[side];
+
+    merged.set(normalized.key, existing);
+  };
+
+  listingRows.forEach((row) => upsert(row, 'listings'));
+  orderRows.forEach((row) => upsert(row, 'orders'));
+
+  return Array.from(merged.values())
+    .map((row) => ({
+      ...row,
+      gap: row.orders.count - row.listings.count,
+      absGap: Math.abs(row.orders.count - row.listings.count),
+    }))
+    .sort((left, right) => {
+      if (right.absGap !== left.absGap) return right.absGap - left.absGap;
+      const rightTotal = right.orders.count + right.listings.count;
+      const leftTotal = left.orders.count + left.listings.count;
+      if (rightTotal !== leftTotal) return rightTotal - leftTotal;
+      return `${left.categoryName}|${left.rangeName || ''}|${left.productName || ''}`
+        .localeCompare(`${right.categoryName}|${right.rangeName || ''}|${right.productName || ''}`);
+    });
+}
+
+function getChartBucket(row, level) {
+  if (level === 'range') {
+    return {
+      id: row.rangeId || `range:${row.categoryId || 'null'}:unassigned`,
+      name: row.rangeName || `Unassigned (${row.categoryName || 'No Category'})`,
+    };
+  }
+
+  if (level === 'product') {
+    return {
+      id: row.productId || `product:${row.rangeId || row.categoryId || 'null'}:unassigned`,
+      name: row.productName || `Unassigned (${row.rangeName || row.categoryName || 'No CRP'})`,
+    };
+  }
+
+  return {
+    id: row.categoryId || 'category:unassigned',
+    name: row.categoryName || 'Unassigned',
+  };
+}
+
+function buildChartData(rows, side, level) {
+  const buckets = new Map();
+
+  rows.forEach((row) => {
+    const count = row[side]?.count || 0;
+    if (!count) return;
+
+    const bucket = getChartBucket(row, level);
+    const key = `${level}:${bucket.id}`;
+    const current = buckets.get(key) || { id: bucket.id, name: bucket.name, count: 0 };
+    current.count += count;
+    buckets.set(key, current);
+  });
+
+  return Array.from(buckets.values())
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 12);
+}
+
+async function getOrderComparisonRows(match) {
+  return Order.aggregate([
+    { $match: match },
+    {
+      $lookup: {
+        from: 'asinlistcategories',
+        localField: 'orderCategoryId',
+        foreignField: '_id',
+        as: 'categoryDoc'
+      }
+    },
+    {
+      $lookup: {
+        from: 'asinlistranges',
+        localField: 'orderRangeId',
+        foreignField: '_id',
+        as: 'rangeDoc'
+      }
+    },
+    {
+      $lookup: {
+        from: 'asinlistproducts',
+        localField: 'orderProductId',
+        foreignField: '_id',
+        as: 'productDoc'
+      }
+    },
+    { $sort: { dateSold: -1 } },
+    {
+      $group: {
+        _id: {
+          categoryId: { $ifNull: ['$orderCategoryId', null] },
+          rangeId: { $ifNull: ['$orderRangeId', null] },
+          productId: { $ifNull: ['$orderProductId', null] },
+        },
+        categoryName: {
+          $first: {
+            $cond: [
+              { $eq: ['$orderCategoryId', null] },
+              'Unassigned',
+              { $ifNull: [{ $arrayElemAt: ['$categoryDoc.name', 0] }, 'Unassigned'] }
+            ]
+          }
+        },
+        rangeName: { $first: { $ifNull: [{ $arrayElemAt: ['$rangeDoc.name', 0] }, null] } },
+        productName: { $first: { $ifNull: [{ $arrayElemAt: ['$productDoc.name', 0] }, null] } },
+        count: { $sum: 1 },
+        previews: {
+          $push: {
+            id: '$_id',
+            orderId: '$orderId',
+            dateSold: '$dateSold',
+            productName: '$productName',
+            amount: { $ifNull: ['$subtotalUSD', '$subtotal'] }
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        categoryId: '$_id.categoryId',
+        rangeId: '$_id.rangeId',
+        productId: '$_id.productId',
+        categoryName: 1,
+        rangeName: 1,
+        productName: 1,
+        count: 1,
+        previews: { $slice: ['$previews', 3] }
+      }
+    },
+    { $sort: { count: -1, categoryName: 1, rangeName: 1, productName: 1 } }
+  ]);
+}
+
+async function getListingComparisonRows(match) {
+  return TemplateListing.aggregate([
+    { $match: match },
+    {
+      $lookup: {
+        from: 'listingtemplates',
+        localField: 'templateId',
+        foreignField: '_id',
+        as: 'templateDoc'
+      }
+    },
+    { $unwind: { path: '$templateDoc', preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: 'asinlistproducts',
+        localField: 'templateDoc.listProductId',
+        foreignField: '_id',
+        as: 'productDoc'
+      }
+    },
+    {
+      $addFields: {
+        productDocObj: { $arrayElemAt: ['$productDoc', 0] },
+        derivedProductId: { $ifNull: ['$templateDoc.listProductId', null] }
+      }
+    },
+    {
+      $addFields: {
+        derivedRangeId: { $ifNull: ['$productDocObj.rangeId', '$templateDoc.rangeId'] }
+      }
+    },
+    {
+      $lookup: {
+        from: 'asinlistranges',
+        localField: 'derivedRangeId',
+        foreignField: '_id',
+        as: 'rangeDoc'
+      }
+    },
+    {
+      $addFields: {
+        rangeDocObj: { $arrayElemAt: ['$rangeDoc', 0] },
+        derivedCategoryId: {
+          $ifNull: ['$productDocObj.categoryId', { $arrayElemAt: ['$rangeDoc.categoryId', 0] }]
+        }
+      }
+    },
+    {
+      $lookup: {
+        from: 'asinlistcategories',
+        localField: 'derivedCategoryId',
+        foreignField: '_id',
+        as: 'categoryDoc'
+      }
+    },
+    { $sort: { createdAt: -1 } },
+    {
+      $group: {
+        _id: {
+          categoryId: { $ifNull: ['$derivedCategoryId', null] },
+          rangeId: { $ifNull: ['$derivedRangeId', null] },
+          productId: { $ifNull: ['$derivedProductId', null] },
+        },
+        categoryName: {
+          $first: {
+            $cond: [
+              { $eq: ['$derivedCategoryId', null] },
+              'Unassigned',
+              { $ifNull: [{ $arrayElemAt: ['$categoryDoc.name', 0] }, 'Unassigned'] }
+            ]
+          }
+        },
+        rangeName: { $first: { $ifNull: ['$rangeDocObj.name', null] } },
+        productName: { $first: { $ifNull: ['$productDocObj.name', null] } },
+        count: { $sum: 1 },
+        previews: {
+          $push: {
+            id: '$_id',
+            customLabel: '$customLabel',
+            asin: '$_asinReference',
+            title: '$title',
+            createdAt: '$createdAt',
+            status: '$status'
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        categoryId: '$_id.categoryId',
+        rangeId: '$_id.rangeId',
+        productId: '$_id.productId',
+        categoryName: 1,
+        rangeName: 1,
+        productName: 1,
+        count: 1,
+        previews: { $slice: ['$previews', 3] }
+      }
+    },
+    { $sort: { count: -1, categoryName: 1, rangeName: 1, productName: 1 } }
+  ]);
 }
 
 async function getCurrentNonCompliantSellerSet(optionalSellerId) {
@@ -608,6 +952,260 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
   } catch (error) {
     console.error('Error fetching CRP analytics:', error);
     res.status(500).json({ error: 'Failed to fetch CRP analytics' });
+  }
+});
+
+// CRP comparison summary for listings vs orders
+router.get('/crp-comparison', requireAuth, requirePageAccess('CRPComparison'), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      ordersStartDate,
+      ordersEndDate,
+      listingsStartDate,
+      listingsEndDate,
+      excludeLowValue,
+      chartLevel = 'category'
+    } = req.query;
+
+    const safeChartLevel = ['category', 'range', 'product'].includes(chartLevel)
+      ? chartLevel
+      : 'category';
+
+    const orderMatch = buildOrdersCrpMatch({
+      startDate: ordersStartDate,
+      endDate: ordersEndDate,
+      sellerId,
+      excludeLowValue,
+    });
+
+    const listingMatch = buildListingsCrpMatch({
+      startDate: listingsStartDate,
+      endDate: listingsEndDate,
+      sellerId,
+    });
+
+    const [listingRows, orderRows] = await Promise.all([
+      getListingComparisonRows(listingMatch),
+      getOrderComparisonRows(orderMatch),
+    ]);
+
+    const rows = mergeComparisonRows(listingRows, orderRows);
+    const listingCrps = rows.filter((row) => row.listings.count > 0).length;
+    const orderCrps = rows.filter((row) => row.orders.count > 0).length;
+    const matchedCrps = rows.filter((row) => row.listings.count > 0 && row.orders.count > 0).length;
+    const listingOnlyCrps = rows.filter((row) => row.listings.count > 0 && row.orders.count === 0).length;
+    const orderOnlyCrps = rows.filter((row) => row.orders.count > 0 && row.listings.count === 0).length;
+    const largestGapRow = rows[0] || null;
+
+    res.json({
+      summary: {
+        listingsTotal: rows.reduce((sum, row) => sum + row.listings.count, 0),
+        ordersTotal: rows.reduce((sum, row) => sum + row.orders.count, 0),
+        listingCrps,
+        orderCrps,
+        matchedCrps,
+        listingOnlyCrps,
+        orderOnlyCrps,
+        largestGap: largestGapRow
+          ? {
+              count: largestGapRow.absGap,
+              categoryName: largestGapRow.categoryName,
+              rangeName: largestGapRow.rangeName,
+              productName: largestGapRow.productName,
+            }
+          : null,
+      },
+      rows,
+      chartLevel: safeChartLevel,
+      listingsChart: buildChartData(rows, 'listings', safeChartLevel),
+      ordersChart: buildChartData(rows, 'orders', safeChartLevel),
+    });
+  } catch (error) {
+    console.error('Error fetching CRP comparison summary:', error);
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to fetch CRP comparison summary' });
+  }
+});
+
+// CRP comparison detail drill-down for one side and one CRP path
+router.get('/crp-comparison-details', requireAuth, requirePageAccess('CRPComparison'), async (req, res) => {
+  try {
+    const {
+      side,
+      sellerId,
+      ordersStartDate,
+      ordersEndDate,
+      listingsStartDate,
+      listingsEndDate,
+      excludeLowValue,
+      categoryId,
+      rangeId,
+      productId,
+      page = 1,
+      limit = 10,
+    } = req.query;
+
+    const safePage = Math.max(parseInt(page, 10) || 1, 1);
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 50);
+    const skip = (safePage - 1) * safeLimit;
+
+    const pathMatch = {
+      categoryId: normalizeObjectIdOrNull(categoryId, 'categoryId'),
+      rangeId: normalizeObjectIdOrNull(rangeId, 'rangeId'),
+      productId: normalizeObjectIdOrNull(productId, 'productId'),
+    };
+
+    if (side === 'orders') {
+      const match = buildOrdersCrpMatch({
+        startDate: ordersStartDate,
+        endDate: ordersEndDate,
+        sellerId,
+        excludeLowValue,
+      });
+
+      match.orderCategoryId = pathMatch.categoryId;
+      match.orderRangeId = pathMatch.rangeId;
+      match.orderProductId = pathMatch.productId;
+
+      const result = await Order.aggregate([
+        { $match: match },
+        { $sort: { dateSold: -1 } },
+        {
+          $facet: {
+            items: [
+              { $skip: skip },
+              { $limit: safeLimit },
+              {
+                $project: {
+                  _id: 1,
+                  orderId: 1,
+                  dateSold: 1,
+                  productName: 1,
+                  amount: { $ifNull: ['$subtotalUSD', '$subtotal'] }
+                }
+              }
+            ],
+            total: [{ $count: 'count' }]
+          }
+        }
+      ]);
+
+      const payload = result[0] || { items: [], total: [] };
+      const total = payload.total[0]?.count || 0;
+
+      return res.json({
+        side,
+        items: payload.items,
+        pagination: {
+          page: safePage,
+          limit: safeLimit,
+          total,
+          pages: Math.ceil(total / safeLimit)
+        }
+      });
+    }
+
+    if (side === 'listings') {
+      const match = buildListingsCrpMatch({
+        startDate: listingsStartDate,
+        endDate: listingsEndDate,
+        sellerId,
+      });
+
+      const result = await TemplateListing.aggregate([
+        { $match: match },
+        {
+          $lookup: {
+            from: 'listingtemplates',
+            localField: 'templateId',
+            foreignField: '_id',
+            as: 'templateDoc'
+          }
+        },
+        { $unwind: { path: '$templateDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: 'asinlistproducts',
+            localField: 'templateDoc.listProductId',
+            foreignField: '_id',
+            as: 'productDoc'
+          }
+        },
+        {
+          $addFields: {
+            productDocObj: { $arrayElemAt: ['$productDoc', 0] },
+            derivedProductId: { $ifNull: ['$templateDoc.listProductId', null] }
+          }
+        },
+        {
+          $addFields: {
+            derivedRangeId: { $ifNull: ['$productDocObj.rangeId', '$templateDoc.rangeId'] }
+          }
+        },
+        {
+          $lookup: {
+            from: 'asinlistranges',
+            localField: 'derivedRangeId',
+            foreignField: '_id',
+            as: 'rangeDoc'
+          }
+        },
+        {
+          $addFields: {
+            rangeDocObj: { $arrayElemAt: ['$rangeDoc', 0] },
+            derivedCategoryId: {
+              $ifNull: ['$productDocObj.categoryId', { $arrayElemAt: ['$rangeDoc.categoryId', 0] }]
+            }
+          }
+        },
+        {
+          $match: {
+            derivedCategoryId: pathMatch.categoryId,
+            derivedRangeId: pathMatch.rangeId,
+            derivedProductId: pathMatch.productId,
+          }
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $facet: {
+            items: [
+              { $skip: skip },
+              { $limit: safeLimit },
+              {
+                $project: {
+                  _id: 1,
+                  customLabel: 1,
+                  asin: '$_asinReference',
+                  title: 1,
+                  createdAt: 1,
+                  status: 1,
+                }
+              }
+            ],
+            total: [{ $count: 'count' }]
+          }
+        }
+      ]);
+
+      const payload = result[0] || { items: [], total: [] };
+      const total = payload.total[0]?.count || 0;
+
+      return res.json({
+        side,
+        items: payload.items,
+        pagination: {
+          page: safePage,
+          limit: safeLimit,
+          total,
+          pages: Math.ceil(total / safeLimit)
+        }
+      });
+    }
+
+    return res.status(400).json({ error: 'side must be either orders or listings' });
+  } catch (error) {
+    console.error('Error fetching CRP comparison details:', error);
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to fetch CRP comparison details' });
   }
 });
 
