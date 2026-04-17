@@ -11,6 +11,7 @@ import MarketMetric from '../models/MarketMetric.js';
 import TemplateListing from '../models/TemplateListing.js';
 
 const router = Router();
+const EXCLUDED_CLIENT_USERNAME = 'Vergo';
 
 const PT_TIMEZONE = 'America/Los_Angeles';
 const SNAD_RETURN_REASONS = [
@@ -105,6 +106,17 @@ function normalizeObjectIdOrNull(value, fieldName) {
   }
 
   return new mongoose.Types.ObjectId(value);
+}
+
+async function getExcludedClientSellerIds() {
+  const sellers = await Seller.find({})
+    .populate('user', 'username')
+    .select('_id user')
+    .lean();
+
+  return sellers
+    .filter((seller) => seller.user?.username?.toLowerCase() === EXCLUDED_CLIENT_USERNAME)
+    .map((seller) => seller._id);
 }
 
 function buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeLowValue }) {
@@ -756,7 +768,7 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
 // Get daily order statistics for all sellers
 router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, marketplace } = req.query;
+    const { startDate, endDate, sellerId, marketplace, excludeClient } = req.query;
 
     // Build the query - NO CANCELSTATE FILTER (matches FulfillmentDashboard)
     const query = {};
@@ -778,6 +790,15 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
     // Add seller filter if provided
     if (sellerId) {
       query.seller = new mongoose.Types.ObjectId(sellerId);
+    }
+
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        query.seller = query.seller
+          ? { $in: [query.seller].filter((sellerObjectId) => !excludedSellerIds.some((excludedId) => excludedId.equals(sellerObjectId))) }
+          : { $nin: excludedSellerIds };
+      }
     }
 
     if (marketplace) {
