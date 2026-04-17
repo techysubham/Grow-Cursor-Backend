@@ -56,6 +56,26 @@ Please allow a few business days for it to reflect in your account.`
     text: `Hi {{buyer_first_name}},
 Your order has not shipped yet, but our team is actively working on it.
 We'll keep you updated as soon as it ships.`
+  },
+  {
+    name: 'Alternative message',
+    text: `Hello {{buyer_first_name}},
+We wanted to update you regarding your order. During our final quality check, we found that the {{item_title}} did not meet our quality standards, and it was the last piece in stock.
+
+However, we do have the newest updated design available. If you'd like, we can ship the upgraded model to you at no extra cost.
+
+Please let us know how you'd like to proceed.
+Thank you, and have a great day!`
+  },
+  {
+    name: 'Alternative cancellation message',
+    text: `Hello {{buyer_first_name}},
+
+We had begun preparing your order for shipment, but during our final quality check, we discovered that the {{item_title}} did not meet our quality standards. Unfortunately, it was the last one in stock, so we're unable to send a replacement.
+
+To ensure you receive your refund promptly, please kindly start a cancellation request on your end. Once the request is submitted, we will accept it right away.
+
+We sincerely apologize for the inconvenience and truly appreciate your understanding.`
   }
 ];
 
@@ -67,21 +87,36 @@ function toFrontendTemplate(template) {
   };
 }
 
-async function ensureDefaultsIfEmpty() {
-  const count = await RemarkTemplate.countDocuments({ isActive: true });
-  if (count > 0) return;
+async function ensureDefaultTemplatesPresent() {
+  const existingTemplates = await RemarkTemplate.find({ isActive: true })
+    .select('name sortOrder')
+    .sort({ sortOrder: 1, createdAt: 1 })
+    .lean();
 
-  const toInsert = DEFAULT_REMARK_TEMPLATES.map((template, index) => ({
+  const existingNames = new Set(existingTemplates.map((template) => String(template.name || '').trim().toLowerCase()));
+  const nextSortOrder = existingTemplates.reduce(
+    (maxSortOrder, template) => Math.max(maxSortOrder, Number.isFinite(template.sortOrder) ? template.sortOrder : -1),
+    -1
+  );
+
+  const missingDefaults = DEFAULT_REMARK_TEMPLATES.filter(
+    (template) => !existingNames.has(template.name.trim().toLowerCase())
+  );
+
+  if (missingDefaults.length === 0) return;
+
+  const toInsert = missingDefaults.map((template, index) => ({
     ...template,
     isActive: true,
-    sortOrder: index
+    sortOrder: nextSortOrder + index + 1
   }));
+
   await RemarkTemplate.insertMany(toInsert);
 }
 
 router.get('/', requireAuth, async (req, res) => {
   try {
-    await ensureDefaultsIfEmpty();
+    await ensureDefaultTemplatesPresent();
 
     const templates = await RemarkTemplate.find({ isActive: true })
       .sort({ sortOrder: 1, createdAt: 1 })
