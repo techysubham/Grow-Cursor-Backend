@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import axios from 'axios';
 import qs from 'qs';
 import jwt from 'jsonwebtoken';
@@ -21,7 +21,6 @@ import ActiveListing from '../models/ActiveListing.js';
 import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
 import ChatAgent from '../models/ChatAgent.js';
-import ExchangeRate from '../models/ExchangeRate.js';
 import { parseStringPromise } from 'xml2js';
 import imageCache from '../lib/imageCache.js';
 import multer from 'multer';
@@ -38,6 +37,14 @@ import AsinListRange from '../models/AsinListRange.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import PriceChangeLog from '../models/PriceChangeLog.js';
 import OpenAI from 'openai';
+import {
+  calculateOrderAmazonFinancials,
+  calculateOrderEbayFinancials,
+  getExchangeRateDefaultValue,
+  getExchangeRateMarketplace,
+  getExchangeRateRecordForDate,
+  getOrderTotalAmount
+} from '../utils/exchangeRateUtils.js';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
@@ -999,115 +1006,12 @@ function recalculateUSDFields(order) {
 // ============================================
 // Calculates TDS, TID, NET, and P.Balance INR based on orderEarnings
 async function calculateFinancials(order, marketplace = 'EBAY') {
-  const updates = {
-    tid: 0.24 // Fixed Transaction ID
-  };
-
-  // If orderEarnings is null or undefined, set all financial fields to null
-  if (order.orderEarnings === null || order.orderEarnings === undefined) {
-    updates.tds = null;
-    updates.net = null;
-    updates.pBalanceINR = null;
-    updates.ebayExchangeRate = null;
-    return updates;
-  }
-
-  const earnings = parseFloat(order.orderEarnings) || 0;
-
-  // TDS = 1% of orderEarnings
-  updates.tds = parseFloat((earnings * 0.01).toFixed(2));
-
-  // NET = orderEarnings - tds - tid
-  updates.net = parseFloat((earnings - updates.tds - updates.tid).toFixed(2));
-
-  // P.Balance INR = net × eBay exchangeRate (USD to INR)
-  // ALWAYS use EBAY marketplace (USD to INR) regardless of order marketplace
-  // Because orderEarnings is already in USD after conversion
-  try {
-    const exchangeRate = await ExchangeRate.findOne({ marketplace: 'EBAY' }).sort({ effectiveDate: -1 });
-    if (exchangeRate && exchangeRate.rate) {
-      updates.ebayExchangeRate = exchangeRate.rate; // Store the eBay exchange rate used
-      updates.pBalanceINR = parseFloat((updates.net * exchangeRate.rate).toFixed(2));
-    } else {
-      updates.ebayExchangeRate = null;
-      updates.pBalanceINR = null; // No exchange rate available
-    }
-  } catch (err) {
-    console.error('[Calculate Financials] Error fetching exchange rate:', err);
-    updates.ebayExchangeRate = null;
-    updates.pBalanceINR = null;
-  }
-
-  // Calculate and store profit per order
-  // Profit = P.Balance (INR) - A_total-inr - Total_CC
-  const pBalanceINR = updates.pBalanceINR !== undefined ? updates.pBalanceINR : (order.pBalanceINR || 0);
-  const amazonTotalINR = order.amazonTotalINR || 0;
-  const totalCC = order.totalCC || 0;
-  updates.profit = parseFloat((pBalanceINR - amazonTotalINR - totalCC).toFixed(2));
-
-  return updates;
+  return calculateOrderEbayFinancials(order);
 }
 
 // Calculate Amazon-side financial fields
 async function calculateAmazonFinancials(order) {
-  const updates = {};
-
-  // Always use raw beforeTax / estimatedTax fields directly
-  const beforeTax = parseFloat(order.beforeTax) || 0;
-  const estimatedTax = parseFloat(order.estimatedTax) || 0;
-
-  // Amazon Total = Before Tax + Estimated Tax
-  updates.amazonTotal = parseFloat((beforeTax + estimatedTax).toFixed(2));
-
-  // Check if order is FULLY_REFUNDED or PARTIALLY_REFUNDED
-  const paymentStatus = order.paymentSummary?.payments?.[0]?.paymentStatus;
-  const isRefunded = paymentStatus === 'FULLY_REFUNDED' || paymentStatus === 'PARTIALLY_REFUNDED';
-
-  // IGST=0 logic only applies to orders from Nov 28, 2025 onwards
-  const orderDate = new Date(order.creationDate || order.dateSold);
-  const nov28_2025 = new Date('2025-11-28T00:00:00.000Z');
-  const applyIGSTZeroForRefunds = orderDate >= nov28_2025;
-
-  // Fetch latest Amazon exchange rate
-  try {
-    const exchangeRate = await ExchangeRate.findOne({ marketplace: 'AMAZON' }).sort({ effectiveDate: -1 });
-    if (exchangeRate && exchangeRate.rate) {
-      updates.amazonExchangeRate = exchangeRate.rate; // Store the Amazon exchange rate used
-      updates.amazonTotalINR = parseFloat((updates.amazonTotal * exchangeRate.rate).toFixed(2));
-
-      // Marketplace Fee = 4% of amazonTotalINR
-      updates.marketplaceFee = parseFloat((updates.amazonTotalINR * 0.04).toFixed(2));
-
-      // IGST = 18% of marketplace fee, BUT 0 if order is refunded AND from Nov 28, 2025 onwards
-      updates.igst = (isRefunded && applyIGSTZeroForRefunds) ? 0 : parseFloat((updates.marketplaceFee * 0.18).toFixed(2));
-
-      // Total CC = Marketplace Fee + IGST
-      updates.totalCC = parseFloat((updates.marketplaceFee + updates.igst).toFixed(2));
-    } else {
-      // No exchange rate available, set to null
-      updates.amazonExchangeRate = null;
-      updates.amazonTotalINR = null;
-      updates.marketplaceFee = null;
-      updates.igst = null;
-      updates.totalCC = null;
-    }
-  } catch (err) {
-    console.error('[Calculate Amazon Financials] Error fetching exchange rate:', err);
-    updates.amazonExchangeRate = null;
-    updates.amazonTotalINR = null;
-    updates.marketplaceFee = null;
-    updates.igst = null;
-    updates.totalCC = null;
-  }
-
-  // Recalculate profit after Amazon financials update
-  // Profit = P.Balance (INR) - A_total-inr - Total_CC
-  const pBalanceINR = order.pBalanceINR || 0;
-  const amazonTotalINR = updates.amazonTotalINR !== undefined ? updates.amazonTotalINR : (order.amazonTotalINR || 0);
-  const totalCC = updates.totalCC !== undefined ? updates.totalCC : (order.totalCC || 0);
-  updates.profit = parseFloat((pBalanceINR - amazonTotalINR - totalCC).toFixed(2));
-
-  return updates;
+  return calculateOrderAmazonFinancials(order);
 }
 
 // HELPER: Ensure Seller Token is Valid (Refreshes if < 2 mins left)
@@ -1322,7 +1226,7 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null) {
 /**
  * Handles refund processing when orderPaymentStatus changes
  * FULLY_REFUNDED: Set earnings to $0
- * PARTIALLY_REFUNDED: Set earnings to null (user will manually enter)
+ * PARTIALLY_REFUNDED: Set earnings to $0
  * @param {Object} existingOrder - The order document from DB
  * @param {String} newPaymentStatus - The new payment status from eBay
  * @param {String} accessToken - Valid eBay access token
@@ -1346,7 +1250,7 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
     // Calculate financial fields with $0 earnings
     const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
       existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-    const financials = await calculateFinancials({ orderEarnings: 0 }, marketplace);
+    const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
 
     return {
       subtotal: 0,
@@ -1365,35 +1269,35 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
     };
 
   } else if (newPaymentStatus === 'PARTIALLY_REFUNDED') {
-    // ========== PARTIALLY REFUNDED: Set earnings to null (user will manually enter) ==========
-    console.log(`[Refund Handler] PARTIALLY_REFUNDED: Setting earnings to null for ${existingOrder.orderId}`);
+    // ========== PARTIALLY REFUNDED: Set earnings to $0 ==========
+    console.log(`[Refund Handler] PARTIALLY_REFUNDED: Setting earnings to $0 for ${existingOrder.orderId}`);
 
     try {
       // Fetch updated ad fee from Finances API
       const adFeeResult = await fetchOrderAdFee(accessToken, existingOrder.orderId);
       const adFeeGeneral = adFeeResult.success ? adFeeResult.adFeeGeneral : existingOrder.adFeeGeneral;
 
-      // Calculate financial fields with null earnings
+      // Calculate financial fields with $0 earnings while preserving order total for TDS
       const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
         existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-      const financials = await calculateFinancials({ orderEarnings: null }, marketplace);
+      const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
 
       return {
         adFeeGeneral,
-        orderEarnings: null, // User must manually enter earnings
+        orderEarnings: 0,
         ...financials
       };
 
     } catch (error) {
       console.error(`[Refund Handler] Error fetching ad fee for ${existingOrder.orderId}:`, error.message);
 
-      // Calculate financial fields with null earnings
+      // Calculate financial fields with $0 earnings while preserving order total for TDS
       const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
         existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-      const financials = await calculateFinancials({ orderEarnings: null }, marketplace);
+      const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
 
       return {
-        orderEarnings: null, // User must manually enter earnings
+        orderEarnings: 0,
         ...financials
       };
     }
@@ -2444,21 +2348,11 @@ router.get('/stored-orders', async (req, res) => {
 // ============================================
 async function getExchangeRateForDate(date, marketplace = 'EBAY') {
   try {
-    const targetDate = new Date(date);
-
-    // Find the most recent rate that was effective on or before the target date
-    const rate = await ExchangeRate.findOne({
-      marketplace,
-      effectiveDate: { $lte: targetDate }
-    })
-      .sort({ effectiveDate: -1 })
-      .limit(1);
-
-    // Default to 82 if no rate found
-    return rate ? rate.rate : 82;
+    const rate = await getExchangeRateRecordForDate(date, marketplace);
+    return rate ? rate.rate : getExchangeRateDefaultValue(marketplace);
   } catch (err) {
     console.error('Error fetching exchange rate:', err);
-    return 82; // Default fallback
+    return getExchangeRateDefaultValue(marketplace);
   }
 }
 
@@ -2485,9 +2379,18 @@ router.get('/all-orders-usd', async (req, res) => {
       query.seller = new mongoose.Types.ObjectId(sellerId);
     }
 
+    query.$and = query.$and || [];
+    query.$and.push({
+      $or: [
+        { orderPaymentStatus: { $exists: false } },
+        { orderPaymentStatus: null },
+        { orderPaymentStatus: { $nin: ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'] } }
+      ]
+    });
+
     // Exclude cancelled orders if requested
     if (excludeCancelled === 'true') {
-      query.$and = [
+      query.$and.push(
         {
           $or: [
             { cancelState: { $exists: false } },
@@ -2502,7 +2405,7 @@ router.get('/all-orders-usd', async (req, res) => {
             { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
           ]
         }
-      ];
+      );
     }
 
     // Apply search filters
@@ -2758,23 +2661,19 @@ router.get('/all-orders-usd', async (req, res) => {
       orderObj.refundTotalUSD = parseFloat((refundTotal * conversionRate).toFixed(2));
 
       // Get exchange rates for order's date (USD to INR)
-      const ebayExchangeRate = await getExchangeRateForDate(orderObj.dateSold || orderObj.creationDate, 'EBAY');
-      const amazonExchangeRate = await getExchangeRateForDate(orderObj.dateSold || orderObj.creationDate, 'AMAZON');
+      const ebayMarketplace = getExchangeRateMarketplace('EBAY', orderObj.purchaseMarketplaceId);
+      const amazonMarketplace = getExchangeRateMarketplace('AMAZON', orderObj.purchaseMarketplaceId);
+      const ebayExchangeRate = orderObj.ebayExchangeRate ?? await getExchangeRateForDate(orderObj.dateSold || orderObj.creationDate, ebayMarketplace);
+      const amazonExchangeRate = orderObj.amazonExchangeRate ?? await getExchangeRateForDate(orderObj.dateSold || orderObj.creationDate, amazonMarketplace);
       orderObj.exchangeRate = ebayExchangeRate;
+      orderObj.ebayExchangeRate = ebayExchangeRate;
       orderObj.amazonExchangeRate = amazonExchangeRate;
 
-      // Calculate NET and P.Balance
-      // NET = Subtotal - TransactionFees - AdFeeGeneral - Refunds - TDS - T.ID + Discount
-      const total = (orderObj.subtotalUSD || 0) + (orderObj.salesTaxUSD || 0);
-      const tds = total * 0.01; // 1% of Total
+      // Calculate NET and P.Balance using non-USD financial fields
+      const total = getOrderTotalAmount(orderObj);
+      const tds = total * 0.01; // 1% of (pricingSummary.total.value + salesTax)
       const tid = 0.24;
-      const net = (orderObj.subtotalUSD || 0)
-        - (orderObj.transactionFeesUSD || 0)
-        - (orderObj.adFeeGeneral || 0)
-        - orderObj.refundTotalUSD
-        - tds
-        - tid
-        + (orderObj.discountUSD || 0);
+      const net = (parseFloat(orderObj.orderEarnings) || 0) - tds - tid;
 
       orderObj.pBalance = parseFloat((net * orderObj.exchangeRate).toFixed(2));
       orderObj.profit = parseFloat((((orderObj.pBalanceINR || 0) - (orderObj.amazonTotalINR || 0) - (orderObj.totalCC || 0)).toFixed(2)));
@@ -2981,7 +2880,7 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
     // Update ad fee
     order.adFeeGeneral = parseFloat(adFeeGeneral);
 
-    // Recalculate earnings if not FULLY_REFUNDED or PARTIALLY_REFUNDED
+    // Recalculate earnings only for non-refunded orders
     const paymentStatus = order.paymentSummary?.payments?.[0]?.paymentStatus;
     if (paymentStatus !== 'FULLY_REFUNDED' && paymentStatus !== 'PARTIALLY_REFUNDED') {
       // Recalculate earnings: totalDueSeller.value - adFeeGeneral
@@ -3007,6 +2906,57 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
 
     res.json({ success: true, order });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const seller = await Seller.findById(order.seller);
+    if (!seller?.ebayTokens?.refresh_token) {
+      return res.status(400).json({ error: 'Seller does not have valid eBay tokens' });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+    const adFeeResult = await fetchOrderAdFee(accessToken, order.orderId);
+
+    if (!adFeeResult.success) {
+      return res.status(400).json({ error: adFeeResult.error || 'Failed to fetch ad fee from eBay' });
+    }
+
+    order.adFeeGeneral = parseFloat(adFeeResult.adFeeGeneral || 0);
+
+    if (order.orderPaymentStatus === 'FULLY_REFUNDED') {
+      order.orderEarnings = 0;
+    } else if (order.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
+      order.orderEarnings = 0;
+    } else {
+      const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
+      order.orderEarnings = parseFloat((totalDueSeller - order.adFeeGeneral).toFixed(2));
+    }
+
+    const financials = await calculateFinancials(order);
+    Object.assign(order, financials);
+
+    const amazonFinancials = await calculateAmazonFinancials(order);
+    Object.assign(order, amazonFinancials);
+
+    await order.save();
+
+    res.json({
+      success: true,
+      adFeeGeneral: order.adFeeGeneral,
+      order: order.toObject()
+    });
+  } catch (err) {
+    console.error('Error fetching ad fee general for order:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -3099,6 +3049,58 @@ router.post('/orders/:orderId/update-earnings', requireAuth, requirePageAccess('
     });
   } catch (err) {
     console.error('Error updating order earnings:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/orders/:orderId/order-total', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { orderTotal } = req.body;
+
+    if (orderTotal === undefined || orderTotal === null || Number.isNaN(parseFloat(orderTotal))) {
+      return res.status(400).json({ error: 'Valid orderTotal is required' });
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    if (!order.pricingSummary || typeof order.pricingSummary !== 'object') {
+      order.pricingSummary = {};
+    }
+
+    if (!order.pricingSummary.total || typeof order.pricingSummary.total !== 'object') {
+      order.pricingSummary.total = {};
+    }
+
+    order.orderTotal = parseFloat(orderTotal);
+
+    const financials = await calculateFinancials(order);
+    order.tds = financials.tds;
+    order.tid = financials.tid;
+    order.net = financials.net;
+    order.pBalanceINR = financials.pBalanceINR;
+    order.ebayExchangeRate = financials.ebayExchangeRate;
+    order.profit = financials.profit;
+
+    await order.save();
+
+    await order.populate({
+      path: 'seller',
+      populate: {
+        path: 'user',
+        select: 'username email'
+      }
+    });
+
+    res.json({
+      success: true,
+      order
+    });
+  } catch (err) {
+    console.error('Error updating order total:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -3299,9 +3301,6 @@ router.post('/backfill-earnings', requireAuth, requirePageAccess('AllOrdersSheet
       if (sinceDate) {
         query.creationDate = { $gte: new Date(sinceDate) };
       }
-      // Skip PARTIALLY_REFUNDED — user enters those manually
-      query.orderPaymentStatus = { $nin: ['PARTIALLY_REFUNDED'] };
-
       const orders = await Order.find(query).sort({ creationDate: -1 });
       console.log(`[Backfill Earnings] Seller ${sid}: ${orders.length} orders`);
       totals.total += orders.length;
@@ -3309,7 +3308,7 @@ router.post('/backfill-earnings', requireAuth, requirePageAccess('AllOrdersSheet
       for (let i = 0; i < orders.length; i++) {
         const order = orders[i];
         try {
-          if (order.orderPaymentStatus === 'FULLY_REFUNDED') {
+          if (order.orderPaymentStatus === 'FULLY_REFUNDED' || order.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
             const financials = await calculateFinancials({ ...order.toObject(), orderEarnings: 0 });
             await Order.findByIdAndUpdate(order._id, { orderEarnings: 0, ...financials });
             totals.success++;
@@ -4515,6 +4514,7 @@ router.post('/resync-from-dec1', requireAuth, requirePageAccess('Fulfillment'), 
                     // Update denormalized fields
                     subtotal: orderData.subtotal,
                     salesTax: orderData.salesTax,
+                    orderTotal: orderData.orderTotal,
                     discount: orderData.discount,
                     shipping: orderData.shipping,
                     transactionFees: orderData.transactionFees,
@@ -4787,9 +4787,8 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
 
                   console.log(`  ❌ FULLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
                 } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                  // For PARTIALLY_REFUNDED: use totalDueSeller (do NOT subtract adFee)
-                  const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
-                  existingOrder.orderEarnings = parseFloat(totalDueSeller.toFixed(2));
+                  // For PARTIALLY_REFUNDED: earnings = $0
+                  existingOrder.orderEarnings = 0;
 
                   // Recalculate financial fields
                   const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -4802,7 +4801,7 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
                   existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                   existingOrder.profit = financials.profit;
 
-                  console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to totalDueSeller: $${existingOrder.orderEarnings}`);
+                  console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
                 }
 
                 await existingOrder.save();
@@ -4834,9 +4833,8 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
 
                         console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
                       } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                        // For PARTIALLY_REFUNDED: use totalDueSeller (do NOT subtract adFee)
-                        const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
-                        existingOrder.orderEarnings = parseFloat(totalDueSeller.toFixed(2));
+                        // For PARTIALLY_REFUNDED: earnings remain $0
+                        existingOrder.orderEarnings = 0;
 
                         // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
                         const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -4849,7 +4847,7 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
                         existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                         existingOrder.profit = financials.profit;
 
-                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - PARTIALLY_REFUNDED earnings: $${existingOrder.orderEarnings} (totalDueSeller)`);
+                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - PARTIALLY_REFUNDED earnings remain $0`);
                       } else if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
                         // For FULLY_REFUNDED: earnings = $0 (ad fee stored but not used in calculation)
                         existingOrder.orderEarnings = 0;
@@ -5088,9 +5086,8 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
 
                 console.log(`  ❌ FULLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
               } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                // For PARTIALLY_REFUNDED: use totalDueSeller (do NOT subtract adFee)
-                const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
-                existingOrder.orderEarnings = parseFloat(totalDueSeller.toFixed(2));
+                // For PARTIALLY_REFUNDED: earnings = $0
+                existingOrder.orderEarnings = 0;
 
                 // Recalculate financial fields
                 const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -5103,7 +5100,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                 existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                 existingOrder.profit = financials.profit;
 
-                console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to totalDueSeller: $${existingOrder.orderEarnings}`);
+                console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
               }
 
               await existingOrder.save();
@@ -5141,9 +5138,8 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
 
                     console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
                   } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                    // For PARTIALLY_REFUNDED: use totalDueSeller (do NOT subtract adFee)
-                    const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
-                    existingOrder.orderEarnings = parseFloat(totalDueSeller.toFixed(2));
+                    // For PARTIALLY_REFUNDED: earnings remain $0
+                    existingOrder.orderEarnings = 0;
 
                     // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
                     const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -5156,7 +5152,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                     existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                     existingOrder.profit = financials.profit;
 
-                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - PARTIALLY_REFUNDED earnings: $${existingOrder.orderEarnings} (totalDueSeller)`);
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - PARTIALLY_REFUNDED earnings remain $0`);
                   } else if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
                     // For FULLY_REFUNDED: earnings = $0 (ad fee stored but not used in calculation)
                     existingOrder.orderEarnings = 0;
@@ -5568,6 +5564,8 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
     trackingNumber,
     purchaseMarketplaceId
   };
+
+  orderData.orderTotal = parseFloat(((parseFloat(ebayOrder.pricingSummary?.total?.value || 0)) + orderData.salesTax).toFixed(2));
 
   // Enhanced cancel state extraction with multiple fallbacks
   let cancelState = 'NONE_REQUESTED';
@@ -10015,6 +10013,13 @@ router.get('/seller-analytics', requireAuth, requirePageAccess('SellerAnalytics'
     const matchQuery = {
       // Exclude cancelled orders
       $and: [
+        {
+          $or: [
+            { orderPaymentStatus: { $exists: false } },
+            { orderPaymentStatus: null },
+            { orderPaymentStatus: { $nin: ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'] } }
+          ]
+        },
         {
           $or: [
             { cancelState: { $exists: false } },
