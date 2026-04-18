@@ -134,7 +134,25 @@ async function applyExcludedClientFilter(match, sellerField, excludeClient) {
     : { $nin: excludedSellerIds };
 }
 
-async function buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeClient, excludeLowValue }) {
+function applyOrderMarketplaceFilter(match, marketplace) {
+  if (!marketplace) {
+    return;
+  }
+
+  if (marketplace === 'EBAY_CA' || marketplace === 'EBAY_ENCA') {
+    match.purchaseMarketplaceId = { $in: ['EBAY_CA', 'EBAY_ENCA'] };
+    return;
+  }
+
+  if (marketplace === 'GB' || marketplace === 'EBAY_GB') {
+    match.purchaseMarketplaceId = { $in: ['GB', 'EBAY_GB'] };
+    return;
+  }
+
+  match.purchaseMarketplaceId = marketplace;
+}
+
+async function buildOrdersCrpMatch({ startDate, endDate, sellerId, marketplace, excludeClient, excludeLowValue }) {
   const match = {};
 
   if (startDate || endDate) {
@@ -149,6 +167,7 @@ async function buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeClient
   }
 
   await applyExcludedClientFilter(match, 'seller', excludeClient);
+  applyOrderMarketplaceFilter(match, marketplace);
 
   if (excludeLowValue === 'true') {
     match.$or = [{ subtotalUSD: { $gte: 3 } }, { subtotal: { $gte: 3 } }];
@@ -924,17 +943,18 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
 // ─────────────────────────────────────────────────────────────────────────────
 // CRP Analytics  GET /orders/crp-analytics
 // Groups orders by Category, Range, or Product and returns counts.
-// Query params: startDate, endDate, sellerId, groupBy (category|range|product),
+// Query params: startDate, endDate, sellerId, marketplace, groupBy (category|range|product),
 //               excludeClient, excludeLowValue (true/false)
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, groupBy = 'category', excludeClient, excludeLowValue } = req.query;
+    const { startDate, endDate, sellerId, marketplace, groupBy = 'category', excludeClient, excludeLowValue } = req.query;
 
     const match = await buildOrdersCrpMatch({
       startDate,
       endDate,
       sellerId,
+      marketplace,
       excludeClient,
       excludeLowValue,
     });
