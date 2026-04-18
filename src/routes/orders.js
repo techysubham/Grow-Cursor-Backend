@@ -119,7 +119,22 @@ async function getExcludedClientSellerIds() {
     .map((seller) => seller._id);
 }
 
-function buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeLowValue }) {
+async function applyExcludedClientFilter(match, sellerField, excludeClient) {
+  if (excludeClient !== 'true') {
+    return;
+  }
+
+  const excludedSellerIds = await getExcludedClientSellerIds();
+  if (excludedSellerIds.length === 0) {
+    return;
+  }
+
+  match[sellerField] = match[sellerField]
+    ? { $in: [match[sellerField]].filter((sellerObjectId) => !excludedSellerIds.some((excludedId) => excludedId.equals(sellerObjectId))) }
+    : { $nin: excludedSellerIds };
+}
+
+async function buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeClient, excludeLowValue }) {
   const match = {};
 
   if (startDate || endDate) {
@@ -133,6 +148,8 @@ function buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeLowValue }) 
     match.seller = sellerObjectId;
   }
 
+  await applyExcludedClientFilter(match, 'seller', excludeClient);
+
   if (excludeLowValue === 'true') {
     match.$or = [{ subtotalUSD: { $gte: 3 } }, { subtotal: { $gte: 3 } }];
   }
@@ -140,7 +157,7 @@ function buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeLowValue }) 
   return match;
 }
 
-function buildListingsCrpMatch({ startDate, endDate, sellerId }) {
+async function buildListingsCrpMatch({ startDate, endDate, sellerId, excludeClient }) {
   const match = { deletedAt: null };
 
   if (startDate || endDate) {
@@ -153,6 +170,8 @@ function buildListingsCrpMatch({ startDate, endDate, sellerId }) {
   if (sellerObjectId) {
     match.sellerId = sellerObjectId;
   }
+
+  await applyExcludedClientFilter(match, 'sellerId', excludeClient);
 
   return match;
 }
@@ -912,26 +931,13 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
   try {
     const { startDate, endDate, sellerId, groupBy = 'category', excludeClient, excludeLowValue } = req.query;
 
-    const match = {};
-
-    if (startDate || endDate) {
-      match.dateSold = {};
-      if (startDate) match.dateSold.$gte = getPTDayBoundsUTC(startDate).start;
-      if (endDate) match.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
-    }
-
-    if (sellerId) match.seller = new mongoose.Types.ObjectId(sellerId);
-
-    if (excludeClient === 'true') {
-      const excludedSellerIds = await getExcludedClientSellerIds();
-      if (excludedSellerIds.length > 0) {
-        match.seller = match.seller
-          ? { $in: [match.seller].filter((sellerObjectId) => !excludedSellerIds.some((excludedId) => excludedId.equals(sellerObjectId))) }
-          : { $nin: excludedSellerIds };
-      }
-    }
-
-    if (excludeLowValue === 'true') match.$or = [{ subtotalUSD: { $gte: 3 } }, { subtotal: { $gte: 3 } }];
+    const match = await buildOrdersCrpMatch({
+      startDate,
+      endDate,
+      sellerId,
+      excludeClient,
+      excludeLowValue,
+    });
 
     // Determine which field and lookup collection to use
     const groupFieldMap = {
@@ -995,6 +1001,7 @@ router.get('/crp-comparison', requireAuth, requirePageAccess('CRPComparison'), a
       ordersEndDate,
       listingsStartDate,
       listingsEndDate,
+      excludeClient,
       excludeLowValue,
       chartLevel = 'category'
     } = req.query;
@@ -1003,17 +1010,19 @@ router.get('/crp-comparison', requireAuth, requirePageAccess('CRPComparison'), a
       ? chartLevel
       : 'category';
 
-    const orderMatch = buildOrdersCrpMatch({
+    const orderMatch = await buildOrdersCrpMatch({
       startDate: ordersStartDate,
       endDate: ordersEndDate,
       sellerId,
+      excludeClient,
       excludeLowValue,
     });
 
-    const listingMatch = buildListingsCrpMatch({
+    const listingMatch = await buildListingsCrpMatch({
       startDate: listingsStartDate,
       endDate: listingsEndDate,
       sellerId,
+      excludeClient,
     });
 
     const [listingRows, orderRows] = await Promise.all([
@@ -1068,6 +1077,7 @@ router.get('/crp-comparison-details', requireAuth, requirePageAccess('CRPCompari
       ordersEndDate,
       listingsStartDate,
       listingsEndDate,
+      excludeClient,
       excludeLowValue,
       categoryId,
       rangeId,
@@ -1087,10 +1097,11 @@ router.get('/crp-comparison-details', requireAuth, requirePageAccess('CRPCompari
     };
 
     if (side === 'orders') {
-      const match = buildOrdersCrpMatch({
+      const match = await buildOrdersCrpMatch({
         startDate: ordersStartDate,
         endDate: ordersEndDate,
         sellerId,
+        excludeClient,
         excludeLowValue,
       });
 
@@ -1137,10 +1148,11 @@ router.get('/crp-comparison-details', requireAuth, requirePageAccess('CRPCompari
     }
 
     if (side === 'listings') {
-      const match = buildListingsCrpMatch({
+      const match = await buildListingsCrpMatch({
         startDate: listingsStartDate,
         endDate: listingsEndDate,
         sellerId,
+        excludeClient,
       });
 
       const result = await TemplateListing.aggregate([
