@@ -77,6 +77,24 @@ function getClampedSellerListStart(startTimeFrom, startTimeTo) {
   return requestedStart < maxRangeStart ? maxRangeStart : requestedStart;
 }
 
+const EXCLUDED_CLIENT_USERNAME = 'Vergo';
+
+async function getExcludedClientSellerIds() {
+  const excludedUsers = await User.find({
+    username: { $regex: new RegExp(`^${EXCLUDED_CLIENT_USERNAME}$`, 'i') }
+  })
+    .select('_id')
+    .lean();
+
+  if (excludedUsers.length === 0) {
+    return [];
+  }
+
+  return Seller.find({
+    user: { $in: excludedUsers.map((user) => user._id) }
+  }).distinct('_id');
+}
+
 function summarizeAutoCompatItems(items = []) {
   return items.reduce((acc, item) => {
     acc.processedCount += 1;
@@ -2011,12 +2029,20 @@ router.get('/order/:orderId', requireAuth, requirePageAccess('Fulfillment'), asy
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient } = req.query;
 
   try {
     let query = {};
     if (sellerId) {
       query.seller = sellerId;
+    }
+
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        query.$and = query.$and || [];
+        query.$and.push({ seller: { $nin: excludedSellerIds } });
+      }
     }
 
     // --- Awaiting Shipment Filter ---
@@ -10615,7 +10641,7 @@ router.post('/orders/send-auto-messages', requireAuth, requirePageAccess('BuyerM
 // =====================================================
 router.get('/awaiting-sheet-summary', requireAuth, requirePageAccess('AwaitingSheet'), async (req, res) => {
   try {
-    const { date, marketplace } = req.query;
+    const { date, marketplace, excludeClient } = req.query;
 
     if (!date) {
       return res.status(400).json({ error: 'Date is required (YYYY-MM-DD format)' });
@@ -10639,6 +10665,13 @@ router.get('/awaiting-sheet-summary', requireAuth, requirePageAccess('AwaitingSh
     // Add marketplace filter if provided
     if (marketplace && marketplace !== '') {
       baseMatch.purchaseMarketplaceId = marketplace === 'EBAY_CA' ? { $in: ['EBAY_CA', 'EBAY_ENCA'] } : marketplace;
+    }
+
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        baseMatch.seller = { $nin: excludedSellerIds };
+      }
     }
 
     // Aggregation pipeline - group by seller with conditional counts
