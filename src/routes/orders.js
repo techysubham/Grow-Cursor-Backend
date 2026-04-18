@@ -906,11 +906,11 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
 // CRP Analytics  GET /orders/crp-analytics
 // Groups orders by Category, Range, or Product and returns counts.
 // Query params: startDate, endDate, sellerId, groupBy (category|range|product),
-//               excludeLowValue (true/false)
+//               excludeClient, excludeLowValue (true/false)
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, groupBy = 'category', excludeLowValue } = req.query;
+    const { startDate, endDate, sellerId, groupBy = 'category', excludeClient, excludeLowValue } = req.query;
 
     const match = {};
 
@@ -921,6 +921,16 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
     }
 
     if (sellerId) match.seller = new mongoose.Types.ObjectId(sellerId);
+
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        match.seller = match.seller
+          ? { $in: [match.seller].filter((sellerObjectId) => !excludedSellerIds.some((excludedId) => excludedId.equals(sellerObjectId))) }
+          : { $nin: excludedSellerIds };
+      }
+    }
+
     if (excludeLowValue === 'true') match.$or = [{ subtotalUSD: { $gte: 3 } }, { subtotal: { $gte: 3 } }];
 
     // Determine which field and lookup collection to use
