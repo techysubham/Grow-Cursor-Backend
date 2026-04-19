@@ -115,7 +115,7 @@ async function getExcludedClientSellerIds() {
     .lean();
 
   return sellers
-    .filter((seller) => seller.user?.username?.toLowerCase() === EXCLUDED_CLIENT_USERNAME)
+    .filter((seller) => seller.user?.username?.trim().toLowerCase() === EXCLUDED_CLIENT_USERNAME.toLowerCase())
     .map((seller) => seller._id);
 }
 
