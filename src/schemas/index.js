@@ -156,6 +156,31 @@ export const createAssignmentSchema = z.object({
   scheduledDate: z.string().optional(),
 });
 
+// ── Meetings ─────────────────────────────────────────────────────────────────
+
+const meetingActionItemSchema = z.object({
+  text: z.string().trim().min(1, 'Action item text is required'),
+  assigneeId: z.string().optional(),
+  dueDate: z.string().optional(),
+  status: z.enum(['pending', 'in-progress', 'done']).optional(),
+});
+
+export const createMeetingSchema = z.object({
+  title: z.string().trim().min(1, 'Title is required'),
+  scheduledFor: z.string().min(1, 'Meeting date is required'),
+  organizerId: z.string().min(1, 'Organizer is required'),
+  attendeeIds: z.array(z.string().min(1)).min(1, 'At least one attendee is required'),
+  status: z.enum(['planned', 'in-progress', 'completed', 'cancelled']).optional(),
+  location: z.string().optional(),
+  agenda: z.string().optional(),
+  discussionSummary: z.string().optional(),
+  decisions: z.string().optional(),
+  futureScope: z.string().optional(),
+  actionItems: z.array(meetingActionItemSchema).optional(),
+});
+
+export const updateMeetingSchema = createMeetingSchema.partial();
+
 // ── Internal messages ─────────────────────────────────────────────────────────
 
 export const sendMessageSchema = z.object({

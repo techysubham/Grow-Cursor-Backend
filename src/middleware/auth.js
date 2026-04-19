@@ -74,6 +74,7 @@ export const PAGE_DEFAULT_ROLES = {
   'EmployeeManagement': ['superadmin', 'hradmin'],
   'AddUser': ['superadmin', 'listingadmin', 'hradmin', 'operationhead'],
   'UserSellerAssignments': ['superadmin', 'hradmin', 'hr'],
+  'Meetings': ['superadmin', 'productadmin', 'listingadmin', 'lister', 'advancelister', 'compatibilityadmin', 'compatibilityeditor', 'fulfillmentadmin', 'hradmin', 'hr', 'operationhead', 'trainee', 'hoc', 'compliancemanager'],
   'ViewAllMessages': ['superadmin'],
   'Attendance': ['superadmin'],
   'PageAccessManagement': ['superadmin'],
@@ -120,28 +121,28 @@ export async function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    
+
     // Validate token version and permissions version against database
     const user = await User.findById(payload.userId).select('tokenVersion permissionsVersion').lean();
     if (!user) {
       return res.status(401).json({ error: 'User not found' });
     }
-    
+
     const userTokenVersion = user.tokenVersion || 1;
     const payloadTokenVersion = payload.tokenVersion || 1;
-    
+
     if (payloadTokenVersion !== userTokenVersion) {
       return res.status(401).json({ error: 'Token expired. Please login again.' });
     }
-    
+
     // Check if permissions have been modified by admin
     const userPermissionsVersion = user.permissionsVersion || 1;
     const payloadPermissionsVersion = payload.permissionsVersion || 1;
-    
+
     if (payloadPermissionsVersion !== userPermissionsVersion) {
       return res.status(401).json({ error: 'Your access permissions have been updated. Please login again.' });
     }
-    
+
     req.user = payload; // { userId, role, tokenVersion, permissionsVersion }
     return next();
   } catch (e) {
@@ -229,7 +230,7 @@ export function requireRole(...roles) {
 export function requirePageAccess(pageId, defaultRoles) {
   // Normalize to array for consistent handling
   const pageIds = Array.isArray(pageId) ? pageId : [pageId];
-  
+
   // Collect fallback roles from all pages (if defaultRoles not provided)
   let fallbackRoles = defaultRoles;
   if (!fallbackRoles) {
