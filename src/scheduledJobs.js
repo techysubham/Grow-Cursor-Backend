@@ -4,8 +4,7 @@ import { runScheduledUploads } from './lib/ebayFeedUpload.js';
 import { scheduledSyncAllSellers, scheduledRunAutoCompatForDate } from './routes/ebay.js';
 
 const RUNNER_ID = (process.env.RUNNER_ID || 'local').trim().toLowerCase();
-const SHOULD_RUN_AUTO_COMPAT_CRON = RUNNER_ID === 'render';
-const SHOULD_RUN_POLL_ALL_SELLERS_CRON = RUNNER_ID === 'render';
+const IS_RENDER_RUNNER = RUNNER_ID === 'render';
 
 export function initializeScheduledJobs() {
     // Auto-stop all active timers daily at 2:00 AM
@@ -55,7 +54,7 @@ export function initializeScheduledJobs() {
 
     console.log('[CRON] Scheduled job initialized: Auto-upload CSV (every minute)');
 
-    if (SHOULD_RUN_POLL_ALL_SELLERS_CRON) {
+    if (IS_RENDER_RUNNER) {
         // Poll All Sellers at 1:00 AM IST daily.
         // Syncs eBay listings from lastListingPolledAt up to "now" for every seller.
         // After this runs, the DB will contain the previous day's listings ready for auto-compat.
@@ -73,7 +72,7 @@ export function initializeScheduledJobs() {
         console.log(`[CRON] Skipping Poll All Sellers cron initialization for runner: ${RUNNER_ID}. Set RUNNER_ID=render to enable automatic runs.`);
     }
 
-    if (SHOULD_RUN_AUTO_COMPAT_CRON) {
+    if (IS_RENDER_RUNNER) {
         // Run Auto-Compat for the previous IST day at 3:18 AM IST daily.
         // By 3:18 AM the 1:00 AM poll has already finished (~2h18m buffer), so all
         // previous-day listings are in the DB.
