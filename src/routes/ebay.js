@@ -11744,6 +11744,8 @@ Return ONLY a valid JSON array (no markdown, no explanation) where each object h
 - "model": string (e.g. "Camry")
 - "startYear": string or null (e.g. "2010")
 - "endYear": string or null (same as startYear if only one year)
+- "suggestedTrims": array of strings (e.g. ["XLE", "XSE"]). Specific trim levels explicitly mentioned as COMPATIBLE in the title and description. Do NOT include trims that are explicitly excluded.
+- "excludedTrims": array of strings (e.g. ["LE", "Limited"]). Specific trim levels explicitly mentioned as NOT COMPATIBLE or EXCLUDED (e.g., using words like "except", "not", "exclude", "does not fit").
 
 Rules:
 - If a year range is EXPLICITLY stated like "2008-2013", use startYear="2008" endYear="2013"
@@ -11754,7 +11756,7 @@ Rules:
 - Use the most specific model name mentioned (e.g. "F-150" not just "F-Series")
 - If the description lists a compatibility/fitment table, extract all entries from it
 
-Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013"},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null}]`;
+Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013","suggestedTrims":[],"excludedTrims":[]},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null,"suggestedTrims":["XLE"],"excludedTrims":["LE"]}]`;
 
   const completion = await getAutoOpenAI().chat.completions.create({
     model: 'gpt-4o-mini',
@@ -11763,20 +11765,23 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
     max_tokens: 500
   });
   const raw = completion.choices[0]?.message?.content?.trim() || '[]';
-  const cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+  let cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+  const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+  if (arrayMatch) cleaned = arrayMatch[0];
+
   let allFitments = [];
   try {
     allFitments = JSON.parse(cleaned);
     if (!Array.isArray(allFitments)) allFitments = [];
   } catch { allFitments = []; }
 
-  if (allFitments.length === 0) return { make: null, model: null, startYear: null, endYear: null, allFitments: [] };
+  if (allFitments.length === 0) return { make: null, model: null, startYear: null, endYear: null, suggestedTrims: [], excludedTrims: [], allFitments: [] };
   const best = allFitments.reduce((prev, curr) => {
     const prevGap = Number(prev.endYear) - Number(prev.startYear);
     const currGap = Number(curr.endYear) - Number(curr.startYear);
     return currGap > prevGap ? curr : prev;
   });
-  return { make: best.make, model: best.model, startYear: best.startYear, endYear: best.endYear, allFitments };
+  return { make: best.make, model: best.model, startYear: best.startYear, endYear: best.endYear, suggestedTrims: best.suggestedTrims || [], excludedTrims: best.excludedTrims || [], allFitments };
 }
 
 // Helper: fetch eBay compatibility property values (reuses the /compatibility/values logic)
