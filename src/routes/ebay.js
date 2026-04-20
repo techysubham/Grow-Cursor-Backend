@@ -1,4 +1,4 @@
-﻿import express from 'express';
+import express from 'express';
 import axios from 'axios';
 import qs from 'qs';
 import jwt from 'jsonwebtoken';
@@ -317,6 +317,13 @@ export async function processAutoCompatibilityBatch(batchId) {
         await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { currentStep: 'fetching_trims' });
 
         const compatibilityList = [];
+        const aiSuggested = aiData.suggestedTrims || [];
+        const aiExcluded = aiData.excludedTrims || [];
+        const hasSpecificTrims = aiSuggested.length > 0;
+        const hasExcludedTrims = aiExcluded.length > 0;
+
+        itemResult.trimsStrategy = hasSpecificTrims ? 'SPECIFIC_TRIMS' : (hasExcludedTrims ? 'EXCLUDED_TRIMS' : 'ALL_TRIMS');
+
         for (const year of resolvedYears) {
           const trims = await fetchCompatValues(token, 'Trim', [
             { name: 'Make', value: resolvedMake },
@@ -333,41 +340,71 @@ export async function processAutoCompatibilityBatch(batchId) {
                 { name: 'Model', value: canonicalModel }
               ]
             });
-          } else {
-            for (const trim of trims) {
-              const engines = await fetchCompatValues(token, 'Engine', [
-                { name: 'Make', value: resolvedMake },
-                { name: 'Model', value: canonicalModel },
-                { name: 'Year', value: year },
-                { name: 'Trim', value: trim }
-              ]);
+            continue;
+          }
 
-              if (engines.length === 0) {
-                compatibilityList.push({
-                  notes: '',
-                  nameValueList: [
-                    { name: 'Year', value: year },
-                    { name: 'Make', value: resolvedMake },
-                    { name: 'Model', value: canonicalModel },
-                    { name: 'Trim', value: trim }
-                  ]
-                });
-              } else {
-                for (const engine of engines) {
-                  compatibilityList.push({
-                    notes: '',
-                    nameValueList: [
-                      { name: 'Year', value: year },
-                      { name: 'Make', value: resolvedMake },
-                      { name: 'Model', value: canonicalModel },
-                      { name: 'Trim', value: trim },
-                      { name: 'Engine', value: engine }
-                    ]
-                  });
-                }
+          let allCombinations = [];
+          for (const trim of trims) {
+            const engines = await fetchCompatValues(token, 'Engine', [
+              { name: 'Make', value: resolvedMake },
+              { name: 'Model', value: canonicalModel },
+              { name: 'Year', value: year },
+              { name: 'Trim', value: trim }
+            ]);
+
+            if (engines.length === 0) {
+              allCombinations.push({ trim, engine: '' });
+            } else {
+              for (const engine of engines) {
+                allCombinations.push({ trim, engine });
               }
             }
           }
+
+          let filteredCombinations = [];
+          if (hasSpecificTrims) {
+            filteredCombinations = allCombinations.filter(c => 
+               aiSuggested.some(suggested => {
+                 if (!suggested || typeof suggested !== 'string') return false;
+                 const escaped = suggested.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s*');
+                 return new RegExp(`\\b${escaped}\\b`, 'i').test(`${c.trim} ${c.engine}`);
+               })
+            );
+          } else if (hasExcludedTrims) {
+            filteredCombinations = allCombinations.filter(c => 
+               !aiExcluded.some(excluded => {
+                 if (!excluded || typeof excluded !== 'string') return false;
+                 const escaped = excluded.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s*');
+                 return new RegExp(`\\b${escaped}\\b`, 'i').test(`${c.trim} ${c.engine}`);
+               })
+            );
+          } else {
+            filteredCombinations = allCombinations;
+          }
+
+          for (const combo of filteredCombinations) {
+            const nameValueList = [
+              { name: 'Year', value: year },
+              { name: 'Make', value: resolvedMake },
+              { name: 'Model', value: canonicalModel },
+              { name: 'Trim', value: combo.trim }
+            ];
+            if (combo.engine) nameValueList.push({ name: 'Engine', value: combo.engine });
+            compatibilityList.push({ notes: '', nameValueList });
+          }
+        }
+
+        if (compatibilityList.length === 0) {
+          itemResult.status = 'needs_manual';
+          itemResult.failureReason = `AI suggested specific trims/engines, but none matched eBay's available options for ${resolvedMake} ${canonicalModel} (${resolvedYears.join(',')})`;
+          counts.needsManualCount += 1;
+          counts.processedCount += 1;
+          await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
+          await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+            needsManualCount: counts.needsManualCount,
+            processedCount: counts.processedCount
+          });
+          continue;
         }
 
         itemResult.compatibilityList = compatibilityList;

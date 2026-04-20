@@ -90,7 +90,14 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
         let allFitments = [];
         try {
             // Strip any accidental markdown code fences
-            const cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+            let cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+            
+            // In case the model accidentally outputs extra characters at the end
+            const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+            if (arrayMatch) {
+                cleaned = arrayMatch[0];
+            }
+
             allFitments = JSON.parse(cleaned);
             if (!Array.isArray(allFitments)) allFitments = [];
         } catch (parseErr) {

@@ -11,8 +11,11 @@ const AutoCompatibilityBatchItemSchema = new mongoose.Schema({
     model: String,
     startYear: String,
     endYear: String,
+    suggestedTrims: [String],
+    excludedTrims: [String],
     allFitments: [mongoose.Schema.Types.Mixed]
   },
+  trimsStrategy: String,
   resolvedMake: String,
   resolvedModel: String,
   failureReason: String,
