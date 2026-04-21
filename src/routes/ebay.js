@@ -135,9 +135,10 @@ function dedupeAutoCompatItems(items = []) {
 }
 
 async function saveAutoCompatBatchItem(batchId, itemResult) {
+  const { itemId, ...itemFields } = itemResult;
   await AutoCompatibilityBatchItem.findOneAndUpdate(
-    { batchId, itemId: itemResult.itemId },
-    { $set: itemResult, $setOnInsert: { batchId, itemId: itemResult.itemId } },
+    { batchId, itemId },
+    { $set: itemFields, $setOnInsert: { batchId, itemId } },
     { upsert: true, new: true }
   );
 }
