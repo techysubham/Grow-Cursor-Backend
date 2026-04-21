@@ -114,6 +114,34 @@ function summarizeAutoCompatItems(items = []) {
   });
 }
 
+function dedupeAutoCompatItems(items = []) {
+  const byItemId = new Map();
+  const sorted = [...items].sort((a, b) => {
+    const aTime = new Date(a.updatedAt || a.createdAt || 0).getTime();
+    const bTime = new Date(b.updatedAt || b.createdAt || 0).getTime();
+    return bTime - aTime;
+  });
+
+  for (const item of sorted) {
+    if (!item?.itemId) continue;
+    if (!byItemId.has(item.itemId)) byItemId.set(item.itemId, item);
+  }
+
+  return Array.from(byItemId.values()).sort((a, b) => {
+    const aTime = new Date(a.createdAt || a.updatedAt || 0).getTime();
+    const bTime = new Date(b.createdAt || b.updatedAt || 0).getTime();
+    return aTime - bTime;
+  });
+}
+
+async function saveAutoCompatBatchItem(batchId, itemResult) {
+  await AutoCompatibilityBatchItem.findOneAndUpdate(
+    { batchId, itemId: itemResult.itemId },
+    { $set: itemResult, $setOnInsert: { batchId, itemId: itemResult.itemId } },
+    { upsert: true, new: true }
+  );
+}
+
 async function getAutoCompatibilitySourceListings(batch) {
   if (Array.isArray(batch.sourceItemIds) && batch.sourceItemIds.length > 0) {
     const listings = await Listing.find({
@@ -253,7 +281,7 @@ export async function processAutoCompatibilityBatch(batchId) {
           itemResult.failureReason = 'AI could not extract fitment info from this listing';
           counts.aiFailedCount += 1;
           counts.processedCount += 1;
-          await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
+          await saveAutoCompatBatchItem(batchId, itemResult);
           await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
             aiFailedCount: counts.aiFailedCount,
             processedCount: counts.processedCount
@@ -277,7 +305,7 @@ export async function processAutoCompatibilityBatch(batchId) {
           itemResult.failureReason = `Model "${aiData.model}" (resolved: "${resolvedModelInput}") not found in eBay DB for ${resolvedMake}`;
           counts.needsManualCount += 1;
           counts.processedCount += 1;
-          await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
+          await saveAutoCompatBatchItem(batchId, itemResult);
           await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
             needsManualCount: counts.needsManualCount,
             processedCount: counts.processedCount
@@ -306,7 +334,7 @@ export async function processAutoCompatibilityBatch(batchId) {
           itemResult.failureReason = `Years ${aiData.startYear}-${aiData.endYear} not found in eBay DB for ${resolvedMake} ${canonicalModel}`;
           counts.needsManualCount += 1;
           counts.processedCount += 1;
-          await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
+          await saveAutoCompatBatchItem(batchId, itemResult);
           await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
             needsManualCount: counts.needsManualCount,
             processedCount: counts.processedCount
@@ -317,6 +345,20 @@ export async function processAutoCompatibilityBatch(batchId) {
         await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { currentStep: 'fetching_trims' });
 
         const compatibilityList = [];
+        const aiSuggested = aiData.suggestedTrims || [];
+        const aiExcluded = aiData.excludedTrims || [];
+        const aiSuggestedEngines = aiData.suggestedEngines || [];
+        const aiExcludedEngines = aiData.excludedEngines || [];
+        const hasSpecificTrims = aiSuggested.length > 0;
+        const hasExcludedTrims = aiExcluded.length > 0;
+        const hasSpecificEngines = aiSuggestedEngines.length > 0;
+        const hasExcludedEngines = aiExcludedEngines.length > 0;
+
+        let strategy = 'ALL_TRIMS';
+        if (hasSpecificTrims || hasSpecificEngines) strategy = 'SPECIFIC_TRIMS';
+        else if (hasExcludedTrims || hasExcludedEngines) strategy = 'EXCLUDED_TRIMS';
+        itemResult.trimsStrategy = strategy;
+
         for (const year of resolvedYears) {
           const trims = await fetchCompatValues(token, 'Trim', [
             { name: 'Make', value: resolvedMake },
@@ -333,41 +375,90 @@ export async function processAutoCompatibilityBatch(batchId) {
                 { name: 'Model', value: canonicalModel }
               ]
             });
-          } else {
-            for (const trim of trims) {
-              const engines = await fetchCompatValues(token, 'Engine', [
-                { name: 'Make', value: resolvedMake },
-                { name: 'Model', value: canonicalModel },
-                { name: 'Year', value: year },
-                { name: 'Trim', value: trim }
-              ]);
+            continue;
+          }
 
-              if (engines.length === 0) {
-                compatibilityList.push({
-                  notes: '',
-                  nameValueList: [
-                    { name: 'Year', value: year },
-                    { name: 'Make', value: resolvedMake },
-                    { name: 'Model', value: canonicalModel },
-                    { name: 'Trim', value: trim }
-                  ]
-                });
-              } else {
-                for (const engine of engines) {
-                  compatibilityList.push({
-                    notes: '',
-                    nameValueList: [
-                      { name: 'Year', value: year },
-                      { name: 'Make', value: resolvedMake },
-                      { name: 'Model', value: canonicalModel },
-                      { name: 'Trim', value: trim },
-                      { name: 'Engine', value: engine }
-                    ]
-                  });
-                }
+          let allCombinations = [];
+          for (const trim of trims) {
+            const engines = await fetchCompatValues(token, 'Engine', [
+              { name: 'Make', value: resolvedMake },
+              { name: 'Model', value: canonicalModel },
+              { name: 'Year', value: year },
+              { name: 'Trim', value: trim }
+            ]);
+
+            if (engines.length === 0) {
+              allCombinations.push({ trim, engine: '' });
+            } else {
+              for (const engine of engines) {
+                allCombinations.push({ trim, engine });
               }
             }
           }
+
+          let filteredCombinations = allCombinations;
+
+          // Process Trims
+          if (hasSpecificTrims) {
+            filteredCombinations = filteredCombinations.filter(c => 
+               aiSuggested.some(suggested => {
+                 if (!suggested || typeof suggested !== 'string') return false;
+                 const escaped = suggested.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s*');
+                 return new RegExp(`\\b${escaped}\\b`, 'i').test(`${c.trim} ${c.engine}`);
+               })
+            );
+          } else if (hasExcludedTrims) {
+            filteredCombinations = filteredCombinations.filter(c => 
+               !aiExcluded.some(excluded => {
+                 if (!excluded || typeof excluded !== 'string') return false;
+                 const escaped = excluded.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s*');
+                 return new RegExp(`\\b${escaped}\\b`, 'i').test(`${c.trim} ${c.engine}`);
+               })
+            );
+          }
+
+          // Process Engines
+          if (hasSpecificEngines) {
+            filteredCombinations = filteredCombinations.filter(c => 
+               aiSuggestedEngines.some(suggested => {
+                 if (!suggested || typeof suggested !== 'string') return false;
+                 const escaped = suggested.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s*');
+                 return new RegExp(`\\b${escaped}\\b`, 'i').test(`${c.trim} ${c.engine}`);
+               })
+            );
+          } else if (hasExcludedEngines) {
+            filteredCombinations = filteredCombinations.filter(c => 
+               !aiExcludedEngines.some(excluded => {
+                 if (!excluded || typeof excluded !== 'string') return false;
+                 const escaped = excluded.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s*');
+                 return new RegExp(`\\b${escaped}\\b`, 'i').test(`${c.trim} ${c.engine}`);
+               })
+            );
+          }
+
+          for (const combo of filteredCombinations) {
+            const nameValueList = [
+              { name: 'Year', value: year },
+              { name: 'Make', value: resolvedMake },
+              { name: 'Model', value: canonicalModel },
+              { name: 'Trim', value: combo.trim }
+            ];
+            if (combo.engine) nameValueList.push({ name: 'Engine', value: combo.engine });
+            compatibilityList.push({ notes: '', nameValueList });
+          }
+        }
+
+        if (compatibilityList.length === 0) {
+          itemResult.status = 'needs_manual';
+          itemResult.failureReason = `AI suggested specific trims/engines, but none matched eBay's available options for ${resolvedMake} ${canonicalModel} (${resolvedYears.join(',')})`;
+          counts.needsManualCount += 1;
+          counts.processedCount += 1;
+          await saveAutoCompatBatchItem(batchId, itemResult);
+          await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+            needsManualCount: counts.needsManualCount,
+            processedCount: counts.processedCount
+          });
+          continue;
         }
 
         itemResult.compatibilityList = compatibilityList;
@@ -496,7 +587,7 @@ export async function processAutoCompatibilityBatch(batchId) {
       }
 
       counts.processedCount += 1;
-      await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
+      await saveAutoCompatBatchItem(batchId, itemResult);
       await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
         processedCount: counts.processedCount,
         successCount: counts.successCount,
@@ -11665,7 +11756,12 @@ const fuzzyMatchModel = (aiModel, options) => {
   if (!aiModel || !options?.length) return null;
   if (options.includes(aiModel)) return aiModel;
   const normAi = normModel(aiModel);
-  return options.find(opt => normModel(opt) === normAi) || null;
+  const exactMatch = options.find(opt => normModel(opt) === normAi);
+  if (exactMatch) return exactMatch;
+  return options.find(opt => {
+    const normalizedOption = normModel(opt);
+    return normalizedOption.includes(normAi) || normAi.includes(normalizedOption);
+  }) || null;
 };
 
 // Lazy OpenAI singleton for auto-compat (reuses the fitment key)
@@ -11707,6 +11803,10 @@ Return ONLY a valid JSON array (no markdown, no explanation) where each object h
 - "model": string (e.g. "Camry")
 - "startYear": string or null (e.g. "2010")
 - "endYear": string or null (same as startYear if only one year)
+- "suggestedTrims": array of strings (e.g. ["XLE", "XSE"]). Specific trim levels explicitly mentioned as COMPATIBLE in the title and description. Do NOT include trims that are explicitly excluded.
+- "excludedTrims": array of strings (e.g. ["LE", "Limited"]). Specific trim levels explicitly mentioned as NOT COMPATIBLE or EXCLUDED (e.g., using words like "except", "not", "exclude", "does not fit").
+- "suggestedEngines": array of strings (e.g. ["2.0L", "2.5L", "3.3L"]). Specific engines explicitly mentioned as COMPATIBLE in the title and description. Do NOT include engines that are explicitly excluded.
+- "excludedEngines": array of strings (e.g. ["1.6L"]). Specific engines explicitly mentioned as NOT COMPATIBLE or EXCLUDED.
 
 Rules:
 - If a year range is EXPLICITLY stated like "2008-2013", use startYear="2008" endYear="2013"
@@ -11717,29 +11817,32 @@ Rules:
 - Use the most specific model name mentioned (e.g. "F-150" not just "F-Series")
 - If the description lists a compatibility/fitment table, extract all entries from it
 
-Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013"},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null}]`;
+Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013","suggestedTrims":[],"excludedTrims":[],"suggestedEngines":[],"excludedEngines":[]},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null,"suggestedTrims":["XLE"],"excludedTrims":["LE"],"suggestedEngines":["2.5L"],"excludedEngines":["3.5L"]}]`;
 
   const completion = await getAutoOpenAI().chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [{ role: 'user', content: prompt }],
     temperature: 0,
-    max_tokens: 500
+    max_tokens: 3000
   });
   const raw = completion.choices[0]?.message?.content?.trim() || '[]';
-  const cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+  let cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+  const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+  if (arrayMatch) cleaned = arrayMatch[0];
+
   let allFitments = [];
   try {
     allFitments = JSON.parse(cleaned);
     if (!Array.isArray(allFitments)) allFitments = [];
   } catch { allFitments = []; }
 
-  if (allFitments.length === 0) return { make: null, model: null, startYear: null, endYear: null, allFitments: [] };
+  if (allFitments.length === 0) return { make: null, model: null, startYear: null, endYear: null, suggestedTrims: [], excludedTrims: [], suggestedEngines: [], excludedEngines: [], allFitments: [] };
   const best = allFitments.reduce((prev, curr) => {
     const prevGap = Number(prev.endYear) - Number(prev.startYear);
     const currGap = Number(curr.endYear) - Number(curr.startYear);
     return currGap > prevGap ? curr : prev;
   });
-  return { make: best.make, model: best.model, startYear: best.startYear, endYear: best.endYear, allFitments };
+  return { make: best.make, model: best.model, startYear: best.startYear, endYear: best.endYear, suggestedTrims: best.suggestedTrims || [], excludedTrims: best.excludedTrims || [], suggestedEngines: best.suggestedEngines || [], excludedEngines: best.excludedEngines || [], allFitments };
 }
 
 // Helper: fetch eBay compatibility property values (reuses the /compatibility/values logic)
@@ -11858,9 +11961,21 @@ router.get('/auto-compatibility-status/:batchId', requireAuth, async (req, res) 
         .select('-compatibilityList')
         .lean();
       // Backward compat: old batches stored items[] embedded in the batch document
-      items = newItems.length > 0 ? newItems : (batch.items || []).map(({ compatibilityList, ...rest }) => rest);
+      items = newItems.length > 0
+        ? dedupeAutoCompatItems(newItems)
+        : dedupeAutoCompatItems((batch.items || []).map(({ compatibilityList, ...rest }) => rest));
     }
-    res.json({ ...batch, items });
+    const dedupedCounts = summarizeAutoCompatItems(items);
+    res.json({
+      ...batch,
+      items,
+      processedCount: items.length > 0 ? dedupedCounts.processedCount : batch.processedCount,
+      successCount: items.length > 0 ? dedupedCounts.successCount : batch.successCount,
+      warningCount: items.length > 0 ? dedupedCounts.warningCount : batch.warningCount,
+      needsManualCount: items.length > 0 ? dedupedCounts.needsManualCount : batch.needsManualCount,
+      ebayErrorCount: items.length > 0 ? dedupedCounts.ebayErrorCount : batch.ebayErrorCount,
+      aiFailedCount: items.length > 0 ? dedupedCounts.aiFailedCount : batch.aiFailedCount,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -11877,8 +11992,18 @@ router.get('/auto-compatibility-batch/:batchId', requireAuth, async (req, res) =
     ]);
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
     // Backward compat: old batches stored items[] embedded in the batch document
-    const items = newItems.length > 0 ? newItems : (batch.items || []);
-    res.json({ ...batch, items });
+    const items = newItems.length > 0 ? dedupeAutoCompatItems(newItems) : dedupeAutoCompatItems(batch.items || []);
+    const dedupedCounts = summarizeAutoCompatItems(items);
+    res.json({
+      ...batch,
+      items,
+      processedCount: items.length > 0 ? dedupedCounts.processedCount : batch.processedCount,
+      successCount: items.length > 0 ? dedupedCounts.successCount : batch.successCount,
+      warningCount: items.length > 0 ? dedupedCounts.warningCount : batch.warningCount,
+      needsManualCount: items.length > 0 ? dedupedCounts.needsManualCount : batch.needsManualCount,
+      ebayErrorCount: items.length > 0 ? dedupedCounts.ebayErrorCount : batch.ebayErrorCount,
+      aiFailedCount: items.length > 0 ? dedupedCounts.aiFailedCount : batch.aiFailedCount,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
