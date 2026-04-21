@@ -1,6 +1,12 @@
 .env
 .env.test
 .env.prod
+.env.local
+.env.production
+.env.*.local
 node_modules
 scripts
 dist
+logs/
+*.log
+.DS_Store
