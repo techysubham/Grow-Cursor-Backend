@@ -973,135 +973,160 @@ router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('Legacy
       itemMatch['lineItems.legacyItemId'] = normalizedLegacyItemId;
     }
 
-    const groupedRows = await Order.aggregate([
-      { $match: match },
-      { $unwind: '$lineItems' },
-      { $match: itemMatch },
-      {
-        $lookup: {
-          from: 'sellers',
-          localField: 'seller',
-          foreignField: '_id',
-          as: 'sellerInfo'
-        }
-      },
-      {
-        $unwind: {
-          path: '$sellerInfo',
-          preserveNullAndEmptyArrays: true
-        }
-      },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'sellerInfo.user',
-          foreignField: '_id',
-          as: 'userInfo'
-        }
-      },
-      {
-        $unwind: {
-          path: '$userInfo',
-          preserveNullAndEmptyArrays: true
-        }
-      },
-      {
-        $project: {
-          legacyItemId: '$lineItems.legacyItemId',
-          productTitle: { $ifNull: ['$lineItems.title', '$productName'] },
-          sellerId: '$seller',
-          sellerUsername: { $ifNull: ['$userInfo.username', 'Unknown Seller'] },
-          isCancelled: {
-            $or: [
-              { $in: ['$cancelState', ORDER_CANCELLATION_STATES] },
-              { $in: ['$cancelStatus.cancelState', ORDER_CANCELLATION_STATES] }
-            ]
-          },
-          isPartiallyRefunded: { $eq: ['$orderPaymentStatus', 'PARTIALLY_REFUNDED'] },
-          isFullyRefunded: { $eq: ['$orderPaymentStatus', 'FULLY_REFUNDED'] }
-        }
-      },
-      {
-        $group: {
-          _id: {
-            legacyItemId: '$legacyItemId',
-            sellerId: '$sellerId',
-            sellerUsername: '$sellerUsername'
-          },
-          totalOrders: { $sum: 1 },
-          cancelledOrders: {
-            $sum: {
-              $cond: ['$isCancelled', 1, 0]
+    const [groupedRows, overallOrderCounts] = await Promise.all([
+      Order.aggregate([
+        { $match: match },
+        { $unwind: '$lineItems' },
+        { $match: itemMatch },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: 'seller',
+            foreignField: '_id',
+            as: 'sellerInfo'
+          }
+        },
+        {
+          $unwind: {
+            path: '$sellerInfo',
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'sellerInfo.user',
+            foreignField: '_id',
+            as: 'userInfo'
+          }
+        },
+        {
+          $unwind: {
+            path: '$userInfo',
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $project: {
+            orderId: '$orderId',
+            legacyItemId: '$lineItems.legacyItemId',
+            productTitle: { $ifNull: ['$lineItems.title', '$productName'] },
+            sellerId: '$seller',
+            sellerUsername: { $ifNull: ['$userInfo.username', 'Unknown Seller'] },
+            isCancelled: {
+              $or: [
+                { $in: ['$cancelState', ORDER_CANCELLATION_STATES] },
+                { $in: ['$cancelStatus.cancelState', ORDER_CANCELLATION_STATES] }
+              ]
+            },
+            isPartiallyRefunded: { $eq: ['$orderPaymentStatus', 'PARTIALLY_REFUNDED'] },
+            isFullyRefunded: { $eq: ['$orderPaymentStatus', 'FULLY_REFUNDED'] }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              orderId: '$orderId',
+              legacyItemId: '$legacyItemId',
+              sellerId: '$sellerId',
+              sellerUsername: '$sellerUsername'
+            },
+            productTitle: {
+              $first: '$productTitle'
+            },
+            isCancelled: {
+              $max: { $cond: ['$isCancelled', 1, 0] }
+            },
+            isPartiallyRefunded: {
+              $max: { $cond: ['$isPartiallyRefunded', 1, 0] }
+            },
+            isFullyRefunded: {
+              $max: { $cond: ['$isFullyRefunded', 1, 0] }
             }
-          },
-          partiallyRefundedOrders: {
-            $sum: {
-              $cond: ['$isPartiallyRefunded', 1, 0]
-            }
-          },
-          fullyRefundedOrders: {
-            $sum: {
-              $cond: ['$isFullyRefunded', 1, 0]
-            }
-          },
-          productTitles: { $push: '$productTitle' }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          legacyItemId: '$_id.legacyItemId',
-          sellerId: '$_id.sellerId',
-          sellerUsername: '$_id.sellerUsername',
-          totalOrders: 1,
-          cancelledOrders: 1,
-          partiallyRefundedOrders: 1,
-          fullyRefundedOrders: 1,
-          productTitle: {
-            $let: {
-              vars: {
-                titles: {
-                  $filter: {
-                    input: '$productTitles',
-                    as: 'title',
-                    cond: {
-                      $and: [
-                        { $ne: ['$$title', null] },
-                        { $ne: ['$$title', ''] }
-                      ]
+          }
+        },
+        {
+          $group: {
+            _id: {
+              legacyItemId: '$_id.legacyItemId',
+              sellerId: '$_id.sellerId',
+              sellerUsername: '$_id.sellerUsername'
+            },
+            totalOrders: { $sum: 1 },
+            cancelledOrders: { $sum: '$isCancelled' },
+            partiallyRefundedOrders: { $sum: '$isPartiallyRefunded' },
+            fullyRefundedOrders: { $sum: '$isFullyRefunded' },
+            productTitles: { $push: '$productTitle' }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            legacyItemId: '$_id.legacyItemId',
+            sellerId: '$_id.sellerId',
+            sellerUsername: '$_id.sellerUsername',
+            totalOrders: 1,
+            cancelledOrders: 1,
+            partiallyRefundedOrders: 1,
+            fullyRefundedOrders: 1,
+            productTitle: {
+              $let: {
+                vars: {
+                  titles: {
+                    $filter: {
+                      input: '$productTitles',
+                      as: 'title',
+                      cond: {
+                        $and: [
+                          { $ne: ['$$title', null] },
+                          { $ne: ['$$title', ''] }
+                        ]
+                      }
                     }
                   }
+                },
+                in: {
+                  $ifNull: [
+                    { $arrayElemAt: ['$$titles', 0] },
+                    ''
+                  ]
                 }
-              },
-              in: {
-                $ifNull: [
-                  { $arrayElemAt: ['$$titles', 0] },
-                  ''
-                ]
               }
             }
           }
+        },
+        {
+          $sort: {
+            legacyItemId: 1,
+            totalOrders: -1,
+            sellerUsername: 1
+          }
         }
-      },
-      {
-        $sort: {
-          legacyItemId: 1,
-          totalOrders: -1,
-          sellerUsername: 1
+      ]),
+      Order.aggregate([
+        { $match: match },
+        { $unwind: '$lineItems' },
+        { $match: itemMatch },
+        {
+          $group: {
+            _id: '$orderId'
+          }
+        },
+        {
+          $count: 'totalOrders'
         }
-      }
+      ])
     ]);
 
     const itemMap = new Map();
     const overallTotals = {
-      totalOrders: 0,
+      totalOrders: overallOrderCounts[0]?.totalOrders || 0,
       cancelledOrders: 0,
       partiallyRefundedOrders: 0,
       fullyRefundedOrders: 0,
     };
 
     groupedRows.forEach((row) => {
-      overallTotals.totalOrders += row.totalOrders || 0;
       overallTotals.cancelledOrders += row.cancelledOrders || 0;
       overallTotals.partiallyRefundedOrders += row.partiallyRefundedOrders || 0;
       overallTotals.fullyRefundedOrders += row.fullyRefundedOrders || 0;
