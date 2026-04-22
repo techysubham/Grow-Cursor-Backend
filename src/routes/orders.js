@@ -25,6 +25,7 @@ const SNAD_RETURN_REASONS = [
   'DOES_NOT_FIT'
 ];
 const ORDER_CANCELLATION_STATES = ['CANCEL_REQUESTED', 'IN_PROGRESS', 'CANCELED', 'CANCELLED'];
+const FINAL_CANCELLED_STATES = ['CANCELED', 'CANCELLED'];
 
 function getPtDateString(date = new Date()) {
   const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -948,6 +949,8 @@ router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('Legacy
       startDate,
       endDate,
       sellerId,
+      paymentStatus,
+      cancelledFilter,
       excludeClient = 'true',
       excludeLowValue = 'false'
     } = req.query;
@@ -964,6 +967,38 @@ router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('Legacy
       excludeClient,
       excludeLowValue
     });
+
+    if (paymentStatus) {
+      match.orderPaymentStatus = paymentStatus;
+    }
+
+    if (cancelledFilter === 'cancelled') {
+      match.$and = match.$and || [];
+      match.$and.push({
+        $or: [
+          { cancelState: { $in: FINAL_CANCELLED_STATES } },
+          { 'cancelStatus.cancelState': { $in: FINAL_CANCELLED_STATES } }
+        ]
+      });
+    } else if (cancelledFilter === 'not_cancelled') {
+      match.$and = match.$and || [];
+      match.$and.push(
+        {
+          $or: [
+            { cancelState: { $exists: false } },
+            { cancelState: null },
+            { cancelState: { $nin: FINAL_CANCELLED_STATES } }
+          ]
+        },
+        {
+          $or: [
+            { 'cancelStatus.cancelState': { $exists: false } },
+            { 'cancelStatus.cancelState': null },
+            { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
+          ]
+        }
+      );
+    }
 
     const itemMatch = {
       'lineItems.legacyItemId': { $nin: [null, ''] }
@@ -1015,8 +1050,8 @@ router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('Legacy
             sellerUsername: { $ifNull: ['$userInfo.username', 'Unknown Seller'] },
             isCancelled: {
               $or: [
-                { $in: ['$cancelState', ORDER_CANCELLATION_STATES] },
-                { $in: ['$cancelStatus.cancelState', ORDER_CANCELLATION_STATES] }
+                { $in: ['$cancelState', FINAL_CANCELLED_STATES] },
+                { $in: ['$cancelStatus.cancelState', FINAL_CANCELLED_STATES] }
               ]
             },
             isPartiallyRefunded: { $eq: ['$orderPaymentStatus', 'PARTIALLY_REFUNDED'] },
@@ -1169,6 +1204,8 @@ router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('Legacy
         endDate: endDate || null,
         sellerId: sellerId || null,
         legacyItemId: normalizedLegacyItemId || null,
+        paymentStatus: paymentStatus || null,
+        cancelledFilter: cancelledFilter || null,
       },
       itemCount: items.length,
       ...overallTotals,
