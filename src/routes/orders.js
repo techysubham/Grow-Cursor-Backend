@@ -24,6 +24,7 @@ const SNAD_RETURN_REASONS = [
   'NOT_AUTHENTIC',
   'DOES_NOT_FIT'
 ];
+const ORDER_CANCELLATION_STATES = ['CANCEL_REQUESTED', 'IN_PROGRESS', 'CANCELED', 'CANCELLED'];
 
 function getPtDateString(date = new Date()) {
   const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -937,6 +938,220 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
   } catch (error) {
     console.error('Error fetching daily order statistics:', error);
     res.status(500).json({ error: 'Failed to fetch order statistics' });
+  }
+});
+
+router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('LegacyItemAnalytics'), async (req, res) => {
+  try {
+    const {
+      legacyItemId,
+      startDate,
+      endDate,
+      sellerId,
+      excludeClient = 'true',
+      excludeLowValue = 'false'
+    } = req.query;
+
+    if (!startDate && !endDate) {
+      return res.status(400).json({ error: 'Select a single date or a date range first' });
+    }
+
+    const normalizedLegacyItemId = String(legacyItemId || '').trim();
+    const match = await buildOrdersCrpMatch({
+      startDate,
+      endDate,
+      sellerId,
+      excludeClient,
+      excludeLowValue
+    });
+
+    const itemMatch = {
+      'lineItems.legacyItemId': { $nin: [null, ''] }
+    };
+
+    if (normalizedLegacyItemId) {
+      itemMatch['lineItems.legacyItemId'] = normalizedLegacyItemId;
+    }
+
+    const groupedRows = await Order.aggregate([
+      { $match: match },
+      { $unwind: '$lineItems' },
+      { $match: itemMatch },
+      {
+        $lookup: {
+          from: 'sellers',
+          localField: 'seller',
+          foreignField: '_id',
+          as: 'sellerInfo'
+        }
+      },
+      {
+        $unwind: {
+          path: '$sellerInfo',
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'sellerInfo.user',
+          foreignField: '_id',
+          as: 'userInfo'
+        }
+      },
+      {
+        $unwind: {
+          path: '$userInfo',
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      {
+        $project: {
+          legacyItemId: '$lineItems.legacyItemId',
+          productTitle: { $ifNull: ['$lineItems.title', '$productName'] },
+          sellerId: '$seller',
+          sellerUsername: { $ifNull: ['$userInfo.username', 'Unknown Seller'] },
+          isCancelled: {
+            $or: [
+              { $in: ['$cancelState', ORDER_CANCELLATION_STATES] },
+              { $in: ['$cancelStatus.cancelState', ORDER_CANCELLATION_STATES] }
+            ]
+          },
+          isPartiallyRefunded: { $eq: ['$orderPaymentStatus', 'PARTIALLY_REFUNDED'] },
+          isFullyRefunded: { $eq: ['$orderPaymentStatus', 'FULLY_REFUNDED'] }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            legacyItemId: '$legacyItemId',
+            sellerId: '$sellerId',
+            sellerUsername: '$sellerUsername'
+          },
+          totalOrders: { $sum: 1 },
+          cancelledOrders: {
+            $sum: {
+              $cond: ['$isCancelled', 1, 0]
+            }
+          },
+          partiallyRefundedOrders: {
+            $sum: {
+              $cond: ['$isPartiallyRefunded', 1, 0]
+            }
+          },
+          fullyRefundedOrders: {
+            $sum: {
+              $cond: ['$isFullyRefunded', 1, 0]
+            }
+          },
+          productTitles: { $push: '$productTitle' }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          legacyItemId: '$_id.legacyItemId',
+          sellerId: '$_id.sellerId',
+          sellerUsername: '$_id.sellerUsername',
+          totalOrders: 1,
+          cancelledOrders: 1,
+          partiallyRefundedOrders: 1,
+          fullyRefundedOrders: 1,
+          productTitle: {
+            $let: {
+              vars: {
+                titles: {
+                  $filter: {
+                    input: '$productTitles',
+                    as: 'title',
+                    cond: {
+                      $and: [
+                        { $ne: ['$$title', null] },
+                        { $ne: ['$$title', ''] }
+                      ]
+                    }
+                  }
+                }
+              },
+              in: {
+                $ifNull: [
+                  { $arrayElemAt: ['$$titles', 0] },
+                  ''
+                ]
+              }
+            }
+          }
+        }
+      },
+      {
+        $sort: {
+          legacyItemId: 1,
+          totalOrders: -1,
+          sellerUsername: 1
+        }
+      }
+    ]);
+
+    const itemMap = new Map();
+    const overallTotals = {
+      totalOrders: 0,
+      cancelledOrders: 0,
+      partiallyRefundedOrders: 0,
+      fullyRefundedOrders: 0,
+    };
+
+    groupedRows.forEach((row) => {
+      overallTotals.totalOrders += row.totalOrders || 0;
+      overallTotals.cancelledOrders += row.cancelledOrders || 0;
+      overallTotals.partiallyRefundedOrders += row.partiallyRefundedOrders || 0;
+      overallTotals.fullyRefundedOrders += row.fullyRefundedOrders || 0;
+
+      const existingItem = itemMap.get(row.legacyItemId) || {
+        legacyItemId: row.legacyItemId,
+        productTitle: row.productTitle || '',
+        totalOrders: 0,
+        cancelledOrders: 0,
+        partiallyRefundedOrders: 0,
+        fullyRefundedOrders: 0,
+        sellerCount: 0,
+        sellers: []
+      };
+
+      existingItem.totalOrders += row.totalOrders || 0;
+      existingItem.cancelledOrders += row.cancelledOrders || 0;
+      existingItem.partiallyRefundedOrders += row.partiallyRefundedOrders || 0;
+      existingItem.fullyRefundedOrders += row.fullyRefundedOrders || 0;
+      if (!existingItem.productTitle && row.productTitle) {
+        existingItem.productTitle = row.productTitle;
+      }
+      existingItem.sellers.push(row);
+      existingItem.sellerCount = existingItem.sellers.length;
+
+      itemMap.set(row.legacyItemId, existingItem);
+    });
+
+    const items = Array.from(itemMap.values()).sort((left, right) => {
+      if (right.totalOrders !== left.totalOrders) {
+        return right.totalOrders - left.totalOrders;
+      }
+
+      return left.legacyItemId.localeCompare(right.legacyItemId);
+    });
+
+    res.json({
+      filters: {
+        startDate: startDate || null,
+        endDate: endDate || null,
+        sellerId: sellerId || null,
+        legacyItemId: normalizedLegacyItemId || null,
+      },
+      itemCount: items.length,
+      ...overallTotals,
+      items
+    });
+  } catch (error) {
+    console.error('Error fetching legacy item seller summary:', error);
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to fetch legacy item seller summary' });
   }
 });
 
