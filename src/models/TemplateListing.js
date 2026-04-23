@@ -91,6 +91,14 @@ const templateListingSchema = new mongoose.Schema({
     select: false,
     index: true
   },
+
+  // Original Amazon source price at time of first listing (NOT exported to CSV)
+  // Used to calculate "Actual Profit" in the ASIN Review Modal for duplicate ASINs
+  _amazonSourcePrice: {
+    type: String,
+    default: null,
+    select: false
+  },
   
   // Amazon product link - auto-generated from ASIN
   amazonLink: {
