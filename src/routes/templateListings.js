@@ -453,7 +453,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
       sellerId,
       _asinReference: { $in: asins },
       status: 'active'
-    }).select('+_asinReference').lean();
+    }).select('+_asinReference +_amazonSourcePrice').lean();
     
     const asinInCurrentTemplate = new Map(); // Changed to Map to store full listing data
     const asinInOtherTemplates = new Map();
@@ -510,22 +510,57 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
         // will have the same SKU and should be updateable, not blocked
         if (asinInCurrentTemplate.has(asin)) {
           const existingListing = asinInCurrentTemplate.get(asin);
-
-          // Get existing customFields (already an object from .lean())
           const existingCustomFields = existingListing.customFields || {};
 
-          // Compute future SKU based on current listing count
           const asinCountDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
           const futureSKU = generateSKUWithCount(asin, asinCountDoc?.listingCount || 0);
 
-          // Return existing listing data for editing (no re-fetch)
+          let sourceData = null;
+          let pricingCalculation = null;
+          let freshAmazonSourcePrice = null; // set only when Option B runs
+
+          // Option A: use stored Amazon price (no fetch needed)
+          if (existingListing._amazonSourcePrice) {
+            const storedPrice = existingListing._amazonSourcePrice;
+            const amazonDataForCalc = { asin, price: storedPrice, title: '', brand: '', description: '', images: [], color: '', compatibility: '' };
+            sourceData = { title: '', brand: '', price: storedPrice, description: '', images: [], color: '', compatibility: '' };
+            const configs = await applyFieldConfigs(amazonDataForCalc, template.asinAutomation.fieldConfigs, pricingConfig);
+            pricingCalculation = configs.pricingCalculation;
+            console.log(`[duplicate_updateable] Option A: using stored _amazonSourcePrice for ${asin}`);
+          } else {
+            // Option B: _amazonSourcePrice not stored yet — fetch live from Amazon
+            try {
+              console.log(`[duplicate_updateable] Option B: fetching live Amazon data for ${asin}`);
+              const amazonData = await fetchAmazonData(asin, region);
+              if (amazonData) {
+                sourceData = {
+                  title: amazonData.title || '',
+                  brand: amazonData.brand || '',
+                  price: amazonData.price || '',
+                  description: amazonData.description || '',
+                  images: amazonData.images || [],
+                  color: amazonData.color || '',
+                  compatibility: amazonData.compatibility || ''
+                };
+                freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : null;
+                const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+                pricingCalculation = configs.pricingCalculation;
+              }
+            } catch (fetchErr) {
+              // Non-fatal: chip won't render but the rest of the modal works fine
+              console.warn(`[duplicate_updateable] Option B failed for ${asin}:`, fetchErr.message);
+            }
+          }
+
+          // Return existing listing data for editing (generatedListing = user's current saved data)
+          // _amazonSourcePrice is included so the save endpoint stores it automatically
           const item = {
             id: `preview-${asin}`,
             asin,
             sku: futureSKU,
             status: 'duplicate_updateable',
-
-            // Return existing data as generatedListing so modal can display it
+            sourceData,
+            pricingCalculation,
             generatedListing: {
               title: existingListing.title,
               description: existingListing.description,
@@ -539,9 +574,10 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
               customLabel: futureSKU,
               customFields: existingCustomFields,
               _asinReference: asin,
-              _existingListingId: existingListing._id // Track which listing to update
+              _existingListingId: existingListing._id,
+              // Pass fresh Option B price through so the save endpoint can persist it
+              ...(freshAmazonSourcePrice ? { _amazonSourcePrice: freshAmazonSourcePrice } : {})
             },
-
             warnings: [
               `This ASIN already exists in this template.`,
               existingListing.duplicateCount > 0
@@ -554,6 +590,8 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
           return;
         }
+
+
         
         // Check for SKU conflicts (only for new ASINs, not duplicates)
         const sku = generateSKUFromASIN(asin);
@@ -626,7 +664,8 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             ...mergedCoreFields,
             customLabel: finalSKU,
             customFields,
-            _asinReference: asin
+            _asinReference: asin,
+            _amazonSourcePrice: amazonData.price ? String(amazonData.price) : null
           },
           pricingCalculation,
           warnings,
@@ -765,13 +804,44 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
         // Duplicate in current template — updateable
         if (asinInCurrentTemplate.has(asin)) {
           const existingListing = asinInCurrentTemplate.get(asin);
-          // Compute future SKU based on current listing count
-          const asinCountDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
-          const futureSKU = generateSKUWithCount(asin, asinCountDoc?.listingCount || 0);
+          
+          // Look up ASIN in the directory to attach sourceData and compute pricingCalculation
+          const doc = await AsinDirectory.findOne({ asin }).lean();
+          const futureSKU = generateSKUWithCount(asin, doc?.listingCount || 0);
+
+          let sourceData = null;
+          let pricingCalculation = null;
+
+          if (doc) {
+            sourceData = {
+              title: doc.title || '',
+              brand: doc.brand || '',
+              price: doc.price || '',
+              description: doc.description || '',
+              images: doc.images || [],
+              color: doc.color || '',
+              compatibility: doc.compatibility || ''
+            };
+            
+            const amazonData = {
+              asin,
+              ...sourceData,
+              model: doc.model || '',
+              material: doc.material || '',
+              specialFeatures: doc.specialFeatures || '',
+              size: doc.size || ''
+            };
+            
+            const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+            pricingCalculation = configs.pricingCalculation;
+          }
+
           const item = {
             id: `preview-${asin}`, asin,
             sku: futureSKU,
             status: 'duplicate_updateable',
+            sourceData,
+            pricingCalculation,
             generatedListing: {
               title: existingListing.title,
               description: existingListing.description,
@@ -2500,6 +2570,10 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             scheduleTime: '',
             updatedAt: Date.now()
           };
+          // Persist fresh Amazon source price if supplied (Option B ran) so next duplication uses Option A
+          if (listingData._amazonSourcePrice) {
+            updateData._amazonSourcePrice = listingData._amazonSourcePrice;
+          }
           const overwritableFields = ['title', 'description', 'startPrice', 'quantity', 'itemPhotoUrl', 'conditionId', 'format', 'duration', 'location'];
           for (const field of overwritableFields) {
             if (listingData[field] !== undefined && listingData[field] !== null && listingData[field] !== '') {
