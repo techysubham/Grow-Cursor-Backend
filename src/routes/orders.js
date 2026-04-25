@@ -951,6 +951,7 @@ router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('Legacy
       sellerId,
       paymentStatus,
       cancelledFilter,
+      ebayMotors = 'false',
       excludeClient = 'true',
       excludeLowValue = 'false'
     } = req.query;
@@ -1006,6 +1007,10 @@ router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('Legacy
 
     if (normalizedLegacyItemId) {
       itemMatch['lineItems.legacyItemId'] = normalizedLegacyItemId;
+    }
+
+    if (ebayMotors === 'true') {
+      itemMatch['lineItems.listingMarketplaceId'] = 'EBAY_MOTORS_US';
     }
 
     const [groupedRows, overallOrderCounts] = await Promise.all([
@@ -1206,6 +1211,7 @@ router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('Legacy
         legacyItemId: normalizedLegacyItemId || null,
         paymentStatus: paymentStatus || null,
         cancelledFilter: cancelledFilter || null,
+        ebayMotors: ebayMotors === 'true',
       },
       itemCount: items.length,
       ...overallTotals,
