@@ -7232,7 +7232,7 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
 // 4. GET THREADS (With Pagination & Search)
 router.get('/chat/threads', requireAuth, async (req, res) => {
   try {
-    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false' } = req.query;
+    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false', dateFrom = '', dateTo = '' } = req.query;
 
 
     const pageNum = parseInt(page);
@@ -7434,11 +7434,11 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       });
     }
 
-    // 5.4 FILTER BY UNREAD STATUS (NEW)
+    // 5.4 FILTER BY READ/UNREAD STATUS
     if (showUnreadOnly === 'true') {
-      pipeline.push({
-        $match: { unreadCount: { $gt: 0 } }
-      });
+      pipeline.push({ $match: { unreadCount: { $gt: 0 } } });
+    } else if (showUnreadOnly === 'readOnly') {
+      pipeline.push({ $match: { unreadCount: 0 } });
     }
 
     // 5.5 FILTER OUT RESOLVED CONVERSATIONS (Lookup ConversationMeta)
@@ -7495,6 +7495,19 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         ]
       }
     });
+
+    // 5.6 FILTER BY DATE RANGE — date strings are interpreted as UTC calendar days
+    // matching the UTC storage format of messageDate in the DB.
+    if (dateFrom || dateTo) {
+      const dateMatch = {};
+      if (dateFrom) {
+        dateMatch.$gte = new Date(`${dateFrom}T00:00:00.000Z`);
+      }
+      if (dateTo) {
+        dateMatch.$lte = new Date(`${dateTo}T23:59:59.999Z`);
+      }
+      pipeline.push({ $match: { lastDate: dateMatch } });
+    }
 
     // 6. SEARCH FILTER (Applied AFTER grouping so we search distinct threads)
     if (search && search.trim() !== '') {
