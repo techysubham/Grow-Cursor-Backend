@@ -5946,6 +5946,26 @@ router.patch('/orders/:orderId/dismiss-arrival', requireAuth, async (req, res) =
 
 // ===== RETURN REQUESTS ENDPOINTS =====
 
+// Get all distinct return reasons stored in DB (lightweight distinct query)
+router.get('/return-reasons', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const reasons = await Return.distinct('returnReason', { returnReason: { $exists: true, $nin: [null, ''] } });
+    res.json(reasons.filter(r => r && r.trim()).sort());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all distinct return statuses stored in DB (lightweight distinct query)
+router.get('/return-statuses', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const statuses = await Return.distinct('returnStatus', { returnStatus: { $exists: true, $nin: [null, ''] } });
+    res.json(statuses.filter(s => s && s.trim()).sort());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Fetch return requests from eBay Post-Order API and store in DB
 
 // Fetch return requests from eBay Post-Order API and store in DB
@@ -6172,18 +6192,12 @@ router.get('/stored-returns', async (req, res) => {
       }
     }
 
-    // Urgent filter - response due within next 2 days (48 hours) to match the URGENT chip
+    // Urgent filter: status must be RETURN_REQUESTED and response due within 48 hours (or already overdue)
     if (urgentOnly === 'true') {
       const now = new Date();
-      // Calculate 48 hours (2 days) from now - matches isResponseUrgent in frontend
-      const in48Hours = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
-      // Show entries where response is due between now and 48 hours from now
-      // Also include entries that are already overdue (responseDate < now)
-      query.responseDate = {
-        $lte: in48Hours
-      };
-      // Exclude CLOSED returns since they don't show URGENT chip
-      query.returnStatus = { $ne: 'CLOSED' };
+      const in48Hours = new Date(now.getTime() + 48 * 60 * 60 * 1000);
+      query.returnStatus = 'RETURN_REQUESTED';
+      query.responseDate = { $lte: in48Hours };
     }
 
     const pageNum = parseInt(page);
