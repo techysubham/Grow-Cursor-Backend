@@ -6686,13 +6686,22 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
 
 // Get stored Payment Disputes from database
 router.get('/stored-payment-disputes', async (req, res) => {
-  const { sellerId, status, reason, limit = 200 } = req.query;
+  const { sellerId, status, reason, limit = 200, startDate, endDate, dateField = 'openDate' } = req.query;
 
   try {
     let query = {};
     if (sellerId) query.seller = sellerId;
     if (status) query.paymentDisputeStatus = status;
     if (reason) query.reason = reason;
+
+    // Date range filter — whitelist allowed fields to prevent injection
+    const allowedDateFields = ['openDate', 'closedDate'];
+    const resolvedDateField = allowedDateFields.includes(dateField) ? dateField : 'openDate';
+    if (startDate || endDate) {
+      query[resolvedDateField] = {};
+      if (startDate) query[resolvedDateField].$gte = new Date(startDate + 'T00:00:00.000Z');
+      if (endDate)   query[resolvedDateField].$lte = new Date(endDate   + 'T23:59:59.999Z');
+    }
 
     const disputes = await PaymentDispute.find(query)
       .populate({
