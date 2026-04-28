@@ -9652,158 +9652,286 @@ router.get('/conversation-meta/single', requireAuth, async (req, res) => {
 
 // --- NEW ROUTE 3: GET MANAGEMENT LIST (Called from ConversationManagementPage) ---
 // 
-router.get('/conversation-management/list', requireAuth, async (req, res) => {
-  const { status } = req.query;
+function parseConversationManagementDateRange(query) {
+  const singleDate = query.creationDate || query.date;
+  const dateFrom = query.creationDateFrom || query.dateFrom || singleDate;
+  const dateTo = query.creationDateTo || query.dateTo || singleDate;
 
-  try {
-    let query = {};
-    if (status) {
-      const statuses = String(status)
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean);
-      if (statuses.length === 1) query.status = statuses[0];
-      else if (statuses.length > 1) query.status = { $in: statuses };
-    }
+  const range = {};
+  if (dateFrom) {
+    const { start } = getPTDayBoundsUTC(dateFrom);
+    range.$gte = start;
+  }
+  if (dateTo) {
+    const { end } = getPTDayBoundsUTC(dateTo);
+    range.$lte = end;
+  }
+  return range;
+}
 
-    const list = await ConversationMeta.aggregate([
-      { $match: query },
-      { $sort: { updatedAt: -1 } },
+function buildConversationManagementBasePipeline(query = {}) {
+  const {
+    status,
+    sellerId,
+    caseStatus,
+    pickedUpBy,
+    about,
+    search
+  } = query;
 
-      // 1. LOOKUP SELLER (ConversationMeta -> Seller)
-      {
-        $lookup: {
-          from: 'sellers',
-          localField: 'seller',
-          foreignField: '_id',
-          as: 'sellerDoc'
-        }
-      },
-      // Unwind allows us to access the fields inside sellerDoc directly
-      { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+  const metaMatch = {};
+  if (status) {
+    const statuses = String(status)
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (statuses.length === 1) metaMatch.status = statuses[0];
+    else if (statuses.length > 1) metaMatch.status = { $in: statuses };
+  }
+  if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+    metaMatch.seller = new mongoose.Types.ObjectId(sellerId);
+  }
+  if (caseStatus) {
+    const caseStatuses = String(caseStatus)
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (caseStatuses.length === 1) metaMatch.caseStatus = caseStatuses[0];
+    else if (caseStatuses.length > 1) metaMatch.caseStatus = { $in: caseStatuses };
+  }
+  if (pickedUpBy === '__UNASSIGNED__') {
+    metaMatch.$or = [
+      { pickedUpBy: '' },
+      { pickedUpBy: null },
+      { pickedUpBy: { $exists: false } }
+    ];
+  } else if (pickedUpBy) {
+    metaMatch.pickedUpBy = pickedUpBy;
+  }
 
-      // 2. LOOKUP USER (Seller -> User) - THIS WAS MISSING
-      {
-        $lookup: {
-          from: 'users', // The collection name for 'User' model is usually lowercase plural 'users'
-          localField: 'sellerDoc.user',
-          foreignField: '_id',
-          as: 'userDoc'
-        }
-      },
-      { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
-
-      // 3. LOOKUP ORDER (To get Buyer Real Name)
-      {
-        $lookup: {
-          from: 'orders',
-          localField: 'orderId',
-          foreignField: 'orderId',
-          as: 'orderInfo'
-        }
-      },
-
-      // 4. PROJECT FINAL SHAPE
-      {
-        $project: {
-          _id: 1,
-          sellerId: '$sellerDoc._id',
-          // NOW WE PULL USERNAME FROM THE USER DOC
-          sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
-          buyerUsername: 1,
-          orderId: 1,
-          itemId: 1,
-          category: 1,
-          caseStatus: 1,
-          status: 1,
-          notes: 1,
-          pickedUpBy: 1,
-          updatedAt: 1,
-          buyerName: {
-            $ifNull: [
-              { $arrayElemAt: ["$orderInfo.buyer.buyerRegistrationAddress.fullName", 0] },
-              "$buyerUsername"
-            ]
-          }
-        }
-      },
-
-      // 5. LOOKUP MESSAGE TIMESTAMPS FOR SLA / REPLY TIMERS
-      {
-        $lookup: {
-          from: 'messages',
-          let: {
-            sellerId: '$sellerId',
-            metaOrderId: '$orderId',
-            metaBuyerUsername: '$buyerUsername',
-            metaItemId: '$itemId'
-          },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $and: [
-                    { $eq: ['$seller', '$$sellerId'] },
-                    {
-                      $cond: [
-                        { $ne: ['$$metaOrderId', null] },
-                        { $eq: ['$orderId', '$$metaOrderId'] },
-                        {
-                          $and: [
-                            { $eq: ['$buyerUsername', '$$metaBuyerUsername'] },
-                            { $eq: ['$itemId', '$$metaItemId'] },
-                            { $eq: [{ $ifNull: ['$orderId', null] }, null] }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              }
-            },
-            {
-              $group: {
-                _id: null,
-                lastBuyerMessageAt: {
-                  $max: {
-                    $cond: [{ $eq: ['$sender', 'BUYER'] }, '$messageDate', null]
-                  }
-                },
-                lastSellerMessageAt: {
-                  $max: {
-                    $cond: [{ $eq: ['$sender', 'SELLER'] }, '$messageDate', null]
-                  }
-                }
-              }
-            },
-            {
-              $project: {
-                _id: 0,
-                lastBuyerMessageAt: 1,
-                lastSellerMessageAt: 1
-              }
-            }
-          ],
-          as: 'messageTimes'
-        }
-      },
-      {
-        $unwind: {
-          path: '$messageTimes',
-          preserveNullAndEmptyArrays: true
-        }
-      },
-      {
-        $addFields: {
-          lastBuyerMessageAt: '$messageTimes.lastBuyerMessageAt',
-          lastSellerMessageAt: '$messageTimes.lastSellerMessageAt'
-        }
-      },
-      {
-        $project: {
-          messageTimes: 0
+  const pipeline = [
+    { $match: metaMatch },
+    { $sort: { updatedAt: -1 } },
+    {
+      $lookup: {
+        from: 'sellers',
+        localField: 'seller',
+        foreignField: '_id',
+        as: 'sellerDoc'
+      }
+    },
+    { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: 'users',
+        localField: 'sellerDoc.user',
+        foreignField: '_id',
+        as: 'userDoc'
+      }
+    },
+    { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: 'orders',
+        localField: 'orderId',
+        foreignField: 'orderId',
+        as: 'orderInfo'
+      }
+    },
+    {
+      $project: {
+        _id: 1,
+        sellerId: '$sellerDoc._id',
+        sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
+        buyerUsername: 1,
+        orderId: 1,
+        itemId: 1,
+        category: 1,
+        caseStatus: 1,
+        status: 1,
+        notes: 1,
+        pickedUpBy: 1,
+        updatedAt: 1,
+        creationDate: {
+          $ifNull: [
+            { $arrayElemAt: ['$orderInfo.creationDate', 0] },
+            null
+          ]
+        },
+        buyerName: {
+          $ifNull: [
+            { $arrayElemAt: ['$orderInfo.buyer.buyerRegistrationAddress.fullName', 0] },
+            '$buyerUsername'
+          ]
         }
       }
+    }
+  ];
+
+  const postLookupMatch = {};
+  if (about) {
+    const categories = String(about)
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (categories.length === 1) postLookupMatch.category = categories[0];
+    else if (categories.length > 1) postLookupMatch.category = { $in: categories };
+  }
+
+  const creationDateRange = parseConversationManagementDateRange(query);
+  if (creationDateRange.$gte || creationDateRange.$lte) {
+    postLookupMatch.creationDate = creationDateRange;
+  }
+
+  if (search && search.trim()) {
+    const regex = new RegExp(search.trim(), 'i');
+    postLookupMatch.$or = [
+      { orderId: regex },
+      { buyerUsername: regex },
+      { buyerName: regex },
+      { itemId: regex },
+      { sellerName: regex }
+    ];
+  }
+
+  if (Object.keys(postLookupMatch).length) {
+    pipeline.push({ $match: postLookupMatch });
+  }
+
+  return pipeline;
+}
+
+function buildConversationManagementMessageStages() {
+  return [
+    {
+      $lookup: {
+        from: 'messages',
+        let: {
+          sellerId: '$sellerId',
+          metaOrderId: '$orderId',
+          metaBuyerUsername: '$buyerUsername',
+          metaItemId: '$itemId'
+        },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ['$seller', '$$sellerId'] },
+                  {
+                    $cond: [
+                      { $ne: ['$$metaOrderId', null] },
+                      { $eq: ['$orderId', '$$metaOrderId'] },
+                      {
+                        $and: [
+                          { $eq: ['$buyerUsername', '$$metaBuyerUsername'] },
+                          { $eq: ['$itemId', '$$metaItemId'] },
+                          { $eq: [{ $ifNull: ['$orderId', null] }, null] }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              lastBuyerMessageAt: {
+                $max: {
+                  $cond: [{ $eq: ['$sender', 'BUYER'] }, '$messageDate', null]
+                }
+              },
+              lastSellerMessageAt: {
+                $max: {
+                  $cond: [{ $eq: ['$sender', 'SELLER'] }, '$messageDate', null]
+                }
+              }
+            }
+          },
+          {
+            $project: {
+              _id: 0,
+              lastBuyerMessageAt: 1,
+              lastSellerMessageAt: 1
+            }
+          }
+        ],
+        as: 'messageTimes'
+      }
+    },
+    {
+      $unwind: {
+        path: '$messageTimes',
+        preserveNullAndEmptyArrays: true
+      }
+    },
+    {
+      $addFields: {
+        lastBuyerMessageAt: '$messageTimes.lastBuyerMessageAt',
+        lastSellerMessageAt: '$messageTimes.lastSellerMessageAt'
+      }
+    },
+    {
+      $project: {
+        messageTimes: 0
+      }
+    }
+  ];
+}
+
+router.get('/conversation-management/list', requireAuth, async (req, res) => {
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 250);
+  const skip = (page - 1) * limit;
+
+  try {
+    const basePipeline = buildConversationManagementBasePipeline(req.query);
+    const messageStages = buildConversationManagementMessageStages();
+
+    const [result] = await ConversationMeta.aggregate([
+      ...basePipeline,
+      {
+        $facet: {
+          records: [
+            { $sort: { updatedAt: -1 } },
+            { $skip: skip },
+            { $limit: limit },
+            ...messageStages
+          ],
+          totalCount: [
+            { $count: 'total' }
+          ]
+        }
+      }
+    ]);
+
+    const records = result?.records || [];
+    const total = result?.totalCount?.[0]?.total || 0;
+
+    res.json({
+      records,
+      total,
+      pagination: {
+        page,
+        limit,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+        totalRecords: total
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/conversation-management/export', requireAuth, async (req, res) => {
+  try {
+    const list = await ConversationMeta.aggregate([
+      ...buildConversationManagementBasePipeline(req.query),
+      { $sort: { updatedAt: -1 } },
+      ...buildConversationManagementMessageStages()
     ]);
 
     res.json(list);
