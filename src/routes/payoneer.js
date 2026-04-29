@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import PayoneerRecord from '../models/PayoneerRecord.js';
 import Transaction from '../models/Transaction.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
@@ -31,29 +32,31 @@ router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => 
 
         const query = {};
 
-        // Store Filter
+        // Store Filter (cast to ObjectId so aggregation $match works correctly)
         if (store) {
-            query.store = store;
+            query.store = new mongoose.Types.ObjectId(store);
         }
 
         // Date Filter
+        // Note: new Date("YYYY-MM-DD") parses as UTC midnight — always use setUTCHours
+        // so the end-of-day boundary is also UTC-based, regardless of server timezone.
         if (startDate || endDate) {
             query.paymentDate = {};
             if (startDate) {
-                // Assuming startDate is YYYY-MM-DD
-                query.paymentDate.$gte = new Date(startDate);
+                const start = new Date(startDate);
+                start.setUTCHours(0, 0, 0, 0);
+                query.paymentDate.$gte = start;
             }
             if (endDate) {
-                // Assuming endDate is YYYY-MM-DD, set to end of day
                 const end = new Date(endDate);
-                end.setHours(23, 59, 59, 999);
+                end.setUTCHours(23, 59, 59, 999);
                 query.paymentDate.$lte = end;
             }
         }
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        const [records, totalRecords] = await Promise.all([
+        const [records, totalRecords, totalsAgg] = await Promise.all([
             PayoneerRecord.find(query)
                 .populate({
                     path: 'store',
@@ -67,14 +70,28 @@ router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => 
                 .sort({ paymentDate: -1 })
                 .skip(skip)
                 .limit(parseInt(limit)),
-            PayoneerRecord.countDocuments(query)
+            PayoneerRecord.countDocuments(query),
+            PayoneerRecord.aggregate([
+                { $match: query },
+                {
+                    $group: {
+                        _id: null,
+                        totalAmount: { $sum: '$amount' },
+                        totalBankDeposit: { $sum: '$bankDeposit' }
+                    }
+                }
+            ])
         ]);
+
+        const totals = totalsAgg[0] || { totalAmount: 0, totalBankDeposit: 0 };
 
         res.json({
             records,
             totalRecords,
             totalPages: Math.ceil(totalRecords / parseInt(limit)),
-            currentPage: parseInt(page)
+            currentPage: parseInt(page),
+            totalAmount: totals.totalAmount,
+            totalBankDeposit: totals.totalBankDeposit
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
