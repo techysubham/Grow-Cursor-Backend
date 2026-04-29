@@ -2717,6 +2717,20 @@ router.get('/all-orders-usd', async (req, res) => {
     const totalOrders = await Order.countDocuments(query);
     const totalPages = Math.ceil(totalOrders / limitNum);
 
+    // Raw count: seller + date + marketplace scope only, no refund/cancel/toggle exclusions.
+    // This matches what the Fulfillment Dashboard shows for the same filters.
+    const rawQuery = {};
+    if (sellerId) rawQuery.seller = new mongoose.Types.ObjectId(sellerId);
+    if (startDate || endDate) {
+      rawQuery.dateSold = {};
+      if (startDate) rawQuery.dateSold.$gte = getPTDayBoundsUTC(startDate).start;
+      if (endDate) rawQuery.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
+    }
+    if (searchMarketplace && searchMarketplace !== '') {
+      rawQuery.purchaseMarketplaceId = searchMarketplace === 'EBAY_ENCA' ? 'EBAY_CA' : searchMarketplace;
+    }
+    const rawCount = await Order.countDocuments(rawQuery);
+
     const orders = await Order.find(query)
       .populate({
         path: 'seller',
@@ -2839,7 +2853,7 @@ router.get('/all-orders-usd', async (req, res) => {
       return { name: product?.name || 'Unknown', count: pd.count };
     });
 
-    console.log(`[All Orders USD] Query: ${JSON.stringify(query)}, Page: ${pageNum}/${totalPages}, Found ${orders.length}/${totalOrders} orders`);
+    console.log(`[All Orders USD] Query: ${JSON.stringify(query)}, Page: ${pageNum}/${totalPages}, Found ${orders.length}/${totalOrders} orders (raw: ${rawCount})`);
 
     res.json({
       orders: ordersWithUSD,
@@ -2847,6 +2861,7 @@ router.get('/all-orders-usd', async (req, res) => {
         currentPage: pageNum,
         totalPages,
         totalOrders,
+        rawCount,
         ordersPerPage: limitNum,
         hasNextPage: pageNum < totalPages,
         hasPrevPage: pageNum > 1
