@@ -1,7 +1,20 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import Order from '../models/Order.js';
+import Seller from '../models/Seller.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+
+const EXCLUDED_CLIENT_USERNAME = 'Vergo';
+
+async function getExcludedClientSellerIds() {
+  const sellers = await Seller.find({})
+    .populate('user', 'username')
+    .select('_id user')
+    .lean();
+  return sellers
+    .filter((s) => s.user?.username?.trim().toLowerCase() === EXCLUDED_CLIENT_USERNAME.toLowerCase())
+    .map((s) => s._id);
+}
 
 const router = express.Router();
 
@@ -41,6 +54,7 @@ router.get('/', requireAuth, requirePageAccess('MicroOrders'), async (req, res) 
       date,
       dateFrom,
       dateTo,
+      excludeClient,
       page  = 1,
       limit = 50,
     } = req.query;
@@ -56,6 +70,21 @@ router.get('/', requireAuth, requirePageAccess('MicroOrders'), async (req, res) 
 
     if (seller) {
       match.seller = new mongoose.Types.ObjectId(seller);
+    }
+
+    // Exclude Vergo seller when flag is set
+    if (excludeClient === 'true') {
+      const excludedIds = await getExcludedClientSellerIds();
+      if (excludedIds.length > 0) {
+        if (match.seller) {
+          // If a specific seller is selected and it's the excluded one, return empty
+          if (excludedIds.some((id) => id.equals(match.seller))) {
+            return res.json({ orders: [], totalRecords: 0, totalPages: 0, currentPage: 1, totalCount: 0, totalProfitFake: 0 });
+          }
+        } else {
+          match.seller = { $nin: excludedIds };
+        }
+      }
     }
 
     // ── Date filter on dateSold ──────────────────────────────────────────────
