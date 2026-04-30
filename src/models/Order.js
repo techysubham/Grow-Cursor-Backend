@@ -209,6 +209,7 @@ OrderSchema.index({ seller: 1, creationDate: -1 });
 OrderSchema.index({ seller: 1, lastModifiedDate: -1 });
 OrderSchema.index({ seller: 1, creationDate: -1, lastModifiedDate: -1 }); // Compound index for polling queries
 OrderSchema.index({ dateSold: 1 }); // Index for date range searches
+OrderSchema.index({ subtotal: 1, dateSold: -1 }); // Index for micro-orders range filter + sort
 OrderSchema.index({ cancelState: 1, creationDate: -1 }); // Index for cancelled orders queries
 OrderSchema.index({ policyMessageSent: 1, policyMessageDisabled: 1, policyMessageEligibleAt: 1 }); // Index for policy message processing
 
