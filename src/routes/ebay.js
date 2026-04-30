@@ -2717,6 +2717,52 @@ router.get('/all-orders-usd', async (req, res) => {
     const totalOrders = await Order.countDocuments(query);
     const totalPages = Math.ceil(totalOrders / limitNum);
 
+    // Compute cross-page totals whenever a date filter is active
+    let filteredTotals = null;
+    if (startDate || endDate) {
+      const totalsAgg = await Order.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: null,
+            subtotal:        { $sum: { $ifNull: ['$subtotal', 0] } },
+            shipping:        { $sum: { $ifNull: ['$shipping', 0] } },
+            salesTax:        { $sum: { $ifNull: ['$salesTax', 0] } },
+            discount:        { $sum: { $ifNull: ['$discount', 0] } },
+            transactionFees: { $sum: { $ifNull: ['$transactionFees', 0] } },
+            adFeeGeneral:    { $sum: { $ifNull: ['$adFeeGeneral', 0] } },
+            orderEarnings:   { $sum: { $ifNull: ['$orderEarnings', 0] } },
+            orderTotal:      { $sum: { $ifNull: ['$orderTotal', 0] } },
+            tds:             { $sum: { $ifNull: ['$tds', 0] } },
+            tid:             { $sum: { $ifNull: ['$tid', 0] } },
+            net:             { $sum: { $ifNull: ['$net', 0] } },
+            pBalanceINR:     { $sum: { $ifNull: ['$pBalanceINR', 0] } },
+            beforeTax:       { $sum: { $ifNull: ['$beforeTax', 0] } },
+            estimatedTax:    { $sum: { $ifNull: ['$estimatedTax', 0] } },
+            amazonTotal:     { $sum: { $ifNull: ['$amazonTotal', 0] } },
+            amazonTotalINR:  { $sum: { $ifNull: ['$amazonTotalINR', 0] } },
+            marketplaceFee:  { $sum: { $ifNull: ['$marketplaceFee', 0] } },
+            igst:            { $sum: { $ifNull: ['$igst', 0] } },
+            totalCC:         { $sum: { $ifNull: ['$totalCC', 0] } },
+          }
+        },
+        {
+          $addFields: {
+            profit: {
+              $subtract: [
+                { $subtract: ['$pBalanceINR', '$amazonTotalINR'] },
+                '$totalCC'
+              ]
+            }
+          }
+        }
+      ]);
+      if (totalsAgg.length > 0) {
+        const { _id, ...rest } = totalsAgg[0];
+        filteredTotals = rest;
+      }
+    }
+
     // Raw count: seller + date + marketplace scope only, no refund/cancel/toggle exclusions.
     // This matches what the Fulfillment Dashboard shows for the same filters.
     const rawQuery = {};
@@ -2873,7 +2919,8 @@ router.get('/all-orders-usd', async (req, res) => {
         categoryData: categoriesWithCounts,
         rangeData: rangesWithCounts,
         productData: productsWithCounts
-      }
+      },
+      filteredTotals
     });
   } catch (err) {
     console.error('[All Orders USD] Error:', err);
