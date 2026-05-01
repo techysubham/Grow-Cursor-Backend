@@ -44,6 +44,7 @@ export const PAGE_DEFAULT_ROLES = {
   'ProductResearch': ['superadmin', 'productadmin'],
 
   // Finance & Cash Flow
+  'MicroOrders': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'Payoneer': ['superadmin'],
   'BankAccounts': ['superadmin'],
   'Transactions': ['superadmin'],

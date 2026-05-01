@@ -1,5 +1,32 @@
 import mongoose from 'mongoose';
 
+// ── Micro-order metrics constants ────────────────────────────────────────────
+const MICRO_MIN         = 0.01;
+const MICRO_MAX         = 3.00;
+const MO_COST_FACTOR    = 90;
+const MO_MARKUP_FACTOR  = 90 * 0.04;
+const MO_IGST_FACTOR    = 90 * 0.04 * 0.18;
+
+/**
+ * Upserts an OrderMetrics document for any order whose subtotal falls in the
+ * micro-order range (0.01 < subtotal < 3.00).  Called from post-save hooks so
+ * every new or updated order is automatically reflected in the Micro Orders page.
+ */
+async function syncOrderMetrics(orderId, orderObjectId, subtotal, pBalanceINR) {
+  if (subtotal == null || subtotal <= MICRO_MIN || subtotal >= MICRO_MAX) return;
+  // Lazy-require to avoid circular-dependency issues at module load time
+  const { default: OrderMetrics } = await import('./OrderMetrics.js');
+  const sellerCost      = subtotal * MO_COST_FACTOR;
+  const sellerMarkupFee = subtotal * MO_MARKUP_FACTOR;
+  const sellerIGST      = subtotal * MO_IGST_FACTOR;
+  const profitFake      = (pBalanceINR ?? 0) - sellerCost - sellerMarkupFee - sellerIGST;
+  await OrderMetrics.findOneAndUpdate(
+    { orderId },
+    { $set: { orderId, order: orderObjectId, sellerCost, sellerMarkupFee, sellerIGST, profitFake } },
+    { upsert: true }
+  );
+}
+
 const OrderSchema = new mongoose.Schema(
   {
     seller: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', required: true },
@@ -182,7 +209,24 @@ OrderSchema.index({ seller: 1, creationDate: -1 });
 OrderSchema.index({ seller: 1, lastModifiedDate: -1 });
 OrderSchema.index({ seller: 1, creationDate: -1, lastModifiedDate: -1 }); // Compound index for polling queries
 OrderSchema.index({ dateSold: 1 }); // Index for date range searches
+OrderSchema.index({ subtotal: 1, dateSold: -1 }); // Index for micro-orders range filter + sort
 OrderSchema.index({ cancelState: 1, creationDate: -1 }); // Index for cancelled orders queries
 OrderSchema.index({ policyMessageSent: 1, policyMessageDisabled: 1, policyMessageEligibleAt: 1 }); // Index for policy message processing
+
+// ── Auto-sync OrderMetrics on every save ─────────────────────────────────────
+// Covers Order.create() and doc.save() (main polling phases 1 & 2).
+OrderSchema.post('save', function (doc) {
+  syncOrderMetrics(doc.orderId, doc._id, doc.subtotal, doc.pBalanceINR).catch((err) =>
+    console.error('[OrderMetrics] post-save sync error:', err.message)
+  );
+});
+
+// Covers Order.findOneAndUpdate({ upsert: true }) used in the initial eBay connect flow.
+OrderSchema.post('findOneAndUpdate', function (doc) {
+  if (!doc) return;
+  syncOrderMetrics(doc.orderId, doc._id, doc.subtotal, doc.pBalanceINR).catch((err) =>
+    console.error('[OrderMetrics] post-findOneAndUpdate sync error:', err.message)
+  );
+});
 
 export default mongoose.model('Order', OrderSchema);
