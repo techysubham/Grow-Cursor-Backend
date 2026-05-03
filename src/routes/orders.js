@@ -9,6 +9,7 @@ import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import MarketMetric from '../models/MarketMetric.js';
 import TemplateListing from '../models/TemplateListing.js';
+import ConversationMeta from '../models/ConversationMeta.js';
 
 const router = Router();
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
@@ -1979,6 +1980,146 @@ router.get('/worksheet-summary', requireAuth, requirePageAccess('OrderAnalytics'
   } catch (error) {
     console.error('Error fetching worksheet summary:', error);
     res.status(500).json({ error: 'Failed to fetch worksheet summary' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy Item Order Drill-Down  GET /orders/legacy-item-orders
+// Returns individual orders for a specific legacyItemId + optional sellerId,
+// enriched with convoCategory, convoCaseStatus, and issue flags.
+// type: all | cancelled | partiallyRefunded | fullyRefunded
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/legacy-item-orders', requireAuth, requirePageAccess('LegacyItemAnalytics'), async (req, res) => {
+  try {
+    const {
+      legacyItemId,
+      sellerId,
+      type = 'all',
+      startDate,
+      endDate,
+      ebayMotors = 'false',
+      excludeClient = 'true',
+      excludeLowValue = 'false',
+    } = req.query;
+
+    if (!legacyItemId) {
+      return res.status(400).json({ error: 'legacyItemId is required' });
+    }
+
+    const match = await buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeClient, excludeLowValue });
+
+    if (type === 'cancelled') {
+      match.$and = match.$and || [];
+      match.$and.push({
+        $or: [
+          { cancelState: { $in: FINAL_CANCELLED_STATES } },
+          { 'cancelStatus.cancelState': { $in: FINAL_CANCELLED_STATES } },
+        ],
+      });
+    } else if (type === 'partiallyRefunded') {
+      match.orderPaymentStatus = 'PARTIALLY_REFUNDED';
+    } else if (type === 'fullyRefunded') {
+      match.orderPaymentStatus = 'FULLY_REFUNDED';
+    }
+
+    const itemMatch = { 'lineItems.legacyItemId': legacyItemId };
+    if (ebayMotors === 'true') {
+      itemMatch['lineItems.listingMarketplaceId'] = 'EBAY_MOTORS_US';
+    }
+
+    const orders = await Order.aggregate([
+      { $match: match },
+      { $unwind: '$lineItems' },
+      { $match: itemMatch },
+      {
+        $group: {
+          _id: '$orderId',
+          buyerUsername: { $first: '$buyer.username' },
+          buyerName: { $first: '$buyer.buyerRegistrationAddress.fullName' },
+          shippingFullName: { $first: '$shippingFullName' },
+          legacyItemId: { $first: '$lineItems.legacyItemId' },
+          fulfillmentNotes: { $first: '$fulfillmentNotes' },
+          remark: { $first: '$remark' },
+          isCancelled: {
+            $max: {
+              $cond: [
+                {
+                  $or: [
+                    { $in: ['$cancelState', FINAL_CANCELLED_STATES] },
+                    { $in: ['$cancelStatus.cancelState', FINAL_CANCELLED_STATES] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          isPartiallyRefunded: { $max: { $cond: [{ $eq: ['$orderPaymentStatus', 'PARTIALLY_REFUNDED'] }, 1, 0] } },
+          isFullyRefunded: { $max: { $cond: [{ $eq: ['$orderPaymentStatus', 'FULLY_REFUNDED'] }, 1, 0] } },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          orderId: '$_id',
+          buyerUsername: 1,
+          buyerName: 1,
+          shippingFullName: 1,
+          legacyItemId: 1,
+          fulfillmentNotes: 1,
+          remark: 1,
+          isCancelled: 1,
+          isPartiallyRefunded: 1,
+          isFullyRefunded: 1,
+        },
+      },
+      { $sort: { orderId: 1 } },
+    ]);
+
+    const orderIds = orders.map((o) => o.orderId).filter(Boolean);
+
+    const [convMetas, cases, returns, disputes] = await Promise.all([
+      ConversationMeta.find({ orderId: { $in: orderIds } }, { orderId: 1, category: 1, caseStatus: 1, _id: 0 }).lean(),
+      Case.find({ orderId: { $in: orderIds } }, { orderId: 1, caseType: 1, status: 1, _id: 0 }).lean(),
+      Return.find({ orderId: { $in: orderIds } }, { orderId: 1, returnStatus: 1, _id: 0 }).lean(),
+      PaymentDispute.find({ orderId: { $in: orderIds } }, { orderId: 1, paymentDisputeStatus: 1, reason: 1, _id: 0 }).lean(),
+    ]);
+
+    const convoMetaMap = new Map(convMetas.map((m) => [m.orderId, m]));
+
+    const issuesMap = {};
+    cases.forEach((c) => {
+      if (!c.orderId) return;
+      issuesMap[c.orderId] = issuesMap[c.orderId] || [];
+      issuesMap[c.orderId].push({ type: c.caseType || 'INR', status: c.status });
+    });
+    returns.forEach((r) => {
+      if (!r.orderId) return;
+      issuesMap[r.orderId] = issuesMap[r.orderId] || [];
+      issuesMap[r.orderId].push({ type: 'Return', status: r.returnStatus });
+    });
+    disputes.forEach((d) => {
+      if (!d.orderId) return;
+      issuesMap[d.orderId] = issuesMap[d.orderId] || [];
+      issuesMap[d.orderId].push({ type: 'Dispute', status: d.paymentDisputeStatus, reason: d.reason });
+    });
+
+    const enriched = orders.map((order) => {
+      const convoMeta = convoMetaMap.get(order.orderId);
+      const rawIssues = issuesMap[order.orderId] || [];
+      const convoCaseStatus = convoMeta?.caseStatus || null;
+      return {
+        ...order,
+        convoCategory: convoMeta?.category || null,
+        convoCaseStatus,
+        issues: rawIssues.map((i) => ({ ...i, caseStatus: convoCaseStatus || 'Case Not Opened' })),
+      };
+    });
+
+    res.json({ orders: enriched, total: enriched.length });
+  } catch (error) {
+    console.error('Error fetching legacy item orders:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch legacy item orders' });
   }
 });
 
