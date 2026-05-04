@@ -9302,8 +9302,24 @@ router.get('/all-listings', requireAuth, async (req, res) => {
 // ============================================
 // GET ACTIVE LISTING PRICE TIERS — LIVE via eBay API
 // ============================================
-// Pages through GetMyeBaySelling for the selected seller and returns tier counts.
-// No DB reads — all data comes from eBay in real time.
+// Pages through GetSellerList (EndTimeFrom=now, EndTimeTo=now+32days) for the selected seller and returns:
+//   - tier counts (low/mid/high based on USD price)
+//   - marketplace counts (derived from native currency of CurrentPrice)
+// No DB writes — all data is processed in memory.
+//
+// Why EndTime window instead of GetMyeBaySelling:
+//   - GetMyeBaySelling is capped at 25,000 listings by eBay.
+//   - GetSellerList has no such cap, but requires a time range ≤121 days.
+//   - GTC listings auto-renew every 30 days → EndTime is always ≤30 days from now.
+//   - All other listing durations are ≤30 days as well.
+//   - Therefore EndTimeFrom=now / EndTimeTo=now+32days captures 100% of active listings.
+const CURRENCY_TO_MARKETPLACE = {
+  USD: { label: 'eBay US',        flag: '🇺🇸' },
+  AUD: { label: 'eBay Australia', flag: '🇦🇺' },
+  CAD: { label: 'eBay Canada',    flag: '🇨🇦' },
+  GBP: { label: 'eBay UK',        flag: '🇬🇧' },
+  EUR: { label: 'eBay Europe',    flag: '🇪🇺' },
+};
 router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
   const { sellerId } = req.query;
   if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
@@ -9314,30 +9330,33 @@ router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
 
     const token = await ensureValidToken(seller);
 
+    // 32-day window starting now — covers all active GTC and fixed-duration listings
+    const endTimeFrom = new Date().toISOString();
+    const endTimeTo   = new Date(Date.now() + 32 * 24 * 60 * 60 * 1000).toISOString();
+
     let page = 1;
     let totalPages = 1;
     const tiers = { low: 0, mid: 0, high: 0, total: 0 };
+    const marketplaceData = {}; // currency → { low, mid, high, total }
 
     do {
       const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
-<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
   <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
   <ErrorLanguage>en_US</ErrorLanguage>
   <WarningLevel>High</WarningLevel>
-  <ActiveList>
-    <Sort>TimeLeft</Sort>
-    <Pagination>
-      <EntriesPerPage>200</EntriesPerPage>
-      <PageNumber>${page}</PageNumber>
-    </Pagination>
-  </ActiveList>
-  <OutputSelector>ActiveList.ItemArray.Item.SellingStatus.ConvertedCurrentPrice</OutputSelector>
-  <OutputSelector>ActiveList.PaginationResult</OutputSelector>
-</GetMyeBaySellingRequest>`;
+  <EndTimeFrom>${endTimeFrom}</EndTimeFrom>
+  <EndTimeTo>${endTimeTo}</EndTimeTo>
+  <GranularityLevel>Coarse</GranularityLevel>
+  <Pagination>
+    <EntriesPerPage>200</EntriesPerPage>
+    <PageNumber>${page}</PageNumber>
+  </Pagination>
+</GetSellerListRequest>`;
 
       const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
         headers: {
-          'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
+          'X-EBAY-API-CALL-NAME': 'GetSellerList',
           'X-EBAY-API-SITEID': '0',
           'X-EBAY-API-COMPATIBILITY-LEVEL': '1271',
           'Content-Type': 'text/xml',
@@ -9345,7 +9364,7 @@ router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
       });
 
       const result = await parseStringPromise(response.data, { explicitArray: false });
-      const resp = result.GetMyeBaySellingResponse;
+      const resp = result.GetSellerListResponse;
 
       if (resp.Ack === 'Failure') {
         const errors = resp.Errors;
@@ -9353,40 +9372,70 @@ router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
         throw new Error(msg || 'eBay API error');
       }
 
-      const pagination = resp.ActiveList?.PaginationResult;
-      if (!pagination) break; // no active listings at all
+      const pagination = resp.PaginationResult;
+      if (!pagination) break;
 
       totalPages = parseInt(pagination.TotalNumberOfPages || '1', 10);
 
-      const rawItems = resp.ActiveList?.ItemArray?.Item;
+      const rawItems = resp.ItemArray?.Item;
       const items = rawItems
         ? Array.isArray(rawItems) ? rawItems : [rawItems]
         : [];
 
       for (const item of items) {
-        const raw = item.SellingStatus?.ConvertedCurrentPrice;
-        // ConvertedCurrentPrice may be a string (explicitArray:false) or object {_: "...", $: {...}}
+        // ── USD price for tier bucketing ──
+        const rawConverted = item.SellingStatus?.ConvertedCurrentPrice;
         const priceUSD = parseFloat(
-          typeof raw === 'object' ? (raw?._ ?? '0') : (raw ?? '0')
+          typeof rawConverted === 'object' ? (rawConverted?._ ?? '0') : (rawConverted ?? '0')
         );
 
+        // ── Native currency for marketplace detection ──
+        const rawNative = item.SellingStatus?.CurrentPrice;
+        const currency = (
+          typeof rawNative === 'object'
+            ? rawNative?.$?.currencyID
+            : undefined
+        ) || 'USD';
+
+        // Ensure marketplace bucket exists
+        if (!marketplaceData[currency]) {
+          marketplaceData[currency] = { low: 0, mid: 0, high: 0, total: 0 };
+        }
+
+        // Tally tiers (global + per-marketplace)
         tiers.total += 1;
+        marketplaceData[currency].total += 1;
         if (priceUSD < 20) {
           tiers.low += 1;
+          marketplaceData[currency].low += 1;
         } else if (priceUSD < 70) {
           tiers.mid += 1;
+          marketplaceData[currency].mid += 1;
         } else {
           tiers.high += 1;
+          marketplaceData[currency].high += 1;
         }
       }
 
       page++;
     } while (page <= totalPages);
 
+    // Shape marketplace data for the frontend (includes per-marketplace tier breakdown)
+    const marketplaceBreakdown = Object.entries(marketplaceData)
+      .map(([currency, mpTiers]) => ({
+        currency,
+        label: CURRENCY_TO_MARKETPLACE[currency]?.label || `eBay (${currency})`,
+        flag:  CURRENCY_TO_MARKETPLACE[currency]?.flag  || '🌐',
+        total: mpTiers.total,
+        tiers: { low: mpTiers.low, mid: mpTiers.mid, high: mpTiers.high },
+      }))
+      .sort((a, b) => b.total - a.total);
+
     res.json({
       success: true,
       sellerName: seller.user?.username || sellerId,
       tiers,
+      marketplaceBreakdown,
       pagesFetched: page - 1,
     });
   } catch (err) {
