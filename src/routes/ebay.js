@@ -9215,6 +9215,12 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
         const rawHtml = item.Description ? item.Description[0] : '';
         const cleanHtml = extractCleanDescription(rawHtml);
 
+        // Resolve USD price: ConvertedCurrentPrice is in the currency of the SiteID used (SiteID=0 = USD)
+        const rawConvertedPrice = item.SellingStatus[0].ConvertedCurrentPrice?.[0]?._;
+        const currentPriceUSD = rawConvertedPrice != null
+          ? parseFloat(rawConvertedPrice)
+          : parseFloat(item.SellingStatus[0].CurrentPrice[0]._);
+
         // Upsert to ActiveListing collection (separate from Motors Listing collection)
         await ActiveListing.findOneAndUpdate(
           { itemId: item.ItemID[0] },
@@ -9223,6 +9229,7 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
             title: item.Title[0],
             sku: item.SKU ? item.SKU[0] : '',
             currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
+            currentPriceUSD,
             currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
             listingStatus: status,
             mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
@@ -9288,6 +9295,102 @@ router.get('/all-listings', requireAuth, async (req, res) => {
       }
     });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// GET ACTIVE LISTING PRICE TIERS — LIVE via eBay API
+// ============================================
+// Pages through GetMyeBaySelling for the selected seller and returns tier counts.
+// No DB reads — all data comes from eBay in real time.
+router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
+  const { sellerId } = req.query;
+  if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
+
+  try {
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const token = await ensureValidToken(seller);
+
+    let page = 1;
+    let totalPages = 1;
+    const tiers = { low: 0, mid: 0, high: 0, total: 0 };
+
+    do {
+      const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <ActiveList>
+    <Sort>TimeLeft</Sort>
+    <Pagination>
+      <EntriesPerPage>200</EntriesPerPage>
+      <PageNumber>${page}</PageNumber>
+    </Pagination>
+  </ActiveList>
+  <OutputSelector>ActiveList.ItemArray.Item.SellingStatus.ConvertedCurrentPrice</OutputSelector>
+  <OutputSelector>ActiveList.PaginationResult</OutputSelector>
+</GetMyeBaySellingRequest>`;
+
+      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+        headers: {
+          'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
+          'X-EBAY-API-SITEID': '0',
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1271',
+          'Content-Type': 'text/xml',
+        },
+      });
+
+      const result = await parseStringPromise(response.data, { explicitArray: false });
+      const resp = result.GetMyeBaySellingResponse;
+
+      if (resp.Ack === 'Failure') {
+        const errors = resp.Errors;
+        const msg = Array.isArray(errors) ? errors[0].LongMessage : errors?.LongMessage;
+        throw new Error(msg || 'eBay API error');
+      }
+
+      const pagination = resp.ActiveList?.PaginationResult;
+      if (!pagination) break; // no active listings at all
+
+      totalPages = parseInt(pagination.TotalNumberOfPages || '1', 10);
+
+      const rawItems = resp.ActiveList?.ItemArray?.Item;
+      const items = rawItems
+        ? Array.isArray(rawItems) ? rawItems : [rawItems]
+        : [];
+
+      for (const item of items) {
+        const raw = item.SellingStatus?.ConvertedCurrentPrice;
+        // ConvertedCurrentPrice may be a string (explicitArray:false) or object {_: "...", $: {...}}
+        const priceUSD = parseFloat(
+          typeof raw === 'object' ? (raw?._ ?? '0') : (raw ?? '0')
+        );
+
+        tiers.total += 1;
+        if (priceUSD < 20) {
+          tiers.low += 1;
+        } else if (priceUSD < 70) {
+          tiers.mid += 1;
+        } else {
+          tiers.high += 1;
+        }
+      }
+
+      page++;
+    } while (page <= totalPages);
+
+    res.json({
+      success: true,
+      sellerName: seller.user?.username || sellerId,
+      tiers,
+      pagesFetched: page - 1,
+    });
+  } catch (err) {
+    console.error('[Live Tiers] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
