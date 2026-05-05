@@ -2,6 +2,7 @@ import express from 'express';
 import { validate } from '../utils/validate.js';
 import { createIdeaSchema, addIdeaCommentSchema } from '../schemas/index.js';
 import Idea from '../models/Idea.js';
+import { parsePagination, paginateQuery } from '../utils/paginate.js';
 
 const router = express.Router();
 
@@ -9,38 +10,24 @@ const router = express.Router();
 // PUBLIC ROUTE - No authentication required
 router.get('/', async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 50, 
-      status, 
-      priority, 
-      type,
-      sortBy = 'createdAt',
-      sortOrder = 'desc'
-    } = req.query;
+    const { status, priority, type, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
 
     const query = {};
     if (status) query.status = status;
     if (priority) query.priority = priority;
     if (type) query.type = type;
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const sortOptions = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+    const { page, limit, skip } = parsePagination(req.query, { defaultLimit: 50 });
+    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
 
-    const ideas = await Idea.find(query)
-      .sort(sortOptions)
-      .limit(parseInt(limit))
-      .skip(skip)
-      .lean();
-
-    const total = await Idea.countDocuments(query);
+    const { data: ideas, pagination } = await paginateQuery(Idea, query, { page, limit, skip, sort });
 
     res.json({
       ideas,
-      total,
-      page: parseInt(page),
-      totalPages: Math.ceil(total / parseInt(limit)),
-      limit: parseInt(limit)
+      total: pagination.total,
+      page: pagination.page,
+      totalPages: pagination.totalPages,
+      limit: pagination.limit
     });
   } catch (err) {
     console.error('Error fetching ideas:', err);

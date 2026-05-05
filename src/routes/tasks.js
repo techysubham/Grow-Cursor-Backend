@@ -5,6 +5,7 @@ import { validate } from '../utils/validate.js';
 import { createTaskSchema, createAssignmentSchema } from '../schemas/index.js';
 import Task from '../models/Task.js';
 import User from '../models/User.js';
+import { parsePagination } from '../utils/paginate.js';
 
 const router = Router();
 
@@ -106,11 +107,10 @@ router.get('/', requireAuth, async (req, res) => {
     }
 
     // Otherwise, do normal pagination.
-    const pageNum = Math.max(1, Number(page) || 1);
-    const limitNum = Math.max(1, Number(limit) || 10);
+    const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query, { defaultLimit: 10, maxLimit: 500 });
     const [total, tasks] = await Promise.all([
       Task.countDocuments(query),
-      base.skip((pageNum - 1) * limitNum).limit(limitNum)
+      base.skip(skip).limit(limitNum)
     ]);
 
     res.json({

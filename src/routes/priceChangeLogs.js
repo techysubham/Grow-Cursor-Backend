@@ -1,6 +1,7 @@
 import express from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import PriceChangeLog from '../models/PriceChangeLog.js';
+import { parsePagination } from '../utils/paginate.js';
 
 const router = express.Router();
 
@@ -8,8 +9,6 @@ const router = express.Router();
 router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req, res) => {
   try {
     const {
-      page = 1,
-      limit = 50,
       legacyItemId,
       orderId,
       userId,
@@ -35,7 +34,7 @@ router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req
       if (endDate) query.createdAt.$lte = new Date(endDate);
     }
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const { page, limit, skip } = parsePagination(req.query, { defaultLimit: 50 });
 
     const [logs, total] = await Promise.all([
       PriceChangeLog.find(query)
@@ -47,7 +46,7 @@ router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req
         })
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(parseInt(limit))
+        .limit(limit)
         .lean(),
       PriceChangeLog.countDocuments(query)
     ]);
@@ -56,9 +55,9 @@ router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req
       logs,
       pagination: {
         total,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        totalPages: Math.ceil(total / parseInt(limit))
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
       }
     });
   } catch (err) {

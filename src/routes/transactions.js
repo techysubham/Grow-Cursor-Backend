@@ -5,6 +5,7 @@ import Order from '../models/Order.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { createTransactionSchema, updateTransactionSchema } from '../schemas/index.js';
+import { parsePagination } from '../utils/paginate.js';
 
 const router = express.Router();
 
@@ -135,7 +136,8 @@ router.get('/credit-card-summary', requireAuth, requirePageAccess('Transactions'
 // GET /api/transactions - List all
 router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
     try {
-        const { page = 1, limit = 50, startDate, endDate, bankAccount, transactionType } = req.query;
+        const { startDate, endDate, bankAccount, transactionType } = req.query;
+        const { page, limit, skip } = parsePagination(req.query, { defaultLimit: 50 });
 
         const query = {};
         if (startDate || endDate) {
@@ -151,16 +153,13 @@ router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res)
         if (bankAccount) query.bankAccount = new mongoose.Types.ObjectId(bankAccount);
         if (transactionType) query.transactionType = transactionType;
 
-        const skip = (parseInt(page) - 1) * parseInt(limit);
-        const limitNum = parseInt(limit);
-
         const [transactions, totalTransactions, aggregateSum] = await Promise.all([
             Transaction.find(query)
                 .populate('bankAccount', 'name')
                 .populate('creditCardName', 'name')
                 .sort({ date: -1 })
                 .skip(skip)
-                .limit(limitNum),
+                .limit(limit),
             Transaction.countDocuments(query),
             Transaction.aggregate([
                 { $match: query },
@@ -182,8 +181,8 @@ router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res)
 
         res.json({
             transactions,
-            totalPages: Math.ceil(totalTransactions / limitNum),
-            currentPage: parseInt(page),
+            totalPages: Math.ceil(totalTransactions / limit),
+            currentPage: page,
             totalTransactions,
             summary
         });
