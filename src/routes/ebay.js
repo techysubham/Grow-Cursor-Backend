@@ -11621,13 +11621,15 @@ export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDa
 // ============================================
 router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, country } = req.query;
+    const { startDate, endDate, sellerId, country, categoryId, rangeId } = req.query;
 
     const matchStage = {
       status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
       'uploadSummary.successCount': { $gt: 0 }
     };
     if (sellerId) matchStage.seller = new mongoose.Types.ObjectId(sellerId);
+    if (categoryId) matchStage.categoryId = new mongoose.Types.ObjectId(categoryId);
+    if (rangeId) matchStage.rangeId = new mongoose.Types.ObjectId(rangeId);
     
     // Handle country filtering: if US, include records without country field (old data)
     if (country) {
@@ -11747,12 +11749,14 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
 // GET /api/ebay/feed/category-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&country=X
 router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
   try {
-    const { startDate, endDate, country } = req.query;
+    const { startDate, endDate, country, sellerId: catSellerId, categoryId: catFilterId } = req.query;
 
     const matchStage = {
       status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
       'uploadSummary.successCount': { $gt: 0 }
     };
+    if (catSellerId) matchStage.seller = new mongoose.Types.ObjectId(catSellerId);
+    if (catFilterId) matchStage.categoryId = new mongoose.Types.ObjectId(catFilterId);
 
     if (country) {
       if (country === 'US') {
