@@ -882,6 +882,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
         }
 
         // Look up ASIN in the directory
+        res.write(`data: ${JSON.stringify({ type: 'progress', id: `preview-${asin}`, stage: 'fetching' })}\n\n`);
         const doc = await AsinDirectory.findOne({ asin }).lean();
 
         // Build amazonData from stored document (no scraping).
@@ -907,6 +908,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
           model: '', material: '', specialFeatures: '', size: ''
         };
 
+        res.write(`data: ${JSON.stringify({ type: 'progress', id: `preview-${asin}`, stage: 'generating' })}\n\n`);
         const { coreFields, customFields, pricingCalculation } =
           await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
 
