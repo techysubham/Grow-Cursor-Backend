@@ -6,6 +6,7 @@ import Case from '../models/Case.js';
 import Return from '../models/Return.js';
 import MarketMetric from '../models/MarketMetric.js';
 import Seller from '../models/Seller.js';
+import { getCache, setCache } from '../lib/redis.js';
 
 const router = Router();
 
@@ -184,6 +185,10 @@ router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'
     const { sellerId } = req.query;
     const sellerMatch = sellerId ? { seller: new mongoose.Types.ObjectId(sellerId) } : {};
 
+    const cacheKey = `ah:eval-windows:${sellerId || 'all'}`;
+    const cached = await getCache(cacheKey);
+    if (cached) return res.json(cached);
+
     // We'll generate weekly windows, each spanning 84 days
     const windows = [];
     const today = new Date();
@@ -297,7 +302,9 @@ router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'
       currentWindowEnd.setHours(23, 59, 59, 999);
     }
 
-    res.json({ windows });
+    const result = { windows };
+    await setCache(cacheKey, result, 3600);
+    res.json(result);
   } catch (error) {
     console.error('Error fetching evaluation windows:', error);
     res.status(500).json({ error: 'Failed to fetch evaluation windows' });
@@ -376,6 +383,9 @@ router.patch('/details/:orderId', requireAuth, requirePageAccess('AccountHealth'
  */
 router.get('/overview', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
+    const cached = await getCache('ah:overview');
+    if (cached) return res.json(cached);
+
     // Fetch all sellers with user data
     const sellers = await Seller.find().populate('user', 'username email').lean();
 
@@ -489,7 +499,9 @@ router.get('/overview', requireAuth, requirePageAccess('AccountHealth'), async (
       });
     }
 
-    res.json({ overview: overviewData, marketAvg });
+    const result = { overview: overviewData, marketAvg };
+    await setCache('ah:overview', result, 1800);
+    res.json(result);
   } catch (error) {
     console.error('Error fetching account health overview:', error);
     res.status(500).json({ error: 'Failed to fetch overview' });
