@@ -6,12 +6,18 @@ import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { createTransactionSchema, updateTransactionSchema } from '../schemas/index.js';
 import { parsePagination } from '../utils/paginate.js';
+import { getCache, setCache, delCache } from '../lib/redis.js';
 
 const router = express.Router();
+
+const TX_CACHE_KEYS = ['tx:balance-summary', 'tx:credit-card-summary'];
 
 // GET /api/transactions/balance-summary - Get balance per bank account
 router.get('/balance-summary', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
     try {
+        const cached = await getCache('tx:balance-summary');
+        if (cached) return res.json(cached);
+
         const summary = await Transaction.aggregate([
             {
                 $group: {
@@ -50,6 +56,7 @@ router.get('/balance-summary', requireAuth, requirePageAccess('Transactions'), a
             }
         ]);
         res.json(summary);
+        await setCache('tx:balance-summary', summary, 300);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -58,6 +65,9 @@ router.get('/balance-summary', requireAuth, requirePageAccess('Transactions'), a
 // GET /api/transactions/credit-card-summary
 router.get('/credit-card-summary', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
     try {
+        const cached = await getCache('tx:credit-card-summary');
+        if (cached) return res.json(cached);
+
         // Step 1: Get total transferred TO each credit card via transactions
         const transactionSummary = await Transaction.aggregate([
             {
@@ -128,6 +138,7 @@ router.get('/credit-card-summary', requireAuth, requirePageAccess('Transactions'
         });
 
         res.json(summary);
+        await setCache('tx:credit-card-summary', summary, 300);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -214,6 +225,7 @@ router.post('/', requireAuth, requirePageAccess('Transactions'), validate(create
         await newTransaction.populate('bankAccount', 'name');
         await newTransaction.populate('creditCardName', 'name');
 
+        await delCache(...TX_CACHE_KEYS);
         res.status(201).json(newTransaction);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -244,6 +256,7 @@ router.put('/:id', requireAuth, requirePageAccess('Transactions'), validate(upda
         await transaction.populate('bankAccount', 'name');
         await transaction.populate('creditCardName', 'name');
 
+        await delCache(...TX_CACHE_KEYS);
         res.json(transaction);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -263,6 +276,7 @@ router.delete('/:id', requireAuth, requirePageAccess('Transactions'), async (req
         }
 
         await Transaction.findByIdAndDelete(id);
+        await delCache(...TX_CACHE_KEYS);
         res.json({ message: 'Transaction deleted' });
     } catch (err) {
         res.status(500).json({ error: err.message });
