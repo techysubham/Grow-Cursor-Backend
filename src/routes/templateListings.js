@@ -836,6 +836,8 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             pricingCalculation = configs.pricingCalculation;
           }
 
+          const freshStartPrice = pricingCalculation?.calculatedStartPrice ?? existingListing.startPrice;
+
           const item = {
             id: `preview-${asin}`, asin,
             sku: futureSKU,
@@ -845,7 +847,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             generatedListing: {
               title: existingListing.title,
               description: existingListing.description,
-              startPrice: existingListing.startPrice,
+              startPrice: freshStartPrice,
               quantity: existingListing.quantity,
               itemPhotoUrl: existingListing.itemPhotoUrl || '',
               conditionId: existingListing.conditionId || '',
