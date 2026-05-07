@@ -651,7 +651,7 @@ export async function resumeRunningAutoCompatibilityBatches() {
 // ============================================
 router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res) => {
   try {
-    const { sellerId, feedType = 'FX_LISTING', schemaVersion = '1.0', country = 'US' } = req.body;
+    const { sellerId, feedType = 'FX_LISTING', schemaVersion = '1.0', country = 'US', categoryId, rangeId, productId } = req.body;
     const file = req.file;
 
     if (!file) {
@@ -735,15 +735,19 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
     console.log(`[Feed Upload] File uploaded successfully. Status: ${uploadRes.status}`);
 
     // Create local record
-    await FeedUpload.create({
+    const feedUploadData = {
       seller: seller._id,
       taskId: taskId,
       fileName: file.originalname,
       feedType: feedType,
       country: country,
       schemaVersion: schemaVersion,
-      status: 'CREATED' // Initial status
-    });
+      status: 'CREATED'
+    };
+    if (categoryId) feedUploadData.categoryId = categoryId;
+    if (rangeId) feedUploadData.rangeId = rangeId;
+    if (productId) feedUploadData.productId = productId;
+    await FeedUpload.create(feedUploadData);
 
     res.json({
       success: true,
@@ -11617,13 +11621,15 @@ export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDa
 // ============================================
 router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, country } = req.query;
+    const { startDate, endDate, sellerId, country, categoryId, rangeId } = req.query;
 
     const matchStage = {
       status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
       'uploadSummary.successCount': { $gt: 0 }
     };
     if (sellerId) matchStage.seller = new mongoose.Types.ObjectId(sellerId);
+    if (categoryId) matchStage.categoryId = new mongoose.Types.ObjectId(categoryId);
+    if (rangeId) matchStage.rangeId = new mongoose.Types.ObjectId(rangeId);
     
     // Handle country filtering: if US, include records without country field (old data)
     if (country) {
@@ -11685,7 +11691,9 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
           _id: {
             sellerName: '$userDoc.username',
             date: { $dateToString: { format: '%Y-%m-%d', date: '$creationDate', timezone: 'Asia/Kolkata' } },
-            country: '$normalizedCountry'
+            country: '$normalizedCountry',
+            categoryId: { $ifNull: ['$categoryId', null] },
+            rangeId: { $ifNull: ['$rangeId', null] }
           },
           sellerId: { $first: '$seller' },
           totalSuccess: { $sum: '$uploadSummary.successCount' },
@@ -11693,6 +11701,26 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
           taskCount: { $sum: 1 }
         }
       },
+      // Lookup category name
+      {
+        $lookup: {
+          from: 'asinlistcategories',
+          localField: '_id.categoryId',
+          foreignField: '_id',
+          as: 'categoryDoc'
+        }
+      },
+      { $unwind: { path: '$categoryDoc', preserveNullAndEmptyArrays: true } },
+      // Lookup range name
+      {
+        $lookup: {
+          from: 'asinlistranges',
+          localField: '_id.rangeId',
+          foreignField: '_id',
+          as: 'rangeDoc'
+        }
+      },
+      { $unwind: { path: '$rangeDoc', preserveNullAndEmptyArrays: true } },
       { $sort: { '_id.date': -1, '_id.sellerName': 1 } }
     ]);
 
@@ -11701,6 +11729,8 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
       sellerName: r._id.sellerName,
       date: r._id.date,
       country: r._id.country || 'US',
+      categoryName: r.categoryDoc?.name || '',
+      rangeName: r.rangeDoc?.name || '',
       totalSuccess: r.totalSuccess,
       totalFailure: r.totalFailure,
       taskCount: r.taskCount
@@ -11712,6 +11742,121 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
     res.status(500).json({ error: 'Failed to fetch feed upload stats' });
   }
 });
+
+// ============================================
+// GET FEED CATEGORY/RANGE STATS
+// ============================================
+// GET /api/ebay/feed/category-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&country=X
+router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
+  try {
+    const { startDate, endDate, country, sellerId: catSellerId, categoryId: catFilterId } = req.query;
+
+    const matchStage = {
+      status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
+      'uploadSummary.successCount': { $gt: 0 }
+    };
+    if (catSellerId) matchStage.seller = new mongoose.Types.ObjectId(catSellerId);
+    if (catFilterId) matchStage.categoryId = new mongoose.Types.ObjectId(catFilterId);
+
+    if (country) {
+      if (country === 'US') {
+        matchStage.$or = [
+          { country: 'US' },
+          { country: null },
+          { country: { $exists: false } }
+        ];
+      } else {
+        matchStage.country = country;
+      }
+    }
+
+    if (startDate || endDate) {
+      matchStage.creationDate = {};
+      if (startDate) {
+        const start = new Date(startDate + 'T00:00:00Z');
+        matchStage.creationDate.$gte = new Date(start.getTime() - (5.5 * 60 * 60 * 1000));
+      }
+      if (endDate) {
+        const end = new Date(endDate + 'T23:59:59.999Z');
+        matchStage.creationDate.$lte = new Date(end.getTime() - (5.5 * 60 * 60 * 1000));
+      }
+    }
+
+    // Aggregate by category
+    const categoryRows = await FeedUpload.aggregate([
+      { $match: { ...matchStage, categoryId: { $exists: true, $ne: null } } },
+      {
+        $group: {
+          _id: '$categoryId',
+          totalSuccess: { $sum: '$uploadSummary.successCount' },
+          taskCount: { $sum: 1 }
+        }
+      },
+      {
+        $lookup: {
+          from: 'asinlistcategories',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'categoryDoc'
+        }
+      },
+      { $unwind: { path: '$categoryDoc', preserveNullAndEmptyArrays: true } },
+      { $sort: { totalSuccess: -1 } }
+    ]);
+
+    // Aggregate by range
+    const rangeRows = await FeedUpload.aggregate([
+      { $match: { ...matchStage, rangeId: { $exists: true, $ne: null } } },
+      {
+        $group: {
+          _id: '$rangeId',
+          categoryId: { $first: '$categoryId' },
+          totalSuccess: { $sum: '$uploadSummary.successCount' },
+          taskCount: { $sum: 1 }
+        }
+      },
+      {
+        $lookup: {
+          from: 'asinlistranges',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'rangeDoc'
+        }
+      },
+      { $unwind: { path: '$rangeDoc', preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: 'asinlistcategories',
+          localField: 'categoryId',
+          foreignField: '_id',
+          as: 'categoryDoc'
+        }
+      },
+      { $unwind: { path: '$categoryDoc', preserveNullAndEmptyArrays: true } },
+      { $sort: { totalSuccess: -1 } }
+    ]);
+
+    res.json({
+      categories: categoryRows.map(r => ({
+        categoryId: r._id,
+        name: r.categoryDoc?.name || 'Unknown',
+        totalSuccess: r.totalSuccess,
+        taskCount: r.taskCount
+      })),
+      ranges: rangeRows.map(r => ({
+        rangeId: r._id,
+        name: r.rangeDoc?.name || 'Unknown',
+        categoryName: r.categoryDoc?.name || '',
+        totalSuccess: r.totalSuccess,
+        taskCount: r.taskCount
+      }))
+    });
+  } catch (err) {
+    console.error('[Feed Category Stats] Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch feed category stats' });
+  }
+});
+
 // ============================================
 // SELLER FUNDS SUMMARY (All connected sellers)
 // ============================================
