@@ -2,6 +2,7 @@ import express from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import ListingTemplate from '../models/ListingTemplate.js';
 import TemplateOverride from '../models/TemplateOverride.js';
+import SellerPricingConfig from '../models/SellerPricingConfig.js';
 
 const router = express.Router();
 
@@ -109,25 +110,31 @@ router.delete('/:id/bulk-reset-overrides', requireAuth, async (req, res) => {
     }
     
     // Get affected sellers before deletion for logging
-    const affectedOverrides = await TemplateOverride.find({ 
-      baseTemplateId: templateId 
-    }).select('sellerId');
-    
-    const affectedSellerIds = affectedOverrides.map(o => o.sellerId);
-    
-    // Perform bulk deletion
-    const result = await TemplateOverride.deleteMany({ 
-      baseTemplateId: templateId 
-    });
-    
-    console.log(`[BULK RESET] Template "${template.name}" (${templateId}): Deleted ${result.deletedCount} overrides for sellers:`, affectedSellerIds);
-    
-    res.json({ 
+    const [affectedOverrides, affectedPricingConfigs] = await Promise.all([
+      TemplateOverride.find({ baseTemplateId: templateId }).select('sellerId').lean(),
+      SellerPricingConfig.find({ templateId }).select('sellerId').lean()
+    ]);
+
+    const affectedSellerSet = new Set([
+      ...affectedOverrides.map(o => o.sellerId.toString()),
+      ...affectedPricingConfigs.map(p => p.sellerId.toString())
+    ]);
+    const affectedSellerIds = [...affectedSellerSet];
+
+    // Perform bulk deletion of both override layers
+    const [overrideResult, pricingResult] = await Promise.all([
+      TemplateOverride.deleteMany({ baseTemplateId: templateId }),
+      SellerPricingConfig.deleteMany({ templateId })
+    ]);
+
+    console.log(`[BULK RESET] Template "${template.name}" (${templateId}): Deleted ${overrideResult.deletedCount} overrides + ${pricingResult.deletedCount} pricing configs for sellers:`, affectedSellerIds);
+
+    res.json({
       success: true,
-      deletedCount: result.deletedCount,
+      deletedCount: affectedSellerIds.length,
       affectedSellers: affectedSellerIds,
       templateName: template.name,
-      message: `Successfully reset ${result.deletedCount} seller customizations. All sellers will now use the base template.`
+      message: `Successfully reset ${affectedSellerIds.length} seller customizations. All sellers will now use the base template.`
     });
   } catch (error) {
     console.error('Error in bulk reset overrides:', error);

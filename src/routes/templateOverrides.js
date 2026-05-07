@@ -3,6 +3,7 @@ const router = express.Router();
 import { requireAuth } from '../middleware/auth.js';
 import TemplateOverride from '../models/TemplateOverride.js';
 import ListingTemplate from '../models/ListingTemplate.js';
+import SellerPricingConfig from '../models/SellerPricingConfig.js';
 import { 
   getEffectiveTemplate, 
   mergeTemplate, 
@@ -18,12 +19,18 @@ import {
 router.get('/:templateId/count', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params;
-    
-    const count = await TemplateOverride.countDocuments({
-      baseTemplateId: templateId
-    });
-    
-    res.json({ count, templateId });
+
+    const [overrides, pricingConfigs] = await Promise.all([
+      TemplateOverride.find({ baseTemplateId: templateId }).select('sellerId').lean(),
+      SellerPricingConfig.find({ templateId }).select('sellerId').lean()
+    ]);
+
+    const sellerSet = new Set([
+      ...overrides.map(o => o.sellerId.toString()),
+      ...pricingConfigs.map(p => p.sellerId.toString())
+    ]);
+
+    res.json({ count: sellerSet.size, templateId });
   } catch (error) {
     console.error('Error counting overrides:', error);
     res.status(500).json({ error: error.message });
