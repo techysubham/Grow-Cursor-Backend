@@ -1232,7 +1232,7 @@ router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('Legacy
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, marketplace, groupBy = 'category', excludeClient, excludeLowValue } = req.query;
+    const { startDate, endDate, sellerId, marketplace, groupBy = 'category', excludeClient, excludeLowValue, categoryId, rangeId } = req.query;
 
     const match = await buildOrdersCrpMatch({
       startDate,
@@ -1243,6 +1243,12 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
       excludeLowValue,
     });
 
+    // Drill-down filters: narrow to orders within a specific category or range
+    const categoryObjId = normalizeObjectIdOrNull(categoryId, 'categoryId');
+    if (categoryObjId) match.orderCategoryId = categoryObjId;
+    const rangeObjId = normalizeObjectIdOrNull(rangeId, 'rangeId');
+    if (rangeObjId) match.orderRangeId = rangeObjId;
+
     // Determine which field and lookup collection to use
     const groupFieldMap = {
       category: { field: 'orderCategoryId', from: 'asinlistcategories' },
@@ -1251,45 +1257,82 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
     };
     const { field, from } = groupFieldMap[groupBy] || groupFieldMap.category;
 
+    const effectiveSubtotal = { $ifNull: ['$subtotalUSD', '$subtotal'] };
+
     const pipeline = [
       { $match: match },
       {
-        $group: {
-          _id: { $ifNull: [`$${field}`, null] },
-          count: { $sum: 1 },
-        }
-      },
-      {
-        $lookup: {
-          from,
-          localField: '_id',
-          foreignField: '_id',
-          as: 'taxDoc'
-        }
-      },
-      {
-        $project: {
-          _id: 1,
-          count: 1,
-          name: {
-            $cond: {
-              if: { $eq: ['$_id', null] },
-              then: 'Unassigned',
-              else: { $arrayElemAt: ['$taxDoc.name', 0] }
+        $facet: {
+          grouped: [
+            {
+              $group: {
+                _id: { $ifNull: [`$${field}`, null] },
+                count: { $sum: 1 },
+              }
+            },
+            {
+              $lookup: {
+                from,
+                localField: '_id',
+                foreignField: '_id',
+                as: 'taxDoc'
+              }
+            },
+            {
+              $project: {
+                _id: 1,
+                count: 1,
+                name: {
+                  $cond: {
+                    if: { $eq: ['$_id', null] },
+                    then: 'Unassigned',
+                    else: { $arrayElemAt: ['$taxDoc.name', 0] }
+                  }
+                }
+              }
+            },
+            { $sort: { count: -1 } }
+          ],
+          ticketTiers: [
+            {
+              $group: {
+                _id: {
+                  $switch: {
+                    branches: [
+                      { case: { $lt: [effectiveSubtotal, 30] }, then: 'low' },
+                      { case: { $lt: [effectiveSubtotal, 60] }, then: 'mid' },
+                      { case: { $lt: [effectiveSubtotal, 100] }, then: 'high' },
+                    ],
+                    default: 'extra_high',
+                  },
+                },
+                count: { $sum: 1 },
+              }
             }
-          }
+          ],
         }
-      },
-      { $sort: { count: -1 } }
+      }
     ];
 
-    const results = await Order.aggregate(pipeline);
+    const [facetResult] = await Order.aggregate(pipeline);
+    const grouped = facetResult?.grouped ?? [];
+    const tierMap = Object.fromEntries((facetResult?.ticketTiers ?? []).map(t => [t._id, t.count]));
 
-    res.json(results.map(r => ({
-      id: r._id ? r._id.toString() : null,
-      name: r.name || 'Unassigned',
-      count: r.count,
-    })));
+    const ticketTiers = {
+      low: tierMap.low ?? 0,
+      mid: tierMap.mid ?? 0,
+      high: tierMap.high ?? 0,
+      extra_high: tierMap.extra_high ?? 0,
+    };
+
+    res.json({
+      items: grouped.map(r => ({
+        id: r._id ? r._id.toString() : null,
+        name: r.name || 'Unassigned',
+        count: r.count,
+      })),
+      ticketTiers,
+    });
   } catch (error) {
     console.error('Error fetching CRP analytics:', error);
     res.status(500).json({ error: 'Failed to fetch CRP analytics' });
