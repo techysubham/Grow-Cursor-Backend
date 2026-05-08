@@ -1439,13 +1439,13 @@ function calculateOrderEarnings() {
 
 // --- NEW CONFIG: AUTOMATED WELCOME MESSAGE ---
 const ENABLE_AUTO_WELCOME = true; // Set to false to disable
-const WELCOME_TEMPLATE = `Hi {BUYER_NAME},
+const WELCOME_TEMPLATE = `Hello {BUYER_NAME},
 
-We're pleased to inform you that your order has been processed.
+Thank you for your recent purchase!
 
-Also, we are actively monitoring your order to ensure it reaches you smoothly and tracking number will be updated on your eBay order page as soon as they become available.
+Orders are typically shipped within 12-24 hours. We will keep you updated, and once your order is shipped, the tracking details will be available on your eBay order page.
 
-Thank you for choosing us.`;
+If you need any assistance, please feel free to message us at any time. Wishing you a wonderful day!`;
 
 // --- HELPER: Send Auto Welcome Message ---
 async function sendAutoWelcomeMessage(seller, order) {
