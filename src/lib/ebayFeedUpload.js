@@ -116,29 +116,33 @@ export async function performFeedUpload(sellerId, fileBuffer, fileName, feedType
 /**
  * Runs scheduled auto-uploads: finds all CsvStorage records whose
  * scheduledUploadAt has passed and status is 'pending', then uploads each.
+ *
+ * Uses atomic findOneAndUpdate to claim each record before processing,
+ * preventing double-uploads when concurrent cron ticks or multiple server
+ * instances run simultaneously.
  */
 export async function runScheduledUploads() {
-    const due = await CsvStorage.find({
-        scheduledUploadAt: { $lte: new Date() },
-        scheduledUploadStatus: 'pending'
-    });
+    // Atomically claim one pending-due record at a time so no two concurrent
+    // invocations of this function can ever pick up the same record.
+    let record;
+    while (true) {
+        record = await CsvStorage.findOneAndUpdate(
+            { scheduledUploadAt: { $lte: new Date() }, scheduledUploadStatus: 'pending' },
+            { $set: { scheduledUploadStatus: 'processing' } },
+            { new: true }
+        );
 
-    if (due.length === 0) return;
+        if (!record) break;
 
-    console.log(`[CRON] Auto-upload: ${due.length} record(s) due`);
-
-    for (const record of due) {
-        // Mark as processing first to prevent double-fire
-        await CsvStorage.findByIdAndUpdate(record._id, { scheduledUploadStatus: 'processing' });
+        console.log(`[CRON] Auto-upload: processing "${record.fileName}" (${record._id})`);
 
         try {
-            const full = await CsvStorage.findById(record._id);
-            const sellerId = (full.scheduledSellerId || full.seller).toString();
+            const sellerId = (record.scheduledSellerId || record.seller).toString();
 
             const taskId = await performFeedUpload(
                 sellerId,
-                full.csvData,
-                full.fileName
+                record.csvData,
+                record.fileName
             );
 
             // Link FeedUpload record back to CsvStorage
@@ -148,7 +152,7 @@ export async function runScheduledUploads() {
                 feedUploadId: feedUpload?._id || null
             });
 
-            console.log(`[CRON] Auto-upload done: ${full.fileName} → taskId ${taskId}`);
+            console.log(`[CRON] Auto-upload done: ${record.fileName} → taskId ${taskId}`);
         } catch (err) {
             console.error(`[CRON] Auto-upload failed for ${record._id}: ${err.message}`);
             await CsvStorage.findByIdAndUpdate(record._id, { scheduledUploadStatus: 'failed' });
