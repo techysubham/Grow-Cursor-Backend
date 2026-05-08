@@ -61,7 +61,7 @@ router.get('/', requireAuth, async (req, res) => {
     
     const [listings, total] = await Promise.all([
       TemplateListing.find(filter)
-        .select('+_asinReference')
+        .select('+_asinReference +_amazonSourcePrice')
         .populate('createdBy', 'name email')
         .populate({
           path: 'sellerId',
@@ -554,6 +554,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
 
           // Return existing listing data for editing (generatedListing = user's current saved data)
           // _amazonSourcePrice is included so the save endpoint stores it automatically
+          const freshStartPrice = pricingCalculation?.calculatedStartPrice ?? existingListing.startPrice;
           const item = {
             id: `preview-${asin}`,
             asin,
@@ -564,7 +565,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             generatedListing: {
               title: existingListing.title,
               description: existingListing.description,
-              startPrice: existingListing.startPrice,
+              startPrice: freshStartPrice,
               quantity: existingListing.quantity,
               itemPhotoUrl: existingListing.itemPhotoUrl || '',
               conditionId: existingListing.conditionId || '',
