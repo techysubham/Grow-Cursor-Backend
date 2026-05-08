@@ -9328,11 +9328,17 @@ router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
   const { sellerId } = req.query;
   if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
 
+  // ── SSE setup ───────────────────────────────────────────────────────────────
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
   try {
     const seller = await Seller.findById(sellerId).populate('user', 'username');
-    if (!seller) return res.status(404).json({ error: 'Seller not found' });
-
-    const token = await ensureValidToken(seller);
+    if (!seller) { send({ type: 'error', error: 'Seller not found' }); return res.end(); }
 
     // 32-day window starting now — covers all active GTC and fixed-duration listings
     const endTimeFrom = new Date().toISOString();
@@ -9340,10 +9346,13 @@ router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
 
     let page = 1;
     let totalPages = 1;
-    const tiers = { low: 0, mid: 0, high: 0, total: 0 };
-    const marketplaceData = {}; // currency → { low, mid, high, total }
+    const tiers = { low: 0, mid: 0, high: 0, extra_high: 0, total: 0 };
+    const marketplaceData = {}; // currency → { low, mid, high, extra_high, total }
 
     do {
+      // Re-check token on every page — covers multi-minute crawls where token may expire mid-loop
+      const token = await ensureValidToken(seller);
+
       const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
 <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
   <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
@@ -9403,23 +9412,30 @@ router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
 
         // Ensure marketplace bucket exists
         if (!marketplaceData[currency]) {
-          marketplaceData[currency] = { low: 0, mid: 0, high: 0, total: 0 };
+          marketplaceData[currency] = { low: 0, mid: 0, high: 0, extra_high: 0, total: 0 };
         }
 
         // Tally tiers (global + per-marketplace)
         tiers.total += 1;
         marketplaceData[currency].total += 1;
-        if (priceUSD < 20) {
+        if (priceUSD < 30) {
           tiers.low += 1;
           marketplaceData[currency].low += 1;
-        } else if (priceUSD < 70) {
+        } else if (priceUSD < 60) {
           tiers.mid += 1;
           marketplaceData[currency].mid += 1;
-        } else {
+        } else if (priceUSD < 100) {
           tiers.high += 1;
           marketplaceData[currency].high += 1;
+        } else {
+          tiers.extra_high += 1;
+          marketplaceData[currency].extra_high += 1;
         }
       }
+
+      // ── Per-page progress ────────────────────────────────────────────────────
+      console.log(`[Live Tiers] ${seller.user?.username || sellerId} — page ${page}/${totalPages} (${tiers.total} listings so far)`);
+      send({ type: 'progress', page, totalPages, count: tiers.total });
 
       page++;
     } while (page <= totalPages);
@@ -9431,20 +9447,24 @@ router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
         label: CURRENCY_TO_MARKETPLACE[currency]?.label || `eBay (${currency})`,
         flag:  CURRENCY_TO_MARKETPLACE[currency]?.flag  || '🌐',
         total: mpTiers.total,
-        tiers: { low: mpTiers.low, mid: mpTiers.mid, high: mpTiers.high },
+        tiers: { low: mpTiers.low, mid: mpTiers.mid, high: mpTiers.high, extra_high: mpTiers.extra_high },
       }))
       .sort((a, b) => b.total - a.total);
 
-    res.json({
+    console.log(`[Live Tiers] ${seller.user?.username || sellerId} — done. ${tiers.total} total listings across ${page - 1} pages.`);
+    send({
+      type: 'done',
       success: true,
       sellerName: seller.user?.username || sellerId,
       tiers,
       marketplaceBreakdown,
       pagesFetched: page - 1,
     });
+    res.end();
   } catch (err) {
     console.error('[Live Tiers] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    send({ type: 'error', error: err.message });
+    res.end();
   }
 });
 
