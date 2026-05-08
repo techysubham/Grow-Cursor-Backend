@@ -774,7 +774,7 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
 // ============================================
 router.get('/feed/tasks', requireAuth, async (req, res) => {
   try {
-    const { sellerId, limit = 10, offset = 0 } = req.query;
+    const { sellerId, limit = 10, offset = 0, dateFrom, dateTo, country, status, result } = req.query;
 
     if (!sellerId) {
       return res.status(400).json({ error: 'Missing sellerId' });
@@ -788,21 +788,29 @@ router.get('/feed/tasks', requireAuth, async (req, res) => {
 
     const accessToken = await ensureValidToken(seller);
 
-    // 2. Fetch Tasks from eBay
-    // GET https://api.ebay.com/sell/feed/v1/task
-    // 2. Fetch Tasks from Local DB
+    // 2. Fetch Tasks from Local DB with optional filters
     console.log(`[Feed Tasks] Fetching tasks for seller ${sellerId} from DB...`);
 
-    // Calculate skip based on offset/limit
     const skip = parseInt(offset) || 0;
     const limitNum = parseInt(limit) || 10;
 
-    const dbTasks = await FeedUpload.find({ seller: sellerId })
+    const filter = { seller: sellerId };
+    if (dateFrom || dateTo) {
+      filter.creationDate = {};
+      if (dateFrom) filter.creationDate.$gte = new Date(dateFrom);
+      if (dateTo)   filter.creationDate.$lte = new Date(dateTo);
+    }
+    if (country) filter.country = country;
+    if (status) filter.status = status;
+    if (result === 'hasFailures') filter['uploadSummary.failureCount'] = { $gt: 0 };
+    if (result === 'noFailures') filter['uploadSummary.failureCount'] = 0;
+
+    const dbTasks = await FeedUpload.find(filter)
       .sort({ creationDate: -1 })
       .skip(skip)
       .limit(limitNum);
 
-    const total = await FeedUpload.countDocuments({ seller: sellerId });
+    const total = await FeedUpload.countDocuments(filter);
 
     // 3. Sync Status with eBay for Incomplete Tasks
     // We only need to check status if it's not COMPLETED or FAILURE
