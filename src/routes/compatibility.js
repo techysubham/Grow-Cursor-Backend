@@ -6,6 +6,7 @@ import CompatibilityAssignment from '../models/CompatibilityAssignment.js';
 import Range from '../models/Range.js';
 import TemplateListing from '../models/TemplateListing.js';
 import AsinDirectory from '../models/AsinDirectory.js';
+import { fetchAmazonData } from '../utils/asinAutofill.js';
 
 const router = Router();
 
@@ -389,12 +390,42 @@ router.get('/sku-info/:sku', requireAuth, async (req, res) => {
 
     // Normalize to uppercase + trim — AsinDirectory stores ASINs uppercase
     const asin = listing._asinReference.trim().toUpperCase();
-    const asinDoc = await AsinDirectory.findOne({ asin })
+    let asinDoc = await AsinDirectory.findOne({ asin })
       .select('asin title description brand price images color material specialFeatures size compatibility model')
       .lean();
 
+    // If not in AsinDirectory (or missing key fields), fall back to live scraper
+    // Data is NOT stored — we use the in-memory asinCache so repeat calls are free
+    if (!asinDoc || (!asinDoc.title && !asinDoc.brand)) {
+      try {
+        console.log(`[sku-info] ${asin} not in AsinDirectory — fetching live from scraper`);
+        const scraped = await fetchAmazonData(asin);
+        if (scraped) {
+          return res.json({
+            asin,
+            source: 'live',
+            amazonTitle: scraped.title || null,
+            amazonDescription: scraped.description || null,
+            brand: scraped.brand || null,
+            price: scraped.price || null,
+            images: scraped.images || [],
+            color: scraped.color || null,
+            material: scraped.material || null,
+            specialFeatures: scraped.specialFeatures || null,
+            size: scraped.size || null,
+            compatibility: scraped.compatibility || null,
+            model: scraped.model || null,
+          });
+        }
+      } catch (scrapeErr) {
+        console.warn(`[sku-info] Scraper fallback failed for ${asin}:`, scrapeErr.message);
+        // Fall through and return asin with nulls so the UI shows the ASIN chip at minimum
+      }
+    }
+
     return res.json({
       asin,
+      source: 'db',
       amazonTitle: asinDoc?.title || null,
       amazonDescription: asinDoc?.description || null,
       brand: asinDoc?.brand || null,
