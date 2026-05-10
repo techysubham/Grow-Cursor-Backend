@@ -8786,7 +8786,12 @@ const retryCompatWithTitleDiff = async (token, itemId, compatibilityList) => {
 router.post('/update-compatibility', requireAuth, async (req, res) => {
   const { sellerId, itemId, sku, compatibilityList: rawCompatibilityList, batchId } = req.body;
   try {
+    if (!sellerId) return res.status(400).json({ error: 'sellerId is required' });
+    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
+
     const seller = await Seller.findById(sellerId);
+    if (!seller) return res.status(404).json({ error: `Seller not found: ${sellerId}` });
+
     const token = await ensureValidToken(seller);
     const compatibilityList = sanitizeCompatibilityList(rawCompatibilityList);
 
