@@ -9317,6 +9317,179 @@ router.get('/all-listings', requireAuth, async (req, res) => {
 });
 
 // ============================================
+// GET EXPIRING LOW-ACTIVITY LISTINGS — LIVE via eBay API (SSE stream)
+// ============================================
+// Streams progress events while paging through GetSellerList.
+// Returns listings expiring within 24 hours that have:
+//   - watchers < 5
+//   - views (HitCount, 30-day rolling) < 5
+//   - sold quantity == 0
+// Stops early if the client disconnects (Stop button) or if a page
+// contains items whose end time is already beyond 24 hours (safety guard).
+router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
+  const { sellerId } = req.query;
+  if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
+
+  // ── SSE setup ────────────────────────────────────────────────────────────
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  let aborted = false;
+  req.on('close', () => { aborted = true; });
+
+  const send = (obj) => {
+    if (!aborted) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  };
+
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller) { send({ type: 'error', error: 'Seller not found' }); return res.end(); }
+
+    const now = new Date();
+    const cutoff24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const endTimeFrom = now.toISOString();
+    const endTimeTo   = cutoff24h.toISOString();
+
+    let page = 1;
+    let totalPages = 1;
+    const filteredListings = [];
+
+    do {
+      if (aborted) break;
+
+      const token = await ensureValidToken(seller);
+
+      const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <EndTimeFrom>${endTimeFrom}</EndTimeFrom>
+  <EndTimeTo>${endTimeTo}</EndTimeTo>
+  <IncludeWatchCount>true</IncludeWatchCount>
+  <GranularityLevel>Fine</GranularityLevel>
+  <Pagination>
+    <EntriesPerPage>100</EntriesPerPage>
+    <PageNumber>${page}</PageNumber>
+  </Pagination>
+</GetSellerListRequest>`;
+
+      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+        headers: {
+          'X-EBAY-API-CALL-NAME': 'GetSellerList',
+          'X-EBAY-API-SITEID': '0',
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+          'Content-Type': 'text/xml',
+        },
+      });
+
+      const result = await parseStringPromise(response.data, { explicitArray: false });
+      const resp = result.GetSellerListResponse;
+
+      if (resp.Ack === 'Failure') {
+        const errors = resp.Errors;
+        const msg = Array.isArray(errors) ? errors[0].LongMessage : errors?.LongMessage;
+        throw new Error(msg || 'eBay API error');
+      }
+
+      const pagination = resp.PaginationResult;
+      if (!pagination) break;
+      totalPages = parseInt(pagination.TotalNumberOfPages || '1', 10);
+
+      const rawItems = resp.ItemArray?.Item;
+      const items = rawItems
+        ? Array.isArray(rawItems) ? rawItems : [rawItems]
+        : [];
+
+      let pageHasBeyond24h = false;
+
+      for (const item of items) {
+        const listingStatus = item.SellingStatus?.ListingStatus;
+        if (listingStatus !== 'Active') continue;
+
+        const endTime = item.ListingDetails?.EndTime;
+
+        // Safety guard: if this item ends beyond 24 hrs, skip it (eBay filter already
+        // handles this, but guard against clock drift / edge cases).
+        if (endTime && new Date(endTime) > cutoff24h) {
+          pageHasBeyond24h = true;
+          continue;
+        }
+
+        const watchCount   = parseInt(item.WatchCount || '0', 10);
+        const hitCount     = parseInt(item.HitCount   || '0', 10);
+        const quantitySold = parseInt(item.SellingStatus?.QuantitySold || '0', 10);
+
+        if (watchCount >= 5) continue;
+        if (hitCount   >= 5) continue;
+        if (quantitySold > 0) continue;
+
+        const timeLeftMs  = endTime ? new Date(endTime).getTime() - now.getTime() : 0;
+        const hoursLeft   = Math.max(0, Math.floor(timeLeftMs / (1000 * 60 * 60)));
+        const minutesLeft = Math.max(0, Math.floor((timeLeftMs % (1000 * 60 * 60)) / (1000 * 60)));
+
+        const rawNative   = item.SellingStatus?.CurrentPrice;
+        const rawConverted = item.SellingStatus?.ConvertedCurrentPrice;
+        const currentPrice = parseFloat(
+          typeof rawNative === 'object' ? (rawNative?._ ?? '0') : (rawNative ?? '0')
+        );
+        const currentPriceUSD = parseFloat(
+          typeof rawConverted === 'object' ? (rawConverted?._ ?? '0') : (rawConverted ?? currentPrice ?? '0')
+        );
+        const currency = (
+          typeof rawNative === 'object' ? rawNative?.$?.currencyID : undefined
+        ) || 'USD';
+
+        const rawPic = item.PictureDetails?.PictureURL;
+        const mainImageUrl = Array.isArray(rawPic) ? rawPic[0] : (rawPic || '');
+
+        filteredListings.push({
+          itemId: item.ItemID,
+          title: item.Title,
+          sku: item.SKU || '',
+          currentPrice,
+          currentPriceUSD,
+          currency,
+          endTime,
+          hoursLeft,
+          minutesLeft,
+          watchCount,
+          hitCount,
+          quantitySold,
+          mainImageUrl,
+          categoryName: item.PrimaryCategory?.CategoryName || '',
+          quantity: parseInt(item.Quantity || '1', 10),
+        });
+      }
+
+      // Stream progress to client
+      send({ type: 'progress', page, totalPages, count: filteredListings.length });
+
+      // Stop early if all items on this page are already beyond the 24-hour window
+      // (eBay has finished returning relevant results)
+      if (pageHasBeyond24h && items.every(item => {
+        const et = item.ListingDetails?.EndTime;
+        return et && new Date(et) > cutoff24h;
+      })) {
+        break;
+      }
+
+      page++;
+    } while (page <= totalPages);
+
+    send({ type: 'done', count: filteredListings.length, listings: filteredListings });
+
+  } catch (err) {
+    console.error('[Expiring Low Activity Listings] Error:', err.message);
+    send({ type: 'error', error: err.message });
+  } finally {
+    res.end();
+  }
+});
+
+// ============================================
 // GET ACTIVE LISTING PRICE TIERS — LIVE via eBay API
 // ============================================
 // Pages through GetSellerList (EndTimeFrom=now, EndTimeTo=now+32days) for the selected seller and returns:
