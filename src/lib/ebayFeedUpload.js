@@ -57,9 +57,10 @@ async function ensureValidToken(seller) {
  * @param {string} fileName - Original filename for the upload
  * @param {string} feedType - eBay feed type (default: 'FX_LISTING')
  * @param {string} schemaVersion - eBay schema version (default: '1.0')
+ * @param {object} [options] - Optional metadata: { country, categoryId, rangeId, productId }
  * @returns {Promise<string>} taskId
  */
-export async function performFeedUpload(sellerId, fileBuffer, fileName, feedType = 'FX_LISTING', schemaVersion = '1.0') {
+export async function performFeedUpload(sellerId, fileBuffer, fileName, feedType = 'FX_LISTING', schemaVersion = '1.0', options = {}) {
     const seller = await Seller.findById(sellerId);
     if (!seller) throw new Error(`Seller not found: ${sellerId}`);
 
@@ -101,14 +102,19 @@ export async function performFeedUpload(sellerId, fileBuffer, fileName, feedType
     );
 
     // 3. Create local FeedUpload record
-    await FeedUpload.create({
+    const feedUploadData = {
         seller: seller._id,
         taskId,
         fileName,
         feedType,
         schemaVersion,
         status: 'CREATED'
-    });
+    };
+    if (options.country) feedUploadData.country = options.country;
+    if (options.categoryId) feedUploadData.categoryId = options.categoryId;
+    if (options.rangeId) feedUploadData.rangeId = options.rangeId;
+    if (options.productId) feedUploadData.productId = options.productId;
+    await FeedUpload.create(feedUploadData);
 
     return taskId;
 }
@@ -139,10 +145,29 @@ export async function runScheduledUploads() {
         try {
             const sellerId = (record.scheduledSellerId || record.seller).toString();
 
+            // Pass through metadata fields so FeedUpload record has correct
+            // country, category, range, and product instead of defaulting.
+            const uploadOptions = {};
+            if (record.country) uploadOptions.country = record.country;
+            if (record.categoryId) uploadOptions.categoryId = record.categoryId;
+            if (record.rangeId) uploadOptions.rangeId = record.rangeId;
+            if (record.productId) uploadOptions.productId = record.productId;
+
+            console.log(`[CRON] Auto-upload metadata for "${record.fileName}":`, {
+                country: record.country || '(not set)',
+                categoryId: record.categoryId || '(not set)',
+                rangeId: record.rangeId || '(not set)',
+                productId: record.productId || '(not set)',
+                uploadOptions
+            });
+
             const taskId = await performFeedUpload(
                 sellerId,
                 record.csvData,
-                record.fileName
+                record.fileName,
+                'FX_LISTING',
+                '1.0',
+                uploadOptions
             );
 
             // Link FeedUpload record back to CsvStorage

@@ -90,6 +90,11 @@ const csvStorageSchema = new mongoose.Schema({
         type: String,
         enum: ['manual', 'asin_list', null],
         default: null
+    },
+    country: {
+        type: String,
+        enum: ['US', 'UK', 'AU', 'Canada', null],
+        default: null
     }
 });
 
