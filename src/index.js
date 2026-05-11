@@ -25,6 +25,7 @@ import compatibilityRoutes from './routes/compatibility.js';
 import listingCompletionsRoutes from './routes/listingCompletions.js';
 
 import ebayRoutes, { resumeRunningAutoCompatibilityBatches } from './routes/ebay.js';
+import bestOffersRoutes from './routes/bestOffers.js';
 import sellersRoutes from './routes/sellers.js';
 import employeeProfilesRoutes from './routes/employeeProfiles.js';
 import storeWiseTasksRoutes from './routes/storeWiseTasks.js';
@@ -144,6 +145,7 @@ app.use('/api/compatibility', compatibilityRoutes);
 app.use('/api/listing-completions', listingCompletionsRoutes);
 
 app.use('/api/ebay', ebayRoutes);
+app.use('/api/ebay', bestOffersRoutes);
 app.use('/api/sellers', sellersRoutes);
 app.use('/api/employee-profiles', employeeProfilesRoutes);
 app.use('/api/store-wise-tasks', storeWiseTasksRoutes);
