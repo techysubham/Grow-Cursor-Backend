@@ -51,6 +51,26 @@ const escapeXml = (s) =>
 // ─── Normalise single-item eBay responses to arrays ───────────────────────────
 const toArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
 
+// ─── Fetch SKU for a single item via GetItem ─────────────────────────────────
+// GetItem always returns Item.SKU (the seller's custom label / SKU) when set.
+async function fetchItemSku(token, siteId, itemId) {
+  try {
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ItemID>${escapeXml(itemId)}</ItemID>
+  <IncludeItemSpecifics>false</IncludeItemSpecifics>
+</GetItemRequest>`;
+    const resp = await axios.post(EBAY_TRADING_URL, xml, {
+      headers: tradingHeaders('GetItem', siteId),
+    });
+    const parsed = await parseStringPromise(resp.data, { explicitArray: false });
+    return parsed?.GetItemResponse?.Item?.SKU ?? '';
+  } catch {
+    return '';
+  }
+}
+
 // ─── Normalise one eBay BestOffer node into a clean object ───────────────────
 // Works for both ItemBestOffersArray.ItemBestOffers.Item (no ItemID call) and
 // the top-level Item returned when an ItemID is supplied.
@@ -143,6 +163,19 @@ router.get('/best-offers', requireAuth, async (req, res) => {
       const item = entry?.Item ?? {};
       for (const offer of toArray(entry?.BestOfferArray?.BestOffer)) {
         offers.push(parseOffer(item, offer));
+      }
+    }
+
+    // ── Enrich with SKU via GetItem (parallel, one call per unique item ID) ──
+    // GetBestOffers does not return Item.SKU in its item stub; GetItem does.
+    if (offers.length > 0) {
+      const uniqueItemIds = [...new Set(offers.map(o => o.itemId).filter(Boolean))];
+      const skuResults = await Promise.all(
+        uniqueItemIds.map(id => fetchItemSku(token, siteId, id).then(sku => [id, sku]))
+      );
+      const skuMap = Object.fromEntries(skuResults);
+      for (const offer of offers) {
+        if (skuMap[offer.itemId]) offer.sku = skuMap[offer.itemId];
       }
     }
 
