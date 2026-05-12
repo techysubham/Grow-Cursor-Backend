@@ -9320,12 +9320,15 @@ router.get('/all-listings', requireAuth, async (req, res) => {
 // GET EXPIRING LOW-ACTIVITY LISTINGS — LIVE via eBay API (SSE stream)
 // ============================================
 // Streams progress events while paging through GetSellerList.
-// Returns listings expiring within 24 hours that have:
+// Returns listings expiring within the requested time window (24–96 h) that have:
 //   - watchers < 5
 //   - views (HitCount, 30-day rolling) < 5
 //   - sold quantity == 0
 // Stops early if the client disconnects (Stop button) or if a page
-// contains items whose end time is already beyond 24 hours (safety guard).
+// contains items whose end time is already beyond the cutoff (safety guard).
+// Query params:
+//   sellerId  — required
+//   hours     — optional, one of [24, 48, 72, 96], default 24
 router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
   const { sellerId } = req.query;
   if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
@@ -9348,9 +9351,12 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
     if (!seller) { send({ type: 'error', error: 'Seller not found' }); return res.end(); }
 
     const now = new Date();
-    const cutoff24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const allowedHours = [24, 48, 72, 96];
+    const hoursParam = parseInt(req.query.hours || '24', 10);
+    const hours = allowedHours.includes(hoursParam) ? hoursParam : 24;
+    const cutoff = new Date(now.getTime() + hours * 60 * 60 * 1000);
     const endTimeFrom = now.toISOString();
-    const endTimeTo   = cutoff24h.toISOString();
+    const endTimeTo   = cutoff.toISOString();
 
     let page = 1;
     let totalPages = 1;
@@ -9403,7 +9409,7 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
         ? Array.isArray(rawItems) ? rawItems : [rawItems]
         : [];
 
-      let pageHasBeyond24h = false;
+      let pageHasBeyondCutoff = false;
 
       for (const item of items) {
         const listingStatus = item.SellingStatus?.ListingStatus;
@@ -9411,10 +9417,10 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
 
         const endTime = item.ListingDetails?.EndTime;
 
-        // Safety guard: if this item ends beyond 24 hrs, skip it (eBay filter already
+        // Safety guard: if this item ends beyond the cutoff, skip it (eBay filter already
         // handles this, but guard against clock drift / edge cases).
-        if (endTime && new Date(endTime) > cutoff24h) {
-          pageHasBeyond24h = true;
+        if (endTime && new Date(endTime) > cutoff) {
+          pageHasBeyondCutoff = true;
           continue;
         }
 
@@ -9469,9 +9475,9 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
 
       // Stop early if all items on this page are already beyond the 24-hour window
       // (eBay has finished returning relevant results)
-      if (pageHasBeyond24h && items.every(item => {
+      if (pageHasBeyondCutoff && items.every(item => {
         const et = item.ListingDetails?.EndTime;
-        return et && new Date(et) > cutoff24h;
+        return et && new Date(et) > cutoff;
       })) {
         break;
       }
