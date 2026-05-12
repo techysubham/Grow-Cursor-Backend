@@ -4211,6 +4211,15 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
                     orderData = { ...orderData, ...refundData };
                   }
 
+                  // If this is a PAID order with an existing adFeeGeneral, buildOrderData()
+                  // calculated orderEarnings without it (defaulted to 0). Correct it now.
+                  if (existingOrder.adFeeGeneral > 0 &&
+                    (orderData.orderPaymentStatus || existingOrder.orderPaymentStatus) === 'PAID' &&
+                    !refundData) {
+                    const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
+                    orderData.orderEarnings = parseFloat((totalDueSeller - existingOrder.adFeeGeneral).toFixed(2));
+                  }
+
                   Object.assign(existingOrder, orderData);
                   await existingOrder.save();
                   updatedOrders.push(existingOrder);
@@ -4294,6 +4303,15 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
                   // If refund handling returned data, merge it with orderData
                   if (refundData) {
                     orderData = { ...orderData, ...refundData };
+                  }
+
+                  // If this is a PAID order with an existing adFeeGeneral, buildOrderData()
+                  // calculated orderEarnings without it (defaulted to 0). Correct it now.
+                  if (existingOrder.adFeeGeneral > 0 &&
+                    (orderData.orderPaymentStatus || existingOrder.orderPaymentStatus) === 'PAID' &&
+                    !refundData) {
+                    const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
+                    orderData.orderEarnings = parseFloat((totalDueSeller - existingOrder.adFeeGeneral).toFixed(2));
                   }
 
                   // Define fields that should trigger notifications
@@ -5293,6 +5311,24 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                 existingOrder.profit = financials.profit;
 
                 console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
+              } else if (existingOrder.orderPaymentStatus === 'PAID' && existingOrder.adFeeGeneral > 0) {
+                // PAID order with an existing adFeeGeneral — buildOrderData() calculated earnings
+                // without it (defaulted to 0), so correct it now using the stored adFeeGeneral.
+                const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
+                existingOrder.orderEarnings = parseFloat((totalDueSeller - existingOrder.adFeeGeneral).toFixed(2));
+
+                // Recalculate downstream financial fields
+                const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                  existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
+                existingOrder.tds = financials.tds;
+                existingOrder.tid = financials.tid;
+                existingOrder.net = financials.net;
+                existingOrder.pBalanceINR = financials.pBalanceINR;
+                existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                existingOrder.profit = financials.profit;
+
+                console.log(`  💰 Corrected earnings for ${ebayOrder.orderId}: $${existingOrder.orderEarnings} (adFeeGeneral=$${existingOrder.adFeeGeneral})`);
               }
 
               await existingOrder.save();

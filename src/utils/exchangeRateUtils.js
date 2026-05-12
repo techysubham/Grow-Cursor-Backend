@@ -271,7 +271,7 @@ export async function calculateOrderAmazonFinancials(order, overrideRate = null)
   if (resolvedRate && resolvedRate.rate) {
     updates.amazonExchangeRate = resolvedRate.rate;
     updates.amazonTotalINR = parseFloat((updates.amazonTotal * resolvedRate.rate).toFixed(2));
-    updates.marketplaceFee = parseFloat((updates.amazonTotalINR * 0.04).toFixed(2));
+    updates.marketplaceFee = parseFloat((updates.amazonTotalINR * 0.035).toFixed(2));
     updates.igst = parseFloat((updates.marketplaceFee * 0.18).toFixed(2));
     updates.totalCC = parseFloat((updates.marketplaceFee + updates.igst).toFixed(2));
   } else {
