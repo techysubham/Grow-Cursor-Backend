@@ -3,11 +3,13 @@ import { validate } from '../utils/validate.js';
 import { createIdeaSchema, addIdeaCommentSchema } from '../schemas/index.js';
 import Idea from '../models/Idea.js';
 import { parsePagination, paginateQuery } from '../utils/paginate.js';
+import { requireAuth } from '../middleware/auth.js';
 
 const router = express.Router();
 
+router.use(requireAuth);
+
 // Get all ideas/tickets with pagination and filters
-// PUBLIC ROUTE - No authentication required
 router.get('/', async (req, res) => {
   try {
     const { status, priority, type, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
