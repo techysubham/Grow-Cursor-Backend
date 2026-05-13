@@ -1396,11 +1396,11 @@ router.get('/crp-comparison', requireAuth, requirePageAccess('CRPComparison'), a
         orderOnlyCrps,
         largestGap: largestGapRow
           ? {
-              count: largestGapRow.absGap,
-              categoryName: largestGapRow.categoryName,
-              rangeName: largestGapRow.rangeName,
-              productName: largestGapRow.productName,
-            }
+            count: largestGapRow.absGap,
+            categoryName: largestGapRow.categoryName,
+            rangeName: largestGapRow.rangeName,
+            productName: largestGapRow.productName,
+          }
           : null,
       },
       rows,
