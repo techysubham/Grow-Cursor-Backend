@@ -1881,7 +1881,7 @@ router.get('/callback', async (req, res) => {
 });
 
 // 3. Fetch Orders (for polling) by sellerId, region(s), with token refresh
-router.get('/orders', async (req, res) => {
+router.get('/orders', requireAuth, async (req, res) => {
   const { sellerId, region } = req.query;
   if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
   try {
@@ -2024,7 +2024,7 @@ router.get('/orders', async (req, res) => {
 });
 
 // New endpoint: Get orders with any cancellation status
-router.get('/cancelled-orders', async (req, res) => {
+router.get('/cancelled-orders', requireAuth, async (req, res) => {
   try {
     const { startDate, endDate, sellerId, marketplace, page = 1, limit = 50 } = req.query;
 
@@ -2132,7 +2132,7 @@ router.get('/order/:orderId', requireAuth, requirePageAccess('Fulfillment'), asy
 
 
 // Get stored orders from database with pagination support
-router.get('/stored-orders', async (req, res) => {
+router.get('/stored-orders', requireAuth, async (req, res) => {
   const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient } = req.query;
 
   try {
@@ -2487,7 +2487,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 }
 
 // NEW ENDPOINT: All Orders with USD conversion
-router.get('/all-orders-usd', async (req, res) => {
+router.get('/all-orders-usd', requireAuth, async (req, res) => {
   const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemNumber, productName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
 
   try {
@@ -3054,7 +3054,7 @@ router.get('/test-finances/:orderId', requireAuth, requirePageAccess('AllOrdersS
 });
 
 // Update ad fee general for an order
-router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
+router.patch('/orders/:orderId/ad-fee-general', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { adFeeGeneral } = req.body;
 
@@ -3601,7 +3601,7 @@ router.post('/backfill-amazon-financials', requireAuth, requirePageAccess('AllOr
 });
 
 // Update manual tracking number for an order (does NOT affect fulfillment tracking)
-router.patch('/orders/:orderId/manual-tracking', async (req, res) => {
+router.patch('/orders/:orderId/manual-tracking', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { manualTrackingNumber } = req.body;
 
@@ -3627,7 +3627,7 @@ router.patch('/orders/:orderId/manual-tracking', async (req, res) => {
 });
 
 // Upload tracking number to eBay and mark order as shipped
-router.post('/orders/:orderId/upload-tracking', async (req, res) => {
+router.post('/orders/:orderId/upload-tracking', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { trackingNumber, shippingCarrier = 'USPS' } = req.body;
 
@@ -3827,7 +3827,7 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
 });
 
 // Upload multiple tracking numbers to eBay (for orders with multiple different items)
-router.post('/orders/:orderId/upload-tracking-multiple', async (req, res) => {
+router.post('/orders/:orderId/upload-tracking-multiple', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { trackingData, shippingCarrier = 'USPS' } = req.body;
   // trackingData format: [{ itemId: '12345', trackingNumber: 'ABC123', carrier: 'USPS' }, ...]
@@ -5318,7 +5318,7 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
 }
 
 // Update messaging status for an order
-router.patch('/orders/:orderId/messaging-status', async (req, res) => {
+router.patch('/orders/:orderId/messaging-status', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { messagingStatus } = req.body;
 
@@ -5356,7 +5356,7 @@ router.patch('/orders/:orderId/messaging-status', async (req, res) => {
 });
 
 // Update item status for an order
-router.patch('/orders/:orderId/item-status', async (req, res) => {
+router.patch('/orders/:orderId/item-status', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { itemStatus, resolvedFrom } = req.body;
 
@@ -5400,7 +5400,7 @@ router.patch('/orders/:orderId/item-status', async (req, res) => {
 });
 
 // Update notes for an order from awaiting shipment page 
-router.patch('/orders/:orderId/notes', async (req, res) => {
+router.patch('/orders/:orderId/notes', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { notes } = req.body;
 
@@ -5432,7 +5432,7 @@ router.patch('/orders/:orderId/notes', async (req, res) => {
 });
 
 // --- NEW ROUTE: Update Fulfillment Notes ---
-router.patch('/orders/:orderId/fulfillment-notes', async (req, res) => {
+router.patch('/orders/:orderId/fulfillment-notes', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { fulfillmentNotes } = req.body;
 
@@ -5702,7 +5702,7 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
 });
 // Get stored returns from database
 
-router.get('/stored-returns', async (req, res) => {
+router.get('/stored-returns', requireAuth, async (req, res) => {
   const { sellerId, status, reason, startDate, endDate, urgentOnly, page = 1, limit = 50 } = req.query;
 
   try {
@@ -6012,7 +6012,7 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
 });
 
 // Get stored INR cases from database
-router.get('/stored-inr-cases', async (req, res) => {
+router.get('/stored-inr-cases', requireAuth, async (req, res) => {
   const { sellerId, status, caseType, limit = 200 } = req.query;
 
   try {
@@ -6238,7 +6238,7 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
 });
 
 // Get stored Payment Disputes from database
-router.get('/stored-payment-disputes', async (req, res) => {
+router.get('/stored-payment-disputes', requireAuth, async (req, res) => {
   const { sellerId, status, reason, limit = 200, startDate, endDate, dateField = 'openDate' } = req.query;
 
   try {
@@ -7529,7 +7529,7 @@ router.post('/fetch-messages', requireAuth, requirePageAccess('BuyerMessages'), 
 });
 
 // Get stored messages from database
-router.get('/stored-messages', async (req, res) => {
+router.get('/stored-messages', requireAuth, async (req, res) => {
   const { sellerId, isResolved, limit = 100 } = req.query;
 
   try {

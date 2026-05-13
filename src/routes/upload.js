@@ -2,6 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { requireAuth } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -28,7 +29,7 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 });
 
-router.post('/', upload.array('files', 5), (req, res) => {
+router.post('/', requireAuth, upload.array('files', 5), (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded' });
