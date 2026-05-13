@@ -647,6 +647,88 @@ export async function resumeRunningAutoCompatibilityBatches() {
 }
 
 // ============================================
+// CHECK IF SKU IS ACTIVE ON EBAY
+// Uses GetSellerList with SKUArray — unlike GetMyeBaySelling, this endpoint performs
+// true server-side SKU filtering (up to 25 matching listings returned).
+// EndTimeFrom=now scopes results to listings that have not yet ended.
+// No local DB call, no pagination, single eBay API request.
+// ============================================
+const MARKETPLACE_SITE_IDS = {
+  EBAY_US: '0', EBAY_AU: '15', EBAY_GB: '3', EBAY_CA: '2',
+  EBAY_DE: '77', EBAY_FR: '71', EBAY_IT: '101', EBAY_ES: '186',
+};
+
+router.get('/check-sku-active', requireAuth, async (req, res) => {
+  try {
+    const { sku, sellerId } = req.query;
+    if (!sku || !sellerId) {
+      return res.status(400).json({ error: 'sku and sellerId are required' });
+    }
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const token = await ensureValidToken(seller);
+    const marketplace = (seller.ebayMarketplaces || [])[0] || 'EBAY_US';
+    const siteId = MARKETPLACE_SITE_IDS[marketplace] || '0';
+
+    // EndTimeFrom=now + EndTimeTo=now+120d covers all active listings regardless of duration.
+    // GTC listings renew every 30 days; fixed-duration max is 60-90 days on most sites.
+    const now = new Date();
+    const endTimeTo = new Date(now.getTime() + 120 * 24 * 60 * 60 * 1000);
+
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <SKUArray>
+    <SKU>${sku}</SKU>
+  </SKUArray>
+  <EndTimeFrom>${now.toISOString()}</EndTimeFrom>
+  <EndTimeTo>${endTimeTo.toISOString()}</EndTimeTo>
+  <OutputSelector>ItemArray.Item.SKU</OutputSelector>
+  <OutputSelector>ItemArray.Item.SellingStatus.ListingStatus</OutputSelector>
+  <Pagination>
+    <EntriesPerPage>5</EntriesPerPage>
+    <PageNumber>1</PageNumber>
+  </Pagination>
+  <Version>1173</Version>
+</GetSellerListRequest>`;
+
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+      headers: {
+        'X-EBAY-API-CALL-NAME': 'GetSellerList',
+        'X-EBAY-API-SITEID': siteId,
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1173',
+        'Content-Type': 'text/xml',
+      },
+    });
+
+    const result = await parseStringPromise(response.data, { explicitArray: false });
+    const resp = result.GetSellerListResponse;
+
+    if (resp?.Ack === 'Failure') {
+      console.error('[check-sku-active] eBay error:', JSON.stringify(resp.Errors));
+      return res.json({ active: false });
+    }
+
+    const itemData = resp?.ItemArray?.Item;
+
+    // SKUArray + EndTimeFrom=now already filter server-side:
+    //   - SKUArray ensures only listings with this SKU are returned
+    //   - EndTimeFrom=now ensures only listings that haven't yet ended are returned
+    // So if eBay returns ANY items, the SKU is active. We don't rely on field values
+    // since OutputSelector fields may not be populated for FX feed-uploaded listings.
+    const active = !!itemData;
+    return res.json({ active });
+  } catch (error) {
+    console.error('[check-sku-active] Error:', error.message);
+    res.status(500).json({ error: 'Failed to check SKU status', details: error.response?.data || error.message });
+  }
+});
+
+// ============================================
 // UPLOAD FEED TO EBAY
 // ============================================
 router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res) => {
