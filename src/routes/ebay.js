@@ -668,8 +668,9 @@ function extractBaseSku(sku) {
 // In-memory tracking: sellerId (string) → { status, startedAt, totalCount, lastSyncAt, error }
 const skuSyncStatus = new Map();
 
-// Background sync — paginates GetSellerList to rebuild the SellerSkuIndex collection
-async function runSkuIndexSync(seller) {
+// Background sync — paginates GetSellerList to rebuild the SellerSkuIndex collection.
+// send(obj) is an optional SSE callback for live progress; omit for fire-and-forget.
+async function runSkuIndexSync(seller, send = null) {
   const syncStart = new Date();
   const sellerId = seller._id.toString();
 
@@ -760,6 +761,7 @@ async function runSkuIndexSync(seller) {
     }
 
     skuSyncStatus.set(sellerId, { status: 'running', startedAt: skuSyncStatus.get(sellerId)?.startedAt, totalCount });
+    if (send) send({ type: 'progress', page, totalPages, totalEntries, count: totalCount });
 
     page++;
   } while (page <= totalPages);
@@ -768,50 +770,56 @@ async function runSkuIndexSync(seller) {
   await SellerSkuIndex.deleteMany({ seller: seller._id, syncedAt: { $lt: syncStart } });
 
   console.log(`[sync-sku-index] seller=${sellerId} DONE — ${totalCount} listings indexed`);
-  return totalCount;
+  return { totalCount, syncedAt: syncStart };
 }
 
-// POST /ebay/sync-sku-index  — trigger background sync for a seller
-router.post('/sync-sku-index', requireAuth, async (req, res) => {
+// GET /ebay/sync-sku-index/stream?sellerId=...  — SSE: streams progress then done
+router.get('/sync-sku-index/stream', requireAuth, async (req, res) => {
+  const { sellerId } = req.query;
+  if (!sellerId) return res.status(400).json({ error: 'sellerId is required' });
+
+  const current = skuSyncStatus.get(sellerId);
+  if (current?.status === 'running') {
+    return res.status(409).json({ error: 'Sync already in progress for this seller' });
+  }
+
+  // SSE setup
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
   try {
-    const { sellerId } = req.body;
-    if (!sellerId) return res.status(400).json({ error: 'sellerId is required' });
-
-    const current = skuSyncStatus.get(sellerId);
-    if (current?.status === 'running') {
-      return res.json({ message: 'Sync already in progress', status: 'running', totalCount: current.totalCount });
-    }
-
-    const seller = await Seller.findById(sellerId);
-    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) { send({ type: 'error', error: 'Seller not found' }); return res.end(); }
 
     const startedAt = new Date();
     skuSyncStatus.set(sellerId, { status: 'running', startedAt, totalCount: 0 });
 
-    runSkuIndexSync(seller)
-      .then(totalCount => {
-        skuSyncStatus.set(sellerId, { status: 'completed', startedAt, totalCount, lastSyncAt: new Date() });
-        console.log(`[sync-sku-index] Seller ${sellerId} done — ${totalCount} listings indexed`);
-      })
-      .catch(err => {
-        console.error(`[sync-sku-index] Seller ${sellerId} failed:`, err.message);
-        skuSyncStatus.set(sellerId, { status: 'failed', startedAt, error: err.message });
-      });
+    const { totalCount, syncedAt } = await runSkuIndexSync(seller, send);
 
-    return res.json({ message: 'Sync started', status: 'running' });
-  } catch (error) {
-    console.error('[sync-sku-index] Error:', error.message);
-    res.status(500).json({ error: 'Failed to start sync', details: error.message });
+    skuSyncStatus.set(sellerId, { status: 'completed', startedAt, totalCount, lastSyncAt: syncedAt });
+    send({ type: 'done', totalCount, syncedAt });
+  } catch (err) {
+    console.error('[sync-sku-index/stream] Error:', err.message);
+    skuSyncStatus.set(sellerId, { status: 'failed', error: err.message });
+    send({ type: 'error', error: err.message });
+  } finally {
+    res.end();
   }
 });
 
-// GET /ebay/sync-sku-index/status/:sellerId  — current sync state + DB count
+// GET /ebay/sync-sku-index/status/:sellerId  — current sync state + DB count + syncedAt
 router.get('/sync-sku-index/status/:sellerId', requireAuth, async (req, res) => {
   try {
     const { sellerId } = req.params;
     const mem = skuSyncStatus.get(sellerId) || { status: 'idle' };
     const dbCount = await SellerSkuIndex.countDocuments({ seller: sellerId });
-    return res.json({ ...mem, dbCount });
+    // Get the syncedAt from the most recent record for this seller
+    const latest = await SellerSkuIndex.findOne({ seller: sellerId }).sort({ syncedAt: -1 }).select('syncedAt').lean();
+    return res.json({ ...mem, dbCount, syncedAt: latest?.syncedAt || null });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch sync status', details: error.message });
   }
