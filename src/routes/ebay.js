@@ -1137,7 +1137,7 @@ async function calculateAmazonFinancials(order) {
 }
 
 // HELPER: Ensure Seller Token is Valid (Refreshes if < 2 mins left)
-async function ensureValidToken(seller, retries = 3) {
+export async function ensureValidToken(seller, retries = 3) {
   const now = Date.now();
   const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
   const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;

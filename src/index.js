@@ -24,6 +24,7 @@ import assignmentsRouter from './routes/assignments.js';
 import compatibilityRoutes from './routes/compatibility.js';
 
 import ebayRoutes, { resumeRunningAutoCompatibilityBatches } from './routes/ebay.js';
+import bestOffersRoutes from './routes/bestOffers.js';
 import sellersRoutes from './routes/sellers.js';
 import employeeProfilesRoutes from './routes/employeeProfiles.js';
 import amazonAccountRoutes from './routes/amazonAccounts.js';
@@ -135,6 +136,7 @@ app.use('/api/assignments', assignmentsRouter);
 app.use('/api/compatibility', compatibilityRoutes);
 
 app.use('/api/ebay', ebayRoutes);
+app.use('/api/ebay', bestOffersRoutes);
 app.use('/api/sellers', sellersRoutes);
 app.use('/api/employee-profiles', employeeProfilesRoutes);
 app.use('/api/amazon-accounts', amazonAccountRoutes);
