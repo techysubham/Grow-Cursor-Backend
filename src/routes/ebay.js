@@ -683,7 +683,8 @@ async function runSkuIndexSync(seller, send = null) {
   let page = 1;
   let totalPages = 1;
   let totalCount = 0;
-  let allPagesOk = false;
+  // Cache once — set by the SSE endpoint before invoking this function
+  const startedAt = skuSyncStatus.get(sellerId)?.startedAt ?? syncStart;
 
   do {
     // Re-check token on every page — covers multi-minute crawls where token may expire mid-loop
@@ -706,7 +707,6 @@ async function runSkuIndexSync(seller, send = null) {
   <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
   <OutputSelector>ItemArray.Item.SKU</OutputSelector>
   <OutputSelector>ItemArray.Item.Title</OutputSelector>
-  <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
   <OutputSelector>PaginationResult</OutputSelector>
 </GetSellerListRequest>`;
 
@@ -733,21 +733,12 @@ async function runSkuIndexSync(seller, send = null) {
     const totalEntries = parseInt(pagination?.TotalNumberOfEntries?.[0] || '0', 10);
     const items = resp?.ItemArray?.[0]?.Item || [];
 
-    // -- BREAKDOWN LOG --
-    const statusBreakdown = {};
+    const ops = [];
     let skuBlankCount = 0;
     let skuPresentCount = 0;
     for (const item of items) {
-      const status = item.SellingStatus?.[0]?.ListingStatus?.[0] || 'unknown';
-      statusBreakdown[status] = (statusBreakdown[status] || 0) + 1;
-      if (item.SKU?.[0]) skuPresentCount++; else skuBlankCount++;
-    }
-    console.log(`[sync-sku-index] page=${page}/${totalPages} totalEntries=${totalEntries} inPage=${items.length} status=${JSON.stringify(statusBreakdown)} skuPresent=${skuPresentCount} skuBlank=${skuBlankCount}`);
-    // -- END BREAKDOWN LOG --
-
-    const ops = [];
-    for (const item of items) {
       const sku = item.SKU?.[0] || '';
+      if (sku) skuPresentCount++; else skuBlankCount++;
       ops.push({
         updateOne: {
           filter: { seller: seller._id, itemId: item.ItemID[0] },
@@ -756,21 +747,20 @@ async function runSkuIndexSync(seller, send = null) {
         },
       });
     }
+    console.log(`[sync-sku-index] page=${page}/${totalPages} totalEntries=${totalEntries} inPage=${items.length} skuPresent=${skuPresentCount} skuBlank=${skuBlankCount}`);
 
     if (ops.length > 0) {
       await SellerSkuIndex.bulkWrite(ops);
       totalCount += ops.length;
     }
 
-    skuSyncStatus.set(sellerId, { status: 'running', startedAt: skuSyncStatus.get(sellerId)?.startedAt, totalCount });
+    skuSyncStatus.set(sellerId, { status: 'running', startedAt, totalCount });
     if (send) send({ type: 'progress', page, totalPages, totalEntries, count: totalCount });
 
     page++;
   } while (page <= totalPages);
 
-  allPagesOk = true;
-
-  // Remove stale records — only runs if ALL pages completed without error
+  // Remove stale records — only runs if ALL pages completed without error (any throw above skips this)
   await SellerSkuIndex.deleteMany({ seller: seller._id, syncedAt: { $lt: syncStart } });
 
   console.log(`[sync-sku-index] seller=${sellerId} DONE — ${totalCount} listings indexed`);
