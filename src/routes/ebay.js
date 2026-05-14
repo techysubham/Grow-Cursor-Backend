@@ -683,6 +683,7 @@ async function runSkuIndexSync(seller, send = null) {
   let page = 1;
   let totalPages = 1;
   let totalCount = 0;
+  let allPagesOk = false;
 
   do {
     // Re-check token on every page — covers multi-minute crawls where token may expire mid-loop
@@ -722,8 +723,9 @@ async function runSkuIndexSync(seller, send = null) {
     const resp = result.GetSellerListResponse;
 
     if (resp?.Ack?.[0] === 'Failure') {
+      const errMsg = resp.Errors?.[0]?.LongMessage?.[0] || resp.Errors?.[0]?.ShortMessage?.[0] || 'eBay API failure';
       console.error(`[sync-sku-index] eBay Failure on page ${page}:`, JSON.stringify(resp.Errors));
-      break;
+      throw new Error(`eBay error on page ${page}: ${errMsg}`);
     }
 
     const pagination = resp?.PaginationResult?.[0];
@@ -766,7 +768,9 @@ async function runSkuIndexSync(seller, send = null) {
     page++;
   } while (page <= totalPages);
 
-  // Remove stale records — any entry not touched in this sync run is no longer active
+  allPagesOk = true;
+
+  // Remove stale records — only runs if ALL pages completed without error
   await SellerSkuIndex.deleteMany({ seller: seller._id, syncedAt: { $lt: syncStart } });
 
   console.log(`[sync-sku-index] seller=${sellerId} DONE — ${totalCount} listings indexed`);
