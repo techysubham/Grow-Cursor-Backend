@@ -18,6 +18,7 @@ import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
 import ActiveListing from '../models/ActiveListing.js';
+import SellerSkuIndex from '../models/SellerSkuIndex.js';
 import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
 import ChatAgent from '../models/ChatAgent.js';
@@ -645,6 +646,203 @@ export async function resumeRunningAutoCompatibilityBatches() {
 
   return runningBatches.length;
 }
+
+// ============================================
+// SKU INDEX — FAST DB-BACKED ACTIVE CHECK
+// ============================================
+const MARKETPLACE_SITE_IDS = {
+  EBAY_US: '0', EBAY_AU: '15', EBAY_GB: '3', EBAY_CA: '2',
+  EBAY_DE: '77', EBAY_FR: '71', EBAY_IT: '101', EBAY_ES: '186',
+};
+
+// Strip a trailing -<number> suffix from a SKU (e.g. GRW25N4VFV-1 → GRW25N4VFV)
+function extractBaseSku(sku) {
+  if (!sku) return '';
+  const parts = sku.split('-');
+  if (parts.length > 1 && /^\d+$/.test(parts[parts.length - 1])) {
+    return parts.slice(0, -1).join('-');
+  }
+  return sku;
+}
+
+// In-memory tracking: sellerId (string) → { status, startedAt, totalCount, lastSyncAt, error }
+const skuSyncStatus = new Map();
+
+// Background sync — paginates GetSellerList to rebuild the SellerSkuIndex collection.
+// send(obj) is an optional SSE callback for live progress; omit for fire-and-forget.
+async function runSkuIndexSync(seller, send = null) {
+  const syncStart = new Date();
+  const sellerId = seller._id.toString();
+
+  // Mirror the live-tiers approach: EndTimeFrom=now covers all currently active listings
+  // (their end time is in the future). Use 120 days to catch long fixed-duration listings.
+  // SITEID=0 is used unconditionally (same as live-tiers) so USD price fields always resolve.
+  const endTimeFrom = syncStart.toISOString();
+  const endTimeTo = new Date(syncStart.getTime() + 120 * 24 * 60 * 60 * 1000).toISOString();
+
+  let page = 1;
+  let totalPages = 1;
+  let totalCount = 0;
+  // Cache once — set by the SSE endpoint before invoking this function
+  const startedAt = skuSyncStatus.get(sellerId)?.startedAt ?? syncStart;
+
+  do {
+    // Re-check token on every page — covers multi-minute crawls where token may expire mid-loop
+    const token = await ensureValidToken(seller);
+
+    console.log(`[sync-sku-index] seller=${sellerId} page=${page}/${totalPages}`);
+
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <DetailLevel>ItemReturnDescription</DetailLevel>
+  <EndTimeFrom>${endTimeFrom}</EndTimeFrom>
+  <EndTimeTo>${endTimeTo}</EndTimeTo>
+  <Pagination>
+    <EntriesPerPage>200</EntriesPerPage>
+    <PageNumber>${page}</PageNumber>
+  </Pagination>
+  <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
+  <OutputSelector>ItemArray.Item.SKU</OutputSelector>
+  <OutputSelector>ItemArray.Item.Title</OutputSelector>
+  <OutputSelector>PaginationResult</OutputSelector>
+</GetSellerListRequest>`;
+
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+      headers: {
+        'X-EBAY-API-CALL-NAME': 'GetSellerList',
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'Content-Type': 'text/xml',
+      },
+    });
+
+    const result = await parseStringPromise(response.data);
+    const resp = result.GetSellerListResponse;
+
+    if (resp?.Ack?.[0] === 'Failure') {
+      const errMsg = resp.Errors?.[0]?.LongMessage?.[0] || resp.Errors?.[0]?.ShortMessage?.[0] || 'eBay API failure';
+      console.error(`[sync-sku-index] eBay Failure on page ${page}:`, JSON.stringify(resp.Errors));
+      throw new Error(`eBay error on page ${page}: ${errMsg}`);
+    }
+
+    const pagination = resp?.PaginationResult?.[0];
+    totalPages = parseInt(pagination?.TotalNumberOfPages?.[0] || '1', 10);
+    const totalEntries = parseInt(pagination?.TotalNumberOfEntries?.[0] || '0', 10);
+    const items = resp?.ItemArray?.[0]?.Item || [];
+
+    const ops = [];
+    let skuBlankCount = 0;
+    let skuPresentCount = 0;
+    for (const item of items) {
+      const sku = item.SKU?.[0] || '';
+      if (sku) skuPresentCount++; else skuBlankCount++;
+      ops.push({
+        updateOne: {
+          filter: { seller: seller._id, itemId: item.ItemID[0] },
+          update: { $set: { sku, baseSku: extractBaseSku(sku), title: item.Title?.[0] || '', syncedAt: syncStart } },
+          upsert: true,
+        },
+      });
+    }
+    console.log(`[sync-sku-index] page=${page}/${totalPages} totalEntries=${totalEntries} inPage=${items.length} skuPresent=${skuPresentCount} skuBlank=${skuBlankCount}`);
+
+    if (ops.length > 0) {
+      await SellerSkuIndex.bulkWrite(ops);
+      totalCount += ops.length;
+    }
+
+    skuSyncStatus.set(sellerId, { status: 'running', startedAt, totalCount });
+    if (send) send({ type: 'progress', page, totalPages, totalEntries, count: totalCount });
+
+    page++;
+  } while (page <= totalPages);
+
+  // Remove stale records — only runs if ALL pages completed without error (any throw above skips this)
+  await SellerSkuIndex.deleteMany({ seller: seller._id, syncedAt: { $lt: syncStart } });
+
+  console.log(`[sync-sku-index] seller=${sellerId} DONE — ${totalCount} listings indexed`);
+  return { totalCount, syncedAt: syncStart };
+}
+
+// GET /ebay/sync-sku-index/stream?sellerId=...  — SSE: streams progress then done
+router.get('/sync-sku-index/stream', requireAuth, async (req, res) => {
+  const { sellerId } = req.query;
+  if (!sellerId) return res.status(400).json({ error: 'sellerId is required' });
+
+  const current = skuSyncStatus.get(sellerId);
+  if (current?.status === 'running') {
+    return res.status(409).json({ error: 'Sync already in progress for this seller' });
+  }
+
+  // SSE setup
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  try {
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) { send({ type: 'error', error: 'Seller not found' }); return res.end(); }
+
+    const startedAt = new Date();
+    skuSyncStatus.set(sellerId, { status: 'running', startedAt, totalCount: 0 });
+
+    const { totalCount, syncedAt } = await runSkuIndexSync(seller, send);
+
+    skuSyncStatus.set(sellerId, { status: 'completed', startedAt, totalCount, lastSyncAt: syncedAt });
+    send({ type: 'done', totalCount, syncedAt });
+  } catch (err) {
+    console.error('[sync-sku-index/stream] Error:', err.message);
+    skuSyncStatus.set(sellerId, { status: 'failed', error: err.message });
+    send({ type: 'error', error: err.message });
+  } finally {
+    res.end();
+  }
+});
+
+// GET /ebay/sync-sku-index/status/:sellerId  — current sync state + DB count + syncedAt
+router.get('/sync-sku-index/status/:sellerId', requireAuth, async (req, res) => {
+  try {
+    const { sellerId } = req.params;
+    const mem = skuSyncStatus.get(sellerId) || { status: 'idle' };
+    const dbCount = await SellerSkuIndex.countDocuments({ seller: sellerId });
+    // Get the syncedAt from the most recent record for this seller
+    const latest = await SellerSkuIndex.findOne({ seller: sellerId }).sort({ syncedAt: -1 }).select('syncedAt').lean();
+    return res.json({ ...mem, dbCount, syncedAt: latest?.syncedAt || null });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch sync status', details: error.message });
+  }
+});
+
+router.get('/check-sku-active', requireAuth, async (req, res) => {
+  try {
+    const { sku, sellerId } = req.query;
+    if (!sku || !sellerId) {
+      return res.status(400).json({ error: 'sku and sellerId are required' });
+    }
+
+    // Query the locally synced SellerSkuIndex collection.
+    // We match on baseSku so that GRW25N4VFV finds listings stored as GRW25N4VFV-1, -2, etc.
+    // The index also stores exact-SKU listings (baseSku === sku when there's no suffix).
+    const record = await SellerSkuIndex.findOne({ seller: sellerId, baseSku: sku });
+    const active = !!record;
+
+    // Count all listings for this baseSku (there may be multiple lines with different itemIds)
+    const count = active
+      ? await SellerSkuIndex.countDocuments({ seller: sellerId, baseSku: sku })
+      : 0;
+
+    return res.json({ active, _debug: { sku, source: 'db', found: active, count } });
+  } catch (error) {
+    console.error('[check-sku-active] Error:', error.message);
+    res.status(500).json({ error: 'Failed to check SKU status', details: error.message });
+  }
+});
 
 // ============================================
 // UPLOAD FEED TO EBAY
