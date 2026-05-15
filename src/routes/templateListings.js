@@ -111,12 +111,23 @@ router.get('/database-view', requireAuth, async (req, res) => {
     if (status) query.status = status;
     
     // Search across ASIN, SKU (customLabel), and Title
-    if (search) {
-      query.$or = [
-        { _asinReference: new RegExp(search, 'i') },
-        { customLabel: new RegExp(search, 'i') },
-        { title: new RegExp(search, 'i') }
-      ];
+    if (search && search.trim()) {
+      const trimmed = search.trim();
+      // ASINs are always exactly 10 chars starting with B0 — use fast exact match
+      const isAsin = /^[Bb]0[A-Za-z0-9]{8}$/.test(trimmed);
+      if (isAsin) {
+        query._asinReference = trimmed.toUpperCase();
+      } else {
+        // Use MongoDB text index for title/customLabel (fast), and prefix regex for ASIN
+        query.$and = [
+          {
+            $or: [
+              { $text: { $search: trimmed } },
+              { _asinReference: { $regex: `^${trimmed}`, $options: 'i' } },
+            ]
+          }
+        ];
+      }
     }
     
     const skip = (parseInt(page) - 1) * parseInt(limit);

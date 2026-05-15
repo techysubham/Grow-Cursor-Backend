@@ -200,6 +200,13 @@ templateListingSchema.index({ customLabel: 1 });
 templateListingSchema.index({ deletedAt: 1 });
 templateListingSchema.index({ templateId: 1, sellerId: 1, downloadBatchId: 1 });
 
+// Covering index for database-view filtered + sorted queries (deletedAt + optional seller/template + sort)
+templateListingSchema.index({ deletedAt: 1, sellerId: 1, templateId: 1, createdAt: -1 });
+
+// Text index for fast full-text search on title and SKU (customLabel)
+// _asinReference is handled separately via exact/prefix match
+templateListingSchema.index({ title: 'text', customLabel: 'text' }, { weights: { title: 2, customLabel: 10 }, name: 'listing_text_search' });
+
 // Pre-save hook to auto-generate Amazon link and update timestamp
 templateListingSchema.pre('save', function(next) {
   this.updatedAt = Date.now();
