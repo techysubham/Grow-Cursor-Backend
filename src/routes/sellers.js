@@ -1,8 +1,10 @@
 import { Router } from 'express';
+import mongoose from 'mongoose';
 import { requireAuth, requirePageAccess, requireRole } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
 import User from '../models/User.js';
 import UserSellerAssignment from '../models/UserSellerAssignment.js';
+import SellerSkuIndex from '../models/SellerSkuIndex.js';
 
 const router = Router();
 
@@ -104,6 +106,35 @@ router.delete('/disconnect-ebay', requireAuth, requireRole('seller'), async (req
   } catch (error) {
     console.error('Error disconnecting eBay:', error);
     res.status(500).json({ error: 'Failed to disconnect eBay account' });
+  }
+});
+
+// GET /sellers/sku-duplicates?sellerId=xxx
+// Returns SKUs that appear on more than one itemId for the given seller in the SellerSkuIndex collection
+router.get('/sku-duplicates', requireAuth, requirePageAccess('DuplicateSkus'), async (req, res) => {
+  const { sellerId } = req.query;
+  if (!sellerId || !mongoose.Types.ObjectId.isValid(sellerId)) {
+    return res.status(400).json({ error: 'Valid sellerId query param is required.' });
+  }
+  try {
+    const duplicates = await SellerSkuIndex.aggregate([
+      { $match: { seller: new mongoose.Types.ObjectId(sellerId) } },
+      {
+        $group: {
+          _id: '$sku',
+          count: { $sum: 1 },
+          itemIds: { $push: '$itemId' },
+          titles: { $push: '$title' },
+        },
+      },
+      { $match: { _id: { $ne: '' }, count: { $gt: 1 } } },
+      { $sort: { count: -1 } },
+      { $project: { _id: 0, sku: '$_id', count: 1, itemIds: 1, titles: 1 } },
+    ]);
+    res.json({ duplicates, total: duplicates.length });
+  } catch (err) {
+    console.error('Error fetching SKU duplicates:', err);
+    res.status(500).json({ error: 'Failed to fetch SKU duplicates.' });
   }
 });
 
