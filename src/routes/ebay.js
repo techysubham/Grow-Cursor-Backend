@@ -5901,7 +5901,24 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
 // Get stored returns from database
 
 router.get('/stored-returns', requireAuth, async (req, res) => {
-  const { sellerId, status, reason, startDate, endDate, urgentOnly, page = 1, limit = 50 } = req.query;
+  const { sellerId, status, reason, startDate, endDate, responseDueStartDate, responseDueEndDate, urgentOnly, page = 1, limit = 50 } = req.query;
+
+  // Convert a YYYY-MM-DD date string (in PST/PDT) to start/end UTC Date objects for that day
+  function pstDateToUTCRange(dateStr, endOfDay = false) {
+    // Determine the UTC offset for America/Los_Angeles on the given date
+    const testDate = new Date(dateStr + 'T12:00:00Z');
+    const utcMs = new Date(testDate.toLocaleString('en-US', { timeZone: 'UTC' })).getTime();
+    const pstMs = new Date(testDate.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })).getTime();
+    const offsetMs = utcMs - pstMs; // e.g. 25200000 for PDT (UTC-7), 28800000 for PST (UTC-8)
+    const [year, month, day] = dateStr.split('-').map(Number);
+    if (endOfDay) {
+      // End of day in PST: 23:59:59.999 PST → UTC
+      return new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) + offsetMs);
+    } else {
+      // Start of day in PST: 00:00:00.000 PST → UTC
+      return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0) + offsetMs);
+    }
+  }
 
   try {
     let query = {};
@@ -5935,6 +5952,19 @@ router.get('/stored-returns', requireAuth, async (req, res) => {
       const in48Hours = new Date(now.getTime() + 48 * 60 * 60 * 1000);
       query.returnStatus = 'RETURN_REQUESTED';
       query.responseDate = { $lte: in48Hours };
+    }
+
+    // Response Due date filter (dates entered by user are PST, stored as UTC)
+    if (responseDueStartDate || responseDueEndDate) {
+      const responseDateQuery = {};
+      if (responseDueStartDate) responseDateQuery.$gte = pstDateToUTCRange(responseDueStartDate, false);
+      if (responseDueEndDate) responseDateQuery.$lte = pstDateToUTCRange(responseDueEndDate, true);
+      // Merge with any urgentOnly filter already set on responseDate
+      if (query.responseDate) {
+        query.responseDate = { ...query.responseDate, ...responseDateQuery };
+      } else {
+        query.responseDate = responseDateQuery;
+      }
     }
 
     const pageNum = parseInt(page);
