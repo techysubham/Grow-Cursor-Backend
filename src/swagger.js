@@ -1,23 +1,34 @@
 /**
- * OpenAPI 3.0 specification for the Buyer Chat Page APIs.
+ * OpenAPI / Swagger specification for the Grow EMS API.
  *
  * Served at GET /api-docs
+ *
+ * Base definition (schemas, securitySchemes, shared tags) lives here.
+ * Per-route documentation goes in @swagger JSDoc blocks inside each src/routes/*.js file.
  */
+import swaggerJsdoc from 'swagger-jsdoc';
+import { fileURLToPath } from 'url';
+import path from 'path';
 
-export const swaggerSpec = {
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const swaggerDefinition = {
     openapi: '3.0.0',
     info: {
-        title: 'Grow – Buyer Chat API',
+        title: 'Grow EMS API',
         version: '1.0.0',
         description:
-            'All backend endpoints consumed by the **BuyerChatPage** (eBay inbox management, ' +
-            'conversation metadata, chat templates, file uploads, and seller data).',
+            'Full REST API for the Grow Mentality EMS platform. ' +
+            'Covers auth, leaves, sellers, eBay inbox, chat, orders, employee profiles, and more.',
         contact: { name: 'Grow Internal' }
     },
     servers: [
         { url: '/api', description: 'Current environment' }
     ],
     tags: [
+        { name: 'Auth', description: 'Authentication — login and token management' },
+        { name: 'Leaves', description: 'Employee leave requests and admin approval' },
+        { name: 'Listing Stats', description: 'Listing analytics and day-wise counts' },
         { name: 'Sellers', description: 'Seller account management' },
         { name: 'eBay – Inbox', description: 'Inbox sync and thread listing' },
         { name: 'eBay – Messages', description: 'Per-thread message fetching and sending' },
@@ -895,3 +906,10 @@ export const swaggerSpec = {
         }
     }
 };
+
+const options = {
+    definition: swaggerDefinition,
+    apis: [path.join(__dirname, 'routes/*.js')],
+};
+
+export const swaggerSpec = swaggerJsdoc(options);

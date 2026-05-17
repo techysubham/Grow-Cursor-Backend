@@ -18,6 +18,64 @@ const loginLimiter = rateLimit({
   message: { error: 'Too many login attempts. Please try again after 15 minutes.' }
 });
 
+/**
+ * @swagger
+ * /auth/login:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Log in and receive a JWT token
+ *     description: >
+ *       Validates credentials, checks the account is active, and returns a signed
+ *       7-day JWT together with the user profile and seller assignments.
+ *       Rate-limited to 15 requests per 15 minutes per IP.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [username, password]
+ *             properties:
+ *               username:
+ *                 type: string
+ *                 example: john_admin
+ *               password:
+ *                 type: string
+ *                 format: password
+ *     responses:
+ *       200:
+ *         description: Login successful — returns JWT and user profile
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 token:
+ *                   type: string
+ *                   description: Signed JWT (7-day expiry)
+ *                 user:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     email: { type: string }
+ *                     username: { type: string }
+ *                     role: { type: string }
+ *                     pagePermissions:
+ *                       type: array
+ *                       items: { type: string }
+ *                     useCustomPermissions: { type: boolean }
+ *                     assignedSellers:
+ *                       type: array
+ *                       items: { type: string }
+ *       400:
+ *         description: Username and password required
+ *       401:
+ *         description: Incorrect password or account not active
+ *       404:
+ *         description: Username not found
+ *       429:
+ *         description: Too many login attempts (rate limited)
+ */
 router.post('/login', loginLimiter, validate(loginSchema), async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
@@ -52,6 +110,34 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req, res) => {
 });
 
 // Seed superadmin if none exists (development helper — disabled in production)
+/**
+ * @swagger
+ * /auth/seed-superadmin:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Bootstrap a superadmin account (dev/staging only)
+ *     description: >
+ *       Creates the first superadmin if none exists. Returns 404 in production.
+ *       Useful for bootstrapping a fresh environment.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, username, password]
+ *             properties:
+ *               email: { type: string }
+ *               username: { type: string }
+ *               password: { type: string }
+ *     responses:
+ *       200:
+ *         description: Superadmin created — returns { id }
+ *       400:
+ *         description: Missing fields or superadmin already exists
+ *       404:
+ *         description: Endpoint disabled in production
+ */
 router.post('/seed-superadmin', async (req, res) => {
   if (process.env.NODE_ENV === 'production') {
     return res.status(404).json({ error: 'Not found' });
