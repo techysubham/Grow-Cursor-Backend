@@ -5,6 +5,7 @@ import morgan from 'morgan';
 import dotenv from 'dotenv';
 import path from 'path';
 import mongoSanitize from 'express-mongo-sanitize';
+import rateLimit from 'express-rate-limit';
 
 // Load environment variables FIRST before any other imports
 dotenv.config();
@@ -108,6 +109,29 @@ app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
+  next();
+});
+
+// Rate limiting — applied after cache-control, before route handlers
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 200,            // 200 requests per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please slow down.' },
+});
+const writeLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 60,             // 60 write operations per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many write requests, please slow down.' },
+});
+app.use('/api', generalLimiter);
+app.use('/api', (req, res, next) => {
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    return writeLimiter(req, res, next);
+  }
   next();
 });
 
