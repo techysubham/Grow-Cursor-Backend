@@ -13,8 +13,34 @@ const IST_TZ = '+05:30';
 
 const router = express.Router();
 
+/**
+ * @swagger
+ * tags:
+ *   name: Assignments
+ *   description: Lister assignment management, completion, and analytics
+ */
+
 /* -------------------- CREATE / LIST -------------------- */
 
+/**
+ * @swagger
+ * /assignments/filter-options:
+ *   get:
+ *     tags: [Assignments]
+ *     summary: Get all available assignment filter options
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns distinct values for platforms, stores, categories, subcategories, listers,
+ *       assigners, task creators, source platforms, and marketplaces. Used to populate
+ *       filter dropdowns in the Assignments page.
+ *       **Requires Assignments page access.**
+ *     responses:
+ *       200:
+ *         description: Filter options object
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 // Get all available filter options
 router.get('/filter-options', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   try {
@@ -84,6 +110,37 @@ router.get('/filter-options', requireAuth, requirePageAccess('Assignments'), asy
   }
 });
 
+/**
+ * @swagger
+ * /assignments:
+ *   post:
+ *     tags: [Assignments]
+ *     summary: Create a single assignment
+ *     security:
+ *       - bearerAuth: []
+ *     description: Assigns a task to a lister. **Requires Assignments page access.**
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [taskId, listerId, quantity, listingPlatformId, storeId]
+ *             properties:
+ *               taskId: { type: string }
+ *               listerId: { type: string }
+ *               quantity: { type: integer }
+ *               listingPlatformId: { type: string }
+ *               storeId: { type: string }
+ *               notes: { type: string }
+ *               scheduledDate: { type: string, format: date-time }
+ *     responses:
+ *       201: { description: Created assignment (populated) }
+ *       400: { description: Missing fields or invalid task }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Task not found }
+ */
 router.post('/', requireAuth, requirePageAccess('Assignments'), validate(createAssignmentSchema), async (req, res) => {
   try {
     const { taskId, listerId, quantity, listingPlatformId, storeId, notes, scheduledDate } = req.body || {};
@@ -134,6 +191,50 @@ router.post('/', requireAuth, requirePageAccess('Assignments'), validate(createA
 
 
 
+/**
+ * @swagger
+ * /assignments:
+ *   get:
+ *     tags: [Assignments]
+ *     summary: List assignments with full filtering
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Supports extensive filtering (taskId, listerId, platformId, storeId, marketplace,
+ *       productTitle, created date range/single, scheduled date range/single, source platform,
+ *       category, subcategory, creator, lister username, sharedBy) and optional pagination.
+ *       **Requires Assignments page access.**
+ *     parameters:
+ *       - { in: query, name: taskId, schema: { type: string } }
+ *       - { in: query, name: listerId, schema: { type: string } }
+ *       - { in: query, name: platformId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *       - { in: query, name: marketplace, schema: { type: string } }
+ *       - { in: query, name: productTitle, schema: { type: string } }
+ *       - { in: query, name: dateMode, schema: { type: string, enum: [single, range] } }
+ *       - { in: query, name: dateSingle, schema: { type: string, format: date } }
+ *       - { in: query, name: dateFrom, schema: { type: string, format: date } }
+ *       - { in: query, name: dateTo, schema: { type: string, format: date } }
+ *       - { in: query, name: scheduledDateMode, schema: { type: string, enum: [single, range] } }
+ *       - { in: query, name: scheduledDateSingle, schema: { type: string, format: date } }
+ *       - { in: query, name: scheduledDateFrom, schema: { type: string, format: date } }
+ *       - { in: query, name: scheduledDateTo, schema: { type: string, format: date } }
+ *       - { in: query, name: category, schema: { type: string } }
+ *       - { in: query, name: subcategory, schema: { type: string } }
+ *       - { in: query, name: sourcePlatform, schema: { type: string } }
+ *       - { in: query, name: createdByTask, schema: { type: string } }
+ *       - { in: query, name: listerUsername, schema: { type: string } }
+ *       - { in: query, name: sharedBy, schema: { type: string } }
+ *       - { in: query, name: sortBy, schema: { type: string, default: createdAt } }
+ *       - { in: query, name: sortOrder, schema: { type: string, enum: [asc, desc], default: desc } }
+ *       - { in: query, name: page, schema: { type: integer } }
+ *       - { in: query, name: limit, schema: { type: integer } }
+ *     responses:
+ *       200:
+ *         description: Array of assignments or paginated wrapper when page/limit provided
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   try {
     const {
@@ -246,6 +347,26 @@ router.get('/', requireAuth, requirePageAccess('Assignments'), async (req, res) 
 });
 
 /* -------------------- DELETE (CASCADE) -------------------- */
+/**
+ * @swagger
+ * /assignments/{id}:
+ *   delete:
+ *     tags: [Assignments]
+ *     summary: Delete an assignment (cascade)
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Deletes the assignment and cascades to:
+ *       CompatibilityAssignments (sourceAssignment) and ListingCompletions (assignment).
+ *       **Requires Assignments page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Deletion confirmation }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Assignment not found }
+ */
 // Delete an assignment and cascade delete any related compatibility assignments and listing completions
 router.delete('/:id', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   try {
@@ -274,6 +395,21 @@ router.delete('/:id', requireAuth, requirePageAccess('Assignments'), async (req,
 
 /* -------------------- LISTER FLOWS (FIXED) -------------------- */
 
+/**
+ * @swagger
+ * /assignments/mine:
+ *   get:
+ *     tags: [Assignments]
+ *     summary: Get current lister's assignments
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns all assignments where the lister field matches the logged-in user.
+ *       Accessible to listers, listingadmin, and superadmin with Assignments page access.
+ *     responses:
+ *       200: { description: Array of populated assignment objects }
+ *       401: { description: Unauthorized }
+ */
 // List assignments for the logged-in lister
 router.get('/mine',
   requireAuth,
@@ -302,6 +438,21 @@ router.get('/mine',
     }
   }
 );
+/**
+ * @swagger
+ * /assignments/mine/with-status:
+ *   get:
+ *     tags: [Assignments]
+ *     summary: Get current lister's assignments with today's completion status
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns today's (and overdue) assignments for the logged-in lister,
+ *       enriched with completion status. Accessible to listers, listingadmin, superadmin.
+ *     responses:
+ *       200: { description: Array of assignments with status fields }
+ *       401: { description: Unauthorized }
+ */
 router.get('/mine/with-status',
   requireAuth,
   requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'lister']),
@@ -361,6 +512,35 @@ router.get('/mine/with-status',
 
 
 // Lister/admin completes an assignment
+/**
+ * @swagger
+ * /assignments/{id}/complete:
+ *   post:
+ *     tags: [Assignments]
+ *     summary: Mark assignment as complete (simple quantity method)
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Sets `completedQuantity` on the assignment. Listers can only complete their own.
+ *       Admins can complete any.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [completedQuantity]
+ *             properties:
+ *               completedQuantity: { type: integer, minimum: 0 }
+ *     responses:
+ *       200: { description: Updated assignment }
+ *       400: { description: Invalid completedQuantity }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Assignment not found }
+ */
 router.post('/:id/complete',
   requireAuth,
   requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'lister']),
@@ -399,6 +579,22 @@ router.post('/:id/complete',
 
 /* -------------------- ANALYTICS (unchanged from your working state) -------------------- */
 
+/**
+ * @swagger
+ * /assignments/analytics/admin-lister:
+ *   get:
+ *     tags: [Assignments]
+ *     summary: Admin-lister assignment analytics
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Groups assignments by (IST date, assigning admin, lister) with quantity totals and
+ *       completion counts. Requires Assignments page access (superadmin / listingadmin / productadmin).
+ *     responses:
+ *       200: { description: Array of per-day per-admin-lister rows }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/analytics/admin-lister',
   requireAuth,
   requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'productadmin']),
@@ -452,6 +648,30 @@ router.get('/analytics/admin-lister',
   }
 );
 
+/**
+ * @swagger
+ * /assignments/analytics/listings-summary:
+ *   get:
+ *     tags: [Assignments]
+ *     summary: Listings summary by day, platform, and store
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Aggregates assignment quantities grouped by (IST scheduled date, platform, store).
+ *       Supports dateMode/dateSingle/dateFrom/dateTo, platformId, storeId filters.
+ *       Requires Assignments page access (superadmin / listingadmin / productadmin).
+ *     parameters:
+ *       - { in: query, name: platformId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *       - { in: query, name: dateMode, schema: { type: string, enum: [single, range] } }
+ *       - { in: query, name: dateSingle, schema: { type: string, format: date } }
+ *       - { in: query, name: dateFrom, schema: { type: string, format: date } }
+ *       - { in: query, name: dateTo, schema: { type: string, format: date } }
+ *     responses:
+ *       200: { description: Array of listings summary rows }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/analytics/listings-summary',
   requireAuth,
   requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'productadmin']),
@@ -593,6 +813,30 @@ router.get('/analytics/listings-summary',
 );
 
 // ===== STOCK LEDGER: totals by (platform, store, category, range) =====
+/**
+ * @swagger
+ * /assignments/analytics/stock-ledger:
+ *   get:
+ *     tags: [Assignments]
+ *     summary: Stock ledger — assigned vs completed totals by platform, store, category, range
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Aggregates rangeQuantities from assignments to produce a per-(platform, store, category, range)
+ *       stock ledger with totalAssigned, totalCompleted, and pending counts.
+ *       Requires Assignments page access (superadmin / listingadmin / productadmin).
+ *     parameters:
+ *       - { in: query, name: platformId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *       - { in: query, name: categoryId, schema: { type: string } }
+ *       - { in: query, name: subcategoryId, schema: { type: string } }
+ *       - { in: query, name: category, schema: { type: string, description: Filter by category name (comma-separated) } }
+ *       - { in: query, name: range, schema: { type: string, description: Filter by range name (comma-separated) } }
+ *     responses:
+ *       200: { description: Array of stock ledger rows }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get(
   '/analytics/stock-ledger',
   requireAuth,
@@ -724,6 +968,25 @@ router.get(
 
 /* -------------------- RANGE QUANTITY DISTRIBUTION -------------------- */
 
+/**
+ * @swagger
+ * /assignments/{id}/ranges:
+ *   get:
+ *     tags: [Assignments]
+ *     summary: Get range quantity distribution for an assignment
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns the rangeQuantities array for the given assignment.
+ *       Listers can only view their own; admins can view any.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Array of range-quantity objects }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Assignment not found }
+ */
 // Get range quantity distribution for an assignment
 router.get('/:id/ranges',
   requireAuth,
@@ -754,6 +1017,38 @@ router.get('/:id/ranges',
 );
 
 // Add or update range quantity for an assignment
+/**
+ * @swagger
+ * /assignments/{id}/complete-range:
+ *   post:
+ *     tags: [Assignments]
+ *     summary: Add or update a range-level quantity on an assignment
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Sets or adds `quantity` for a specific `rangeId` in the assignment's rangeQuantities array.
+ *       Automatically updates `completedQuantity` and sets `completedAt` when total distributed
+ *       meets the assigned quantity. Listers can only update their own assignments.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [rangeId, quantity]
+ *             properties:
+ *               rangeId: { type: string }
+ *               quantity: { type: integer, minimum: 0 }
+ *               mode: { type: string, enum: [set, add], default: set }
+ *     responses:
+ *       200: { description: Updated assignment (populated) }
+ *       400: { description: Invalid rangeId/quantity or range not in task category }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Assignment or range not found }
+ */
 router.post('/:id/complete-range',
   requireAuth,
   requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee']),
@@ -850,6 +1145,27 @@ router.post('/:id/complete-range',
 );
 
 // Submit assignment (mark as complete)
+/**
+ * @swagger
+ * /assignments/{id}/submit:
+ *   post:
+ *     tags: [Assignments]
+ *     summary: Submit an assignment as fully complete
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Validates total distributed quantity equals the assigned quantity, then marks the
+ *       assignment complete and creates or updates the ListingCompletion record.
+ *       Listers can only submit their own; admins can submit any.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Completed assignment (populated) }
+ *       400: { description: Distributed quantity less than assigned quantity }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Assignment not found }
+ */
 router.post('/:id/submit',
   requireAuth,
   requirePageAccess('Assignments', ['superadmin', 'listingadmin', 'lister']),
@@ -926,6 +1242,48 @@ router.post('/:id/submit',
 );
 
 // --- NEW ROUTE: BULK ASSIGNMENT ---
+/**
+ * @swagger
+ * /assignments/bulk:
+ *   post:
+ *     tags: [Assignments]
+ *     summary: Create multiple assignments in one request
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Creates one assignment per item in the `assignments` array, all assigned to the same lister
+ *       and listing platform. Each item may specify its own `storeId`; falls back to `storeId`
+ *       at the top level. Returns successfully created assignments plus an `errors` array.
+ *       **Requires Assignments page access.**
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [listerId, listingPlatformId, assignments]
+ *             properties:
+ *               listerId: { type: string }
+ *               listingPlatformId: { type: string }
+ *               storeId: { type: string, description: Default store — used when an item has no storeId }
+ *               notes: { type: string }
+ *               scheduledDate: { type: string, format: date-time }
+ *               assignments:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [taskId, quantity]
+ *                   properties:
+ *                     taskId: { type: string }
+ *                     quantity: { type: integer }
+ *                     storeId: { type: string }
+ *     responses:
+ *       201:
+ *         description: Object with created assignments array and errors array
+ *       400: { description: Missing required fields }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.post('/bulk', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   try {
     const {
