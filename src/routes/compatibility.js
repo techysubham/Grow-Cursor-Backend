@@ -10,6 +10,37 @@ import { fetchAmazonData } from '../utils/asinAutofill.js';
 
 const router = Router();
 
+/**
+ * @swagger
+ * tags:
+ *   name: Compatibility
+ *   description: eBay Motors compatibility task assignment and editor workflow
+ */
+
+/**
+ * @swagger
+ * /compatibility/eligible:
+ *   get:
+ *     tags: [Compatibility]
+ *     summary: List eligible completed assignments awaiting compatibility work
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns completed listing assignments (category = "Ebay Motors", pending qty = 0)
+ *       that haven't yet had a compatibility assignment created.
+ *       **Requires CompatibilityTasks page access.**
+ *     parameters:
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 50, maximum: 100 } }
+ *       - { in: query, name: listerId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *       - { in: query, name: platformId, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Paginated list of eligible assignments
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 // Get eligible completed listing assignments for compatibility admin
 // Conditions: Category = "Ebay Motors" AND Pending Quantity = 0 (completedQuantity >= quantity)
 router.get('/eligible', requireAuth, requirePageAccess('CompatibilityTasks'), async (req, res) => {
@@ -109,6 +140,43 @@ router.get('/eligible', requireAuth, requirePageAccess('CompatibilityTasks'), as
   }
 });
 
+/**
+ * @swagger
+ * /compatibility/assign:
+ *   post:
+ *     tags: [Compatibility]
+ *     summary: Create a compatibility assignment for an editor
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Assigns a source listing assignment to a compatibility editor with a per-range quantity breakdown.
+ *       **Requires CompatibilityTasks page access.**
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sourceAssignmentId, editorId, rangeQuantities]
+ *             properties:
+ *               sourceAssignmentId: { type: string }
+ *               editorId: { type: string }
+ *               notes: { type: string }
+ *               rangeQuantities:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [rangeId, quantity]
+ *                   properties:
+ *                     rangeId: { type: string }
+ *                     quantity: { type: integer }
+ *     responses:
+ *       201: { description: Created CompatibilityAssignment (populated) }
+ *       400: { description: Missing required fields }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Source assignment not found }
+ */
 // Create a compatibility assignment for an editor
 router.post('/assign', requireAuth, requirePageAccess('CompatibilityTasks'), async (req, res) => {
   try {
@@ -151,6 +219,28 @@ router.post('/assign', requireAuth, requirePageAccess('CompatibilityTasks'), asy
   }
 });
 
+/**
+ * @swagger
+ * /compatibility/progress:
+ *   get:
+ *     tags: [Compatibility]
+ *     summary: Compatibility assignment progress (admin tracking)
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns paginated compatibility assignments with completion progress.
+ *       Superadmin sees all; compatibility admins see only their own.
+ *       **Requires CompatibilityProgress page access.**
+ *     parameters:
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 50 } }
+ *       - { in: query, name: editorId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *     responses:
+ *       200: { description: Paginated compatibility assignment progress records }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 // Get progress of compatibility assignments (for admin tracking)
 router.get('/progress', requireAuth, requirePageAccess('CompatibilityProgress'), async (req, res) => {
   try {
@@ -253,6 +343,22 @@ router.get('/progress', requireAuth, requirePageAccess('CompatibilityProgress'),
 });
 
 // Get filter options for eligible assignments (AdminTaskList)
+/**
+ * @swagger
+ * /compatibility/eligible-filter-options:
+ *   get:
+ *     tags: [Compatibility]
+ *     summary: Filter options for the eligible assignments list
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns distinct listers, stores, and platforms from eligible compatibility assignments
+ *       for populating filter dropdowns. **Requires CompatibilityTasks page access.**
+ *     responses:
+ *       200: { description: Filter options (listers, stores, platforms) }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/eligible-filter-options', requireAuth, requirePageAccess('CompatibilityTasks'), async (req, res) => {
   try {
     const [subcategories, listingPlatforms, stores] = await Promise.all([
@@ -286,6 +392,22 @@ router.get('/eligible-filter-options', requireAuth, requirePageAccess('Compatibi
 });
 
 // Get filter options for compatibility progress page
+/**
+ * @swagger
+ * /compatibility/filter-options:
+ *   get:
+ *     tags: [Compatibility]
+ *     summary: Filter options for the progress view
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns distinct editors, stores, and platforms from all compatibility assignments.
+ *       **Requires CompatibilityProgress page access.**
+ *     responses:
+ *       200: { description: Filter options (editors, stores, platforms) }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/filter-options', requireAuth, requirePageAccess('CompatibilityProgress'), async (req, res) => {
   try {
     const [subcategories, listingPlatforms, stores, editors] = await Promise.all([
@@ -319,6 +441,22 @@ router.get('/filter-options', requireAuth, requirePageAccess('CompatibilityProgr
 });
 
 // Editor: list my compatibility assignments
+/**
+ * @swagger
+ * /compatibility/mine:
+ *   get:
+ *     tags: [Compatibility]
+ *     summary: Get the current editor's compatibility assignments
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns all compatibility assignments where the editor field matches the logged-in user.
+ *       **Requires CompatibilityEditor page access.**
+ *     responses:
+ *       200: { description: Array of the editor's compatibility assignments }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/mine', requireAuth, requirePageAccess('CompatibilityEditor'), async (req, res) => {
   try {
     const me = req.user?.userId || req.user?.id;
@@ -338,6 +476,37 @@ router.get('/mine', requireAuth, requirePageAccess('CompatibilityEditor'), async
 });
 
 // Editor: add/update range quantity for compatibility work
+/**
+ * @swagger
+ * /compatibility/{id}/complete-range:
+ *   post:
+ *     tags: [Compatibility]
+ *     summary: Submit range-level completion for a compatibility assignment
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Editor records the number of compatibility entries completed for a specific range.
+ *       Updates completedRangeQuantities and recalculates completedQuantity.
+ *       **Requires CompatibilityEditor page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [rangeId, quantity]
+ *             properties:
+ *               rangeId: { type: string }
+ *               quantity: { type: integer, minimum: 0 }
+ *     responses:
+ *       200: { description: Updated compatibility assignment }
+ *       400: { description: Invalid rangeId or quantity }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Assignment not found }
+ */
 router.post('/:id/complete-range', requireAuth, requirePageAccess('CompatibilityEditor'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -375,6 +544,24 @@ router.post('/:id/complete-range', requireAuth, requirePageAccess('Compatibility
 
 // GET /api/compatibility/sku-info/:sku
 // Backtrack a SKU → TemplateListing (_asinReference) → AsinDirectory (title + description)
+/**
+ * @swagger
+ * /compatibility/sku-info/{sku}:
+ *   get:
+ *     tags: [Compatibility]
+ *     summary: Fetch Amazon/ASIN data for a SKU
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Looks up the ASIN directory and optionally fetches live Amazon product data
+ *       for the given SKU. Used by compatibility editors to autofill fitment data.
+ *     parameters:
+ *       - { in: path, name: sku, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: ASIN/product info object }
+ *       401: { description: Unauthorized }
+ *       404: { description: SKU not found }
+ */
 router.get('/sku-info/:sku', requireAuth, async (req, res) => {
   try {
     const sku = (req.params.sku || '').trim();

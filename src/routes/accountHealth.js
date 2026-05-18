@@ -10,6 +10,13 @@ import { getCache, setCache } from '../lib/redis.js';
 
 const router = Router();
 
+/**
+ * @swagger
+ * tags:
+ *   name: AccountHealth
+ *   description: eBay account health monitoring — SNAD details, BBE evaluation windows, and seller overview
+ */
+
 // SNAD-related return reasons
 const SNAD_RETURN_REASONS = [
   'NOT_AS_DESCRIBED',
@@ -26,6 +33,26 @@ const SNAD_RETURN_REASONS = [
  * GET /account-health/details
  * Returns SNAD details for orders with SNAD cases or returns
  * Supports filters: sellerId, startDate, endDate
+ */
+/**
+ * @swagger
+ * /account-health/details:
+ *   get:
+ *     tags: [AccountHealth]
+ *     summary: SNAD case/return details per order
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns orders that have SNAD (Significantly Not As Described) cases or returns.
+ *       Results are Redis-cached. **Requires AccountHealth page access.**
+ *     parameters:
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *     responses:
+ *       200: { description: Array of SNAD order detail objects }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
  */
 router.get('/details', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
@@ -180,6 +207,25 @@ router.get('/details', requireAuth, requirePageAccess('AccountHealth'), async (r
  * Each window covers an 84-day period, and we generate a new window every week
  * BBE Rate = (SNAD count / Total Sales in that 84-day period) × 100
  */
+/**
+ * @swagger
+ * /account-health/evaluation-windows:
+ *   get:
+ *     tags: [AccountHealth]
+ *     summary: BBE evaluation window data
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns the 4-week BBE (Buyer Bad Experience) evaluation window data per seller,
+ *       including SNAD rates and market average thresholds.
+ *       **Requires AccountHealth page access.**
+ *     parameters:
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *     responses:
+ *       200: { description: Evaluation window data per seller }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
     const { sellerId } = req.query;
@@ -315,6 +361,34 @@ router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'
  * POST /account-health/evaluation-windows/market-avg
  * Update market average (creates a new historical record)
  */
+/**
+ * @swagger
+ * /account-health/evaluation-windows/market-avg:
+ *   post:
+ *     tags: [AccountHealth]
+ *     summary: Record a new market average BBE value
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Stores a new historical MarketMetric record for the BBE market average.
+ *       Used to track the threshold over time. **Requires AccountHealth page access.**
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [value, effectiveDate]
+ *             properties:
+ *               value: { type: number, description: Market average BBE rate }
+ *               effectiveDate: { type: string, format: date }
+ *               sellerId: { type: string, description: Optional — seller-specific override }
+ *     responses:
+ *       200: { description: Created MarketMetric record }
+ *       400: { description: Missing or invalid fields }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.post('/evaluation-windows/market-avg', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
     const { value, effectiveDate, sellerId } = req.body;
@@ -349,6 +423,35 @@ router.post('/evaluation-windows/market-avg', requireAuth, requirePageAccess('Ac
  * PATCH /account-health/details/:orderId
  * Update sellerFault field for an order
  */
+/**
+ * @swagger
+ * /account-health/details/{orderId}:
+ *   patch:
+ *     tags: [AccountHealth]
+ *     summary: Update sellerFault flag on an order
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Sets the `sellerFault` field ("Yes" or "No") on an order for account health tracking.
+ *       **Requires AccountHealth page access.**
+ *     parameters:
+ *       - { in: path, name: orderId, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sellerFault]
+ *             properties:
+ *               sellerFault: { type: string, enum: ["Yes", "No"] }
+ *     responses:
+ *       200: { description: Updated order }
+ *       400: { description: Invalid sellerFault value }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Order not found }
+ */
 router.patch('/details/:orderId', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -380,6 +483,24 @@ router.patch('/details/:orderId', requireAuth, requirePageAccess('AccountHealth'
  * Returns overview data for all sellers across 4 weeks
  * Week 1 & 2: Actual BBE rate (past data)
  * Week 3 & 4: Additional sales needed to meet market avg (prediction)
+ */
+/**
+ * @swagger
+ * /account-health/overview:
+ *   get:
+ *     tags: [AccountHealth]
+ *     summary: Seller BBE overview across 4 evaluation weeks
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns a per-seller overview spanning 4 weeks:
+ *       weeks 1–2 show actual BBE rates, weeks 3–4 show additional sales needed to meet
+ *       the market average threshold (predictive). Results are Redis-cached.
+ *       **Requires AccountHealth page access.**
+ *     responses:
+ *       200: { description: Array of per-seller overview objects }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
  */
 router.get('/overview', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
