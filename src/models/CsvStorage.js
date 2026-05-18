@@ -83,7 +83,7 @@ const csvStorageSchema = new mongoose.Schema({
     },
     scheduledUploadStatus: {
         type: String,
-        enum: ['pending', 'processing', 'done', 'failed', null],
+        enum: ['pending', 'processing', 'done', 'failed', 'limit_blocked', null],
         default: null
     },
     source: {

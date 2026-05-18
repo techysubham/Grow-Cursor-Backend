@@ -13,6 +13,36 @@ import AsinDirectory from '../models/AsinDirectory.js';
 
 const router = express.Router();
 
+// Batch listing counts — returns { [templateId]: count } for multiple templates in one query
+router.get('/counts', requireAuth, async (req, res) => {
+  try {
+    const { templateIds, sellerId, status = 'active' } = req.query;
+    if (!templateIds) return res.status(400).json({ error: 'templateIds is required' });
+
+    const ids = templateIds.split(',').map(id => id.trim()).filter(Boolean);
+    if (ids.length === 0) return res.json({});
+
+    const matchStage = { templateId: { $in: ids } };
+    if (sellerId) matchStage.sellerId = sellerId;
+    if (status && status !== 'all') matchStage.status = status;
+
+    const rows = await TemplateListing.aggregate([
+      { $match: matchStage },
+      { $group: { _id: '$templateId', count: { $sum: 1 } } },
+    ]);
+
+    const result = {};
+    // Initialize all requested ids to 0 so missing ones don't cause UI gaps
+    for (const id of ids) result[id] = 0;
+    for (const row of rows) result[row._id] = row.count;
+
+    return res.json(result);
+  } catch (err) {
+    console.error('Error fetching template listing counts:', err);
+    return res.status(500).json({ error: 'Failed to fetch listing counts' });
+  }
+});
+
 // Get all listings for a template
 router.get('/', requireAuth, async (req, res) => {
   try {
