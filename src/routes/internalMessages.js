@@ -7,12 +7,32 @@ import User from '../models/User.js';
 
 const router = Router();
 
+/**
+ * @swagger
+ * tags:
+ *   name: InternalMessages
+ *   description: Internal user-to-user messaging system
+ */
+
 // Helper function to generate conversation ID
 function generateConversationId(username1, username2) {
   return [username1, username2].sort().join('_');
 }
 
-// 1. SEARCH USERS (for starting new conversations)
+/**
+ * @swagger
+ * /internal-messages/search-users:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: Search users to start or find a conversation
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: q, required: true, schema: { type: string }, description: Search query (username or name) }
+ *     responses:
+ *       200: { description: Array of matching user summaries }
+ *       401: { description: Unauthorized }
+ */
 router.get('/search-users', requireAuth, async (req, res) => {
   try {
     const { q } = req.query;
@@ -39,6 +59,18 @@ router.get('/search-users', requireAuth, async (req, res) => {
 });
 
 // 2. GET CONVERSATIONS LIST (Sidebar)
+/**
+ * @swagger
+ * /internal-messages/conversations:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: List all conversations for the current user
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200: { description: Array of conversation metadata with last message and unread count }
+ *       401: { description: Unauthorized }
+ */
 router.get('/conversations', requireAuth, async (req, res) => {
   try {
     const currentUserId = req.user.userId;
@@ -117,6 +149,23 @@ router.get('/conversations', requireAuth, async (req, res) => {
 });
 
 // 3. GET MESSAGES IN CONVERSATION
+/**
+ * @swagger
+ * /internal-messages/messages/{conversationId}:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: Get messages for a specific conversation
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: conversationId, required: true, schema: { type: string } }
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 50 } }
+ *     responses:
+ *       200: { description: Paginated message list (oldest first) }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden — not a participant }
+ */
 router.get('/messages/:conversationId', requireAuth, async (req, res) => {
   try {
     const { conversationId } = req.params;
@@ -159,6 +208,29 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
 });
 
 // 4. SEND MESSAGE
+/**
+ * @swagger
+ * /internal-messages/send:
+ *   post:
+ *     tags: [InternalMessages]
+ *     summary: Send a message to another user
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [recipientUsername, message]
+ *             properties:
+ *               recipientUsername: { type: string }
+ *               message: { type: string }
+ *     responses:
+ *       201: { description: Sent message object }
+ *       400: { description: Validation error or self-message attempt }
+ *       401: { description: Unauthorized }
+ */
 router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) => {
   try {
     const { recipientId, body, mediaUrls } = req.body;
@@ -204,6 +276,18 @@ router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) 
 });
 
 // 5. GET UNREAD COUNT (for badge)
+/**
+ * @swagger
+ * /internal-messages/unread-count:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: Get total unread message count for the current user
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200: { description: Object with unreadCount integer }
+ *       401: { description: Unauthorized }
+ */
 router.get('/unread-count', requireAuth, async (req, res) => {
   try {
     const currentUserId = req.user.userId;
@@ -225,6 +309,23 @@ router.get('/unread-count', requireAuth, async (req, res) => {
 // ============================================
 
 // 6. SUPERADMIN: Get All Conversations
+/**
+ * @swagger
+ * /internal-messages/admin/all-conversations:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: Admin — list all conversations across all users
+ *     security:
+ *       - bearerAuth: []
+ *     description: Requires ViewAllMessages page access.
+ *     parameters:
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 20 } }
+ *     responses:
+ *       200: { description: Paginated list of all conversations }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/admin/all-conversations', requireAuth, requirePageAccess('ViewAllMessages'), async (req, res) => {
   try {
     const { page = 1, limit = 50, search } = req.query;
@@ -289,6 +390,22 @@ router.get('/admin/all-conversations', requireAuth, requirePageAccess('ViewAllMe
 });
 
 // 7. SUPERADMIN: View Any Conversation
+/**
+ * @swagger
+ * /internal-messages/admin/conversation/{conversationId}:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: Admin — view messages in any conversation
+ *     security:
+ *       - bearerAuth: []
+ *     description: Requires ViewAllMessages page access.
+ *     parameters:
+ *       - { in: path, name: conversationId, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Message list for the conversation }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/admin/conversation/:conversationId', requireAuth, requirePageAccess('ViewAllMessages'), async (req, res) => {
   try {
     const { conversationId } = req.params;

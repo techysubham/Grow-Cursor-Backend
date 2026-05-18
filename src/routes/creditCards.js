@@ -6,6 +6,25 @@ import { createCreditCardSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
+/**
+ * @swagger
+ * tags:
+ *   name: CreditCards
+ *   description: Credit card reference data
+ */
+
+/**
+ * @swagger
+ * /credit-cards:
+ *   get:
+ *     tags: [CreditCards]
+ *     summary: List all credit cards
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200: { description: Array of credit card records sorted by name }
+ *       401: { description: Unauthorized }
+ */
 // Get all credit cards
 router.get('/', requireAuth, async (req, res) => {
   try {
@@ -18,6 +37,32 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Create a new credit card
+/**
+ * @swagger
+ * /credit-cards:
+ *   post:
+ *     tags: [CreditCards]
+ *     summary: Create a credit card record
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string }
+ *               lastFourDigits: { type: string }
+ *               bankName: { type: string }
+ *               currency: { type: string }
+ *     responses:
+ *       201: { description: Created credit card }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.post('/', requireAuth, requirePageAccess('CreditCards'), validate(createCreditCardSchema), async (req, res) => {
   try {
     const { name } = req.body;
@@ -38,6 +83,22 @@ router.post('/', requireAuth, requirePageAccess('CreditCards'), validate(createC
 });
 
 // Delete a credit card
+/**
+ * @swagger
+ * /credit-cards/{id}:
+ *   delete:
+ *     tags: [CreditCards]
+ *     summary: Delete a credit card record
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Deletion confirmation }
+ *       404: { description: Credit card not found }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.delete('/:id', requireAuth, requirePageAccess('CreditCards'), async (req, res) => {
   try {
     const card = await CreditCard.findByIdAndDelete(req.params.id);
