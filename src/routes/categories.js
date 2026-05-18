@@ -6,6 +6,36 @@ import Category from '../models/Category.js';
 
 const router = Router();
 
+/**
+ * @swagger
+ * tags:
+ *   name: Categories
+ *   description: Listing category reference data
+ */
+
+/**
+ * @swagger
+ * /categories:
+ *   post:
+ *     tags: [Categories]
+ *     summary: Create a category
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string }
+ *     responses:
+ *       200: { description: Created category }
+ *       400: { description: Validation error or duplicate name }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.post('/', requireAuth, requirePageAccess('ManageCategories'), validate(createCategorySchema), async (req, res) => {
   const { name } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name required' });
@@ -17,6 +47,18 @@ router.post('/', requireAuth, requirePageAccess('ManageCategories'), validate(cr
   }
 });
 
+/**
+ * @swagger
+ * /categories:
+ *   get:
+ *     tags: [Categories]
+ *     summary: List all categories
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200: { description: Array of categories sorted by name }
+ *       401: { description: Unauthorized }
+ */
 router.get('/', requireAuth, async (req, res) => {
   const items = await Category.find().sort({ name: 1 });
   res.json(items);

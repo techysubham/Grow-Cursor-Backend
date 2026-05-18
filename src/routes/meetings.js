@@ -9,6 +9,13 @@ import User from '../models/User.js';
 const router = Router();
 
 const MEETING_ADMIN_ROLES = ['superadmin', 'hradmin', 'operationhead'];
+
+/**
+ * @swagger
+ * tags:
+ *   name: Meetings
+ *   description: Meeting scheduling, attendees, action items, and status tracking
+ */
 const MEETING_PAGE_ROLES = [
     'superadmin',
     'productadmin',
@@ -115,6 +122,22 @@ function canEditMeeting(meeting, user) {
         || String(meeting.organizer?._id || meeting.organizer) === userId;
 }
 
+/**
+ * @swagger
+ * /meetings/users:
+ *   get:
+ *     tags: [Meetings]
+ *     summary: List all eligible meeting participants
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns all active non-seller users for use in attendee/organizer/assignee dropdowns.
+ *       **Requires Meetings page access.**
+ *     responses:
+ *       200: { description: Array of user summary objects (username, email, role, department) }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/users', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROLES), async (req, res) => {
     try {
         const users = await User.find({ active: true, role: { $ne: 'seller' } })
@@ -129,6 +152,29 @@ router.get('/users', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROL
     }
 });
 
+/**
+ * @swagger
+ * /meetings:
+ *   get:
+ *     tags: [Meetings]
+ *     summary: List meetings (scoped by role)
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Admins (superadmin / hradmin / operationhead) see all meetings.
+ *       Other roles see only meetings where they are creator, organizer, or attendee.
+ *       **Requires Meetings page access.**
+ *     parameters:
+ *       - { in: query, name: status, schema: { type: string, enum: [scheduled, in_progress, completed, cancelled] } }
+ *       - { in: query, name: dateFrom, schema: { type: string, format: date } }
+ *       - { in: query, name: dateTo, schema: { type: string, format: date } }
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 20 } }
+ *     responses:
+ *       200: { description: Paginated meeting list }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROLES), async (req, res) => {
     try {
         const { status, search = '', organizerId = '' } = req.query;
@@ -168,6 +214,25 @@ router.get('/', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROLES), 
     }
 });
 
+/**
+ * @swagger
+ * /meetings/{id}:
+ *   get:
+ *     tags: [Meetings]
+ *     summary: Get a single meeting by ID
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns the meeting if the caller is in its scope (admin, creator, organizer, or attendee).
+ *       **Requires Meetings page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Meeting object }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Meeting not found }
+ */
 router.get('/:id', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROLES), async (req, res) => {
     try {
         const meeting = await loadMeetingOr404(req.params.id, req.user);
@@ -177,6 +242,47 @@ router.get('/:id', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROLES
     }
 });
 
+/**
+ * @swagger
+ * /meetings:
+ *   post:
+ *     tags: [Meetings]
+ *     summary: Create a new meeting
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Creates a meeting with organizer, attendees, scheduled time, agenda, and optional action items.
+ *       All referenced users must be active non-seller accounts.
+ *       **Requires Meetings page access.**
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [title, scheduledAt, organizerId]
+ *             properties:
+ *               title: { type: string }
+ *               scheduledAt: { type: string, format: date-time }
+ *               organizerId: { type: string }
+ *               attendeeIds: { type: array, items: { type: string } }
+ *               agenda: { type: string }
+ *               status: { type: string, enum: [scheduled, in_progress, completed, cancelled], default: scheduled }
+ *               actionItems:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     text: { type: string }
+ *                     assigneeId: { type: string }
+ *                     dueDate: { type: string, format: date }
+ *                     status: { type: string, enum: [pending, done] }
+ *     responses:
+ *       201: { description: Created meeting (populated) }
+ *       400: { description: Validation error or invalid user reference }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.post('/', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROLES), validate(createMeetingSchema), async (req, res) => {
     try {
         const {
@@ -219,6 +325,31 @@ router.post('/', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROLES),
     }
 });
 
+/**
+ * @swagger
+ * /meetings/{id}:
+ *   put:
+ *     tags: [Meetings]
+ *     summary: Update a meeting
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Updates meeting fields. Only the creator, organizer, or an admin can edit.
+ *       **Requires Meetings page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *     responses:
+ *       200: { description: Updated meeting }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden — not creator/organizer/admin }
+ *       404: { description: Meeting not found }
+ */
 router.put('/:id', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROLES), validate(updateMeetingSchema), async (req, res) => {
     try {
         const meeting = await loadMeetingOr404(req.params.id, req.user);
@@ -260,6 +391,25 @@ router.put('/:id', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROLES
     }
 });
 
+/**
+ * @swagger
+ * /meetings/{id}:
+ *   delete:
+ *     tags: [Meetings]
+ *     summary: Delete a meeting
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Deletes the meeting. Only the creator, organizer, or an admin can delete.
+ *       **Requires Meetings page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Deletion confirmation }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden — not creator/organizer/admin }
+ *       404: { description: Meeting not found }
+ */
 router.delete('/:id', requireAuth, requirePageAccess('Meetings', MEETING_PAGE_ROLES), async (req, res) => {
     try {
         const meeting = await loadMeetingOr404(req.params.id, req.user);

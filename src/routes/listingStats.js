@@ -7,7 +7,7 @@ const router = express.Router();
 
 /**
  * @swagger
- * /api/listing-stats/day-wise-counts:
+ * /listing-stats/day-wise-counts:
  *   get:
  *     summary: Get day-wise listing counts per seller
  *     description: Returns the count of listings per seller per day based on startTime in PST timezone
@@ -144,7 +144,7 @@ router.get('/day-wise-counts', requireAuth, async (req, res) => {
 
 /**
  * @swagger
- * /api/listing-stats/summary:
+ * /listing-stats/summary:
  *   get:
  *     summary: Get summary statistics for listings
  *     description: Returns overall summary of listing counts per seller based on startTime in PST timezone

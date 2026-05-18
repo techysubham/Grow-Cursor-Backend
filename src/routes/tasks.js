@@ -9,6 +9,51 @@ import { parsePagination } from '../utils/paginate.js';
 
 const router = Router();
 
+/**
+ * @swagger
+ * tags:
+ *   name: Tasks
+ *   description: Product research tasks and listing analytics
+ */
+
+/**
+ * @swagger
+ * /tasks:
+ *   post:
+ *     tags: [Tasks]
+ *     summary: Create a product research task
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Creates a new task (product research entry). Requires TaskList or ProductResearch page access.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [productTitle, supplierLink, sourcePrice, sellingPrice, marketplace]
+ *             properties:
+ *               productTitle: { type: string }
+ *               supplierLink: { type: string }
+ *               sourcePrice: { type: number }
+ *               sellingPrice: { type: number }
+ *               quantity: { type: integer }
+ *               marketplace: { type: string, example: EBAY_US }
+ *               categoryId: { type: string }
+ *               subcategoryId: { type: string }
+ *               rangeId: { type: string }
+ *               listingPlatformId: { type: string }
+ *               storeId: { type: string }
+ *               assignedListerId: { type: string }
+ *               date: { type: string, format: date }
+ *     responses:
+ *       200:
+ *         description: Created task object
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 // Create a product research entry (productadmin or superadmin or users with ProductResearch permission)
 router.post('/', requireAuth, requirePageAccess(['TaskList', 'ProductResearch']), validate(createTaskSchema), async (req, res) => {
   const body = req.body || {};
@@ -48,6 +93,32 @@ router.post('/', requireAuth, requirePageAccess(['TaskList', 'ProductResearch'])
   }
 });
 
+/**
+ * @swagger
+ * /tasks:
+ *   get:
+ *     tags: [Tasks]
+ *     summary: List tasks
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       productadmin and listingadmin see all tasks.
+ *       Listers see only tasks assigned to them unless they have the ProductResearch permission.
+ *     parameters:
+ *       - { in: query, name: platformId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *       - { in: query, name: listerId, schema: { type: string } }
+ *       - { in: query, name: date, schema: { type: string, format: date } }
+ *       - { in: query, name: search, schema: { type: string } }
+ *       - { in: query, name: sortBy, schema: { type: string, default: date } }
+ *       - { in: query, name: sortOrder, schema: { type: string, enum: [asc, desc], default: desc } }
+ *       - { in: query, name: page, schema: { type: integer } }
+ *       - { in: query, name: limit, schema: { type: integer } }
+ *     responses:
+ *       200:
+ *         description: Array of task objects (or paginated wrapper when page/limit supplied)
+ *       401: { description: Unauthorized }
+ */
 // List tasks (productadmin see all; listingadmin see all; listers see assigned to them UNLESS they have ProductResearch permission)
 router.get('/', requireAuth, async (req, res) => {
   const { role, userId } = req.user;
@@ -126,6 +197,36 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 
+/**
+ * @swagger
+ * /tasks/{id}/assign:
+ *   post:
+ *     tags: [Tasks]
+ *     summary: Assign a task to a lister
+ *     security:
+ *       - bearerAuth: []
+ *     description: Requires Assignments page access (listingadmin / superadmin).
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [listerId, quantity, listingPlatformId, storeId]
+ *             properties:
+ *               listerId: { type: string }
+ *               quantity: { type: integer }
+ *               listingPlatformId: { type: string }
+ *               storeId: { type: string }
+ *     responses:
+ *       200: { description: Updated task }
+ *       400: { description: Missing required fields }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Task not found }
+ */
 // Assign a task to a lister (listingadmin or superadmin)
 router.post('/:id/assign', requireAuth, requirePageAccess('Assignments'), async (req, res) => {
   const { listerId, quantity, listingPlatformId, storeId } = req.body || {};
@@ -146,6 +247,32 @@ router.post('/:id/assign', requireAuth, requirePageAccess('Assignments'), async 
   res.json(task);
 });
 
+/**
+ * @swagger
+ * /tasks/{id}:
+ *   put:
+ *     tags: [Tasks]
+ *     summary: Update task fields
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       productadmin can edit product research fields.
+ *       listingadmin can reassign the lister, platform, or store.
+ *       Requires TaskList or ProductResearch page access.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *     responses:
+ *       200: { description: Updated task }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Task not found }
+ */
 // Update task fields (productadmin edits product fields; listingadmin can reassign)
 router.put('/:id', requireAuth, requirePageAccess(['TaskList', 'ProductResearch']), async (req, res) => {
   const { role, userId } = req.user;
@@ -189,6 +316,35 @@ router.put('/:id', requireAuth, requirePageAccess(['TaskList', 'ProductResearch'
 });
 
 // Lister marks completed
+/**
+ * @swagger
+ * /tasks/{id}/complete:
+ *   post:
+ *     tags: [Tasks]
+ *     summary: Mark a task as complete
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Lister marks their own assigned task as complete by submitting the actual completed quantity.
+ *       Requires TaskList page access and lister role.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [completedQuantity]
+ *             properties:
+ *               completedQuantity: { type: integer, minimum: 0 }
+ *     responses:
+ *       200: { description: Updated task }
+ *       400: { description: Invalid quantity }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Task not found }
+ */
 router.post('/:id/complete', requireAuth, requirePageAccess('TaskList', ['lister']), async (req, res) => {
   const { userId } = req.user;
   const { completedQuantity } = req.body || {};
@@ -207,6 +363,27 @@ router.post('/:id/complete', requireAuth, requirePageAccess('TaskList', ['lister
   res.json(task);
 });
 
+/**
+ * @swagger
+ * /tasks/analytics:
+ *   get:
+ *     tags: [Tasks]
+ *     summary: Admin-side task analytics summary
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns aggregated totals (totalListings, completedQty, numListers, numStores, numCategories).
+ *       Requires ListingsSummary page access.
+ *     parameters:
+ *       - { in: query, name: platformId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *       - { in: query, name: listerId, schema: { type: string } }
+ *       - { in: query, name: date, schema: { type: string, format: date } }
+ *     responses:
+ *       200: { description: Aggregated totals object }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 // Admin-side analytics (platform/store/lister/date filters)
 router.get('/analytics', requireAuth, requirePageAccess('ListingsSummary'), async (req, res) => {
   const { platformId, storeId, listerId, date } = req.query || {};
@@ -251,6 +428,27 @@ router.get('/analytics', requireAuth, requirePageAccess('ListingsSummary'), asyn
   res.json(result || { totalListings: 0, numListers: 0, numStores: 0, numCategories: 0, numSubcategories: 0 });
 });
 
+/**
+ * @swagger
+ * /tasks/analytics/admin-lister:
+ *   get:
+ *     tags: [Tasks]
+ *     summary: Admin-lister task assignment summary
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Groups tasks by (day, assigning admin, lister) with task counts and completed quantities.
+ *       Requires ListerInfo page access.
+ *     parameters:
+ *       - { in: query, name: platformId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *       - { in: query, name: listerId, schema: { type: string } }
+ *       - { in: query, name: date, schema: { type: string, format: date } }
+ *     responses:
+ *       200: { description: Array of per-day per-admin-lister rows }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 // Superadmin/listingadmin: admin-lister assignment summary
 router.get('/analytics/admin-lister', requireAuth, requirePageAccess('ListerInfo'), async (req, res) => {
   const { platformId, storeId, listerId, date } = req.query || {};
@@ -305,6 +503,26 @@ router.get('/analytics/admin-lister', requireAuth, requirePageAccess('ListerInfo
   res.json(rows);
 });
 
+/**
+ * @swagger
+ * /tasks/analytics/daily:
+ *   get:
+ *     tags: [Tasks]
+ *     summary: Daily task totals
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Groups all tasks by day and returns totalQuantity, numListers, numStores, numCategories per day.
+ *       Requires StoreDailyTasks page access.
+ *     parameters:
+ *       - { in: query, name: platformId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *       - { in: query, name: listerId, schema: { type: string } }
+ *     responses:
+ *       200: { description: Array of daily aggregate rows sorted by date desc }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 // Daily totals (optionally filtered by platform/store/lister)
 router.get('/analytics/daily', requireAuth, requirePageAccess('StoreDailyTasks'), async (req, res) => {
   const { platformId, storeId, listerId } = req.query || {};
@@ -343,6 +561,26 @@ router.get('/analytics/daily', requireAuth, requirePageAccess('StoreDailyTasks')
   res.json(rows);
 });
 
+/**
+ * @swagger
+ * /tasks/analytics/lister-daily:
+ *   get:
+ *     tags: [Tasks]
+ *     summary: Per-lister daily breakdown
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Groups tasks by (day, platform, store) for a specific lister with completion stats.
+ *       Requires ListerInfo page access.
+ *     parameters:
+ *       - { in: query, name: listerId, schema: { type: string } }
+ *       - { in: query, name: platformId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *     responses:
+ *       200: { description: Array of per-day per-platform rows }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 // Per-lister per day with platform/store breakdown
 router.get('/analytics/lister-daily', requireAuth, requirePageAccess('ListerInfo'), async (req, res) => {
   const { listerId, platformId, storeId } = req.query || {};
@@ -393,6 +631,25 @@ router.get('/analytics/lister-daily', requireAuth, requirePageAccess('ListerInfo
   res.json(rows);
 });
 
+/**
+ * @swagger
+ * /tasks/analytics/listings-summary:
+ *   get:
+ *     tags: [Tasks]
+ *     summary: Listings summary grouped by day, platform, and store
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns assignment-based summary rows (totalQuantity, numListers, numCategories, assignmentsCount)
+ *       grouped by (day, platform, store). Requires ListingsSummary page access.
+ *     parameters:
+ *       - { in: query, name: platformId, schema: { type: string } }
+ *       - { in: query, name: storeId, schema: { type: string } }
+ *     responses:
+ *       200: { description: Array of listing summary rows }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 // Listings summary grouped by assignment-day, platform and store (optional filters: platformId, storeId)
 router.get('/analytics/listings-summary', requireAuth, requirePageAccess('ListingsSummary'), async (req, res) => {
   const { platformId, storeId } = req.query || {};
@@ -452,6 +709,25 @@ router.get('/analytics/listings-summary', requireAuth, requirePageAccess('Listin
   res.json(rows);
 });
 
+/**
+ * @swagger
+ * /tasks/{id}:
+ *   delete:
+ *     tags: [Tasks]
+ *     summary: Delete a task (cascade)
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Deletes the task and cascades to: all Assignments, CompatibilityAssignments, and ListingCompletions
+ *       that reference this task. Requires TaskList or ProductResearch page access.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Deletion confirmation message }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Task not found }
+ */
 // Delete a task and cascade to assignments and compatibility assignments
 router.delete('/:id', requireAuth, requirePageAccess(['TaskList', 'ProductResearch']), async (req, res) => {
   try {

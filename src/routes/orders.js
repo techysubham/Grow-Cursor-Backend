@@ -556,6 +556,36 @@ async function getCurrentNonCompliantSellerSet(optionalSellerId) {
   return nonCompliant;
 }
 
+/**
+ * @swagger
+ * tags:
+ *   name: Orders
+ *   description: Order analytics, dashboard summaries, and reporting
+ */
+
+/**
+ * @swagger
+ * /orders/dashboard/monthly-delta:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Monthly order delta — current vs previous month comparison
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns aggregated order metrics for the current and previous month side-by-side,
+ *       allowing the dashboard to show delta (change) values.
+ *       Supports optional `sellerId` and `excludeLowValue` filters.
+ *       **Requires OrdersDashboard page access.**
+ *     parameters:
+ *       - { in: query, name: month, schema: { type: string, example: "2026-05" }, description: "YYYY-MM (defaults to current PT month)" }
+ *       - { in: query, name: sellerId, schema: { type: string }, description: MongoDB ObjectId of seller }
+ *       - { in: query, name: excludeLowValue, schema: { type: string, enum: ['true','false'], default: 'false' } }
+ *     responses:
+ *       200:
+ *         description: Monthly delta data
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/dashboard/monthly-delta', requireAuth, requirePageAccess('OrdersDashboard'), async (req, res) => {
   try {
     const month = req.query.month || getPtDateString(new Date()).slice(0, 7);
@@ -626,6 +656,28 @@ router.get('/dashboard/monthly-delta', requireAuth, requirePageAccess('OrdersDas
   }
 });
 
+/**
+ * @swagger
+ * /orders/dashboard/overview:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Daily orders dashboard overview
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns today's order counts, revenue totals, and a seller breakdown for the given date.
+ *       Used by the OrdersDepartmentDashboard page.
+ *       **Requires OrdersDashboard page access.**
+ *     parameters:
+ *       - { in: query, name: date, schema: { type: string, format: date, example: "2026-05-17" }, description: "PT date (defaults to today)" }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: excludeLowValue, schema: { type: string, enum: ['true','false'], default: 'false' } }
+ *     responses:
+ *       200:
+ *         description: Dashboard overview data
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboard'), async (req, res) => {
   try {
     const date = req.query.date || getPtDateString(new Date());
@@ -807,6 +859,30 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
 });
 
 // Get daily order statistics for all sellers
+/**
+ * @swagger
+ * /orders/daily-statistics:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Day-by-day order statistics across a date range
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns per-day order counts and revenue for use in the Order Analytics charts.
+ *       Supports seller, marketplace, date range, and low-value exclusion filters.
+ *       **Requires OrderAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: marketplace, schema: { type: string } }
+ *       - { in: query, name: excludeLowValue, schema: { type: string, enum: ['true','false'] } }
+ *     responses:
+ *       200:
+ *         description: Array of daily stat objects
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId, marketplace, excludeClient } = req.query;
@@ -943,6 +1019,27 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
   }
 });
 
+/**
+ * @swagger
+ * /orders/legacy-item-seller-summary:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Per-seller summary for legacy item orders
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Aggregates order counts and issue flags per seller for the LegacyItemAnalytics page.
+ *       **Requires LegacyItemAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Array of per-seller summary objects
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('LegacyItemAnalytics'), async (req, res) => {
   try {
     const {
@@ -1230,6 +1327,31 @@ router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('Legacy
 // Query params: startDate, endDate, sellerId, marketplace, groupBy (category|range|product),
 //               excludeClient, excludeLowValue (true/false)
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /orders/crp-analytics:
+ *   get:
+ *     tags: [Orders]
+ *     summary: CRP (Category / Range / Product) order analytics
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Groups orders by Category, Range, or Product and returns counts and revenue.
+ *       **Requires CRPAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: marketplace, schema: { type: string } }
+ *       - { in: query, name: groupBy, schema: { type: string, enum: [category, range, product], default: category } }
+ *       - { in: query, name: excludeClient, schema: { type: string, enum: ['true','false'] } }
+ *       - { in: query, name: excludeLowValue, schema: { type: string, enum: ['true','false'] } }
+ *     responses:
+ *       200:
+ *         description: Grouped CRP analytics data
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId, marketplace, groupBy = 'category', excludeClient, excludeLowValue, categoryId, rangeId } = req.query;
@@ -1340,6 +1462,28 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
 });
 
 // CRP comparison summary for listings vs orders
+/**
+ * @swagger
+ * /orders/crp-comparison:
+ *   get:
+ *     tags: [Orders]
+ *     summary: CRP comparison — listings vs orders summary
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns a side-by-side summary of listing counts vs order counts grouped by CRP path.
+ *       Used by the CRPComparisonPage.
+ *       **Requires CRPComparison page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: CRP comparison summary
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/crp-comparison', requireAuth, requirePageAccess('CRPComparison'), async (req, res) => {
   try {
     const {
@@ -1415,6 +1559,32 @@ router.get('/crp-comparison', requireAuth, requirePageAccess('CRPComparison'), a
 });
 
 // CRP comparison detail drill-down for one side and one CRP path
+/**
+ * @swagger
+ * /orders/crp-comparison-details:
+ *   get:
+ *     tags: [Orders]
+ *     summary: CRP comparison detail drill-down
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns the individual orders or listings for a specific CRP path (category/range/product).
+ *       Used when the user clicks a row in the CRPComparisonPage.
+ *       **Requires CRPComparison page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: side, schema: { type: string, enum: [orders, listings] } }
+ *       - { in: query, name: category, schema: { type: string } }
+ *       - { in: query, name: range, schema: { type: string } }
+ *       - { in: query, name: product, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Drill-down detail records
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/crp-comparison-details', requireAuth, requirePageAccess('CRPComparison'), async (req, res) => {
   try {
     const {
@@ -1600,6 +1770,31 @@ router.get('/crp-comparison-details', requireAuth, requirePageAccess('CRPCompari
 });
 
 // Get worksheet statistics for cancellations, returns, INR/disputes, and inquiries
+/**
+ * @swagger
+ * /orders/worksheet-statistics:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Worksheet statistics — cancellations, returns, INR, disputes, inquiries
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns detailed per-order worksheet records for the given date range and filters.
+ *       Used by the WorksheetPage table.
+ *       **Requires OrderAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: marketplace, schema: { type: string } }
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 50 } }
+ *     responses:
+ *       200:
+ *         description: Paginated worksheet records
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/worksheet-statistics', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId } = req.query;
@@ -1829,6 +2024,30 @@ router.get('/worksheet-statistics', requireAuth, requirePageAccess('OrderAnalyti
 });
 
 // Worksheet summary for cards (totals + open counts + totalOrders) based on the same filter as worksheet-statistics
+/**
+ * @swagger
+ * /orders/worksheet-summary:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Worksheet summary card totals
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns aggregated totals for the worksheet summary cards: total orders,
+ *       cancellation count, return count, INR/dispute count, and open counts.
+ *       Uses the same filters as `/orders/worksheet-statistics`.
+ *       **Requires OrderAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: marketplace, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Summary card totals
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/worksheet-summary', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId } = req.query;
@@ -2032,6 +2251,30 @@ router.get('/worksheet-summary', requireAuth, requirePageAccess('OrderAnalytics'
 // enriched with convoCategory, convoCaseStatus, and issue flags.
 // type: all | cancelled | partiallyRefunded | fullyRefunded
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /orders/legacy-item-orders:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Legacy item order drill-down
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns individual orders for a specific `legacyItemId`, enriched with
+ *       conversation category, case status, and issue flags (cancelled, refunded, etc.).
+ *       **Requires LegacyItemAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: legacyItemId, required: true, schema: { type: string } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: type, schema: { type: string, enum: [all, cancelled, partiallyRefunded, fullyRefunded], default: all } }
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *     responses:
+ *       200:
+ *         description: Array of enriched order records
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/legacy-item-orders', requireAuth, requirePageAccess('LegacyItemAnalytics'), async (req, res) => {
   try {
     const {
