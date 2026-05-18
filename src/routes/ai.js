@@ -195,23 +195,27 @@ router.post('/track-save-next', requireAuth, async (req, res) => {
 // ============================================
 router.post('/rephrase-title', requireAuth, async (req, res) => {
     try {
-        const { currentTitle = '', sourceTitle = '', brand = '', color = '', compatibility = '' } = req.body;
+        const { currentTitle = '', sourceTitle = '', brand = '', color = '', compatibility = '', vehicleMentions = '' } = req.body;
 
         if (!currentTitle) {
             return res.status(400).json({ error: 'currentTitle is required' });
         }
 
+        const vehicleSection = vehicleMentions
+            ? `\nVerified vehicle compatibility (from customer reviews): ${vehicleMentions}\nYou MUST include 1–2 of these models/years in the rephrased title. Shorten other parts of the title if needed to stay within the character limit.`
+            : '';
+
         const prompt = `You are an eBay listing SEO expert.
 Rephrase the following eBay product title. The rephrased title must:
 - Convey the same product and key attributes
 - Use different word order or synonyms compared to the original
-- Be strictly under 80 characters
+- Be strictly between 75 and 80 characters (including spaces) — not shorter, not longer
 - Contain no markdown, quotes, or extra commentary — return only the plain title text
 
 Amazon product title (context only): ${sourceTitle}
 Brand: ${brand}
 Color: ${color}
-Compatibility: ${compatibility}
+Compatibility: ${compatibility}${vehicleSection}
 
 eBay title to rephrase: ${currentTitle}`;
 
