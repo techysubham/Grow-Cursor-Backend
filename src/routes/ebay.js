@@ -9051,6 +9051,9 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
     const endTimeFrom = now.toISOString();
     const endTimeTo = cutoff.toISOString();
 
+    const maxWatchers = Math.max(0, parseInt(req.query.maxWatchers ?? '5', 10) || 5);
+    const maxViews    = Math.max(0, parseInt(req.query.maxViews    ?? '5', 10) || 5);
+
     let page = 1;
     let totalPages = 1;
     const filteredListings = [];
@@ -9121,8 +9124,8 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
         const hitCount = parseInt(item.HitCount || '0', 10);
         const quantitySold = parseInt(item.SellingStatus?.QuantitySold || '0', 10);
 
-        if (watchCount >= 5) continue;
-        if (hitCount >= 5) continue;
+        if (watchCount >= maxWatchers) continue;
+        if (hitCount >= maxViews) continue;
         if (quantitySold > 0) continue;
 
         const timeLeftMs = endTime ? new Date(endTime).getTime() - now.getTime() : 0;
