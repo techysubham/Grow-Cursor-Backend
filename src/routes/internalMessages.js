@@ -1,11 +1,12 @@
 import { Router } from 'express';
-import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { requireAuth, requireAuthSSE, requirePageAccess } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { sendMessageSchema } from '../schemas/index.js';
 import InternalMessage from '../models/InternalMessage.js';
 import User from '../models/User.js';
 
 const router = Router();
+const unreadStreamClients = new Map();
 
 /**
  * @swagger
@@ -18,6 +19,108 @@ const router = Router();
 function generateConversationId(username1, username2) {
   return [username1, username2].sort().join('_');
 }
+
+function addUnreadStreamClient(userId, res) {
+  const userKey = String(userId);
+  const clients = unreadStreamClients.get(userKey) || new Set();
+  clients.add(res);
+  unreadStreamClients.set(userKey, clients);
+}
+
+function removeUnreadStreamClient(userId, res) {
+  const userKey = String(userId);
+  const clients = unreadStreamClients.get(userKey);
+  if (!clients) return;
+
+  clients.delete(res);
+  if (clients.size === 0) {
+    unreadStreamClients.delete(userKey);
+  }
+}
+
+async function getUnreadState(userId) {
+  const [unreadMessageCount, unreadConversationRows] = await Promise.all([
+    InternalMessage.countDocuments({
+      recipient: userId,
+      read: false
+    }),
+    InternalMessage.aggregate([
+      {
+        $match: {
+          recipient: userId,
+          read: false
+        }
+      },
+      {
+        $group: {
+          _id: '$conversationId'
+        }
+      },
+      {
+        $count: 'count'
+      }
+    ])
+  ]);
+
+  return {
+    unreadMessageCount,
+    unreadConversationCount: unreadConversationRows[0]?.count || 0
+  };
+}
+
+async function emitUnreadState(userId, payload = {}) {
+  const userKey = String(userId);
+  const clients = unreadStreamClients.get(userKey);
+  if (!clients?.size) return;
+
+  const { unreadMessageCount, unreadConversationCount } = await getUnreadState(userId);
+
+  const message = `data: ${JSON.stringify({
+    type: 'unread-state',
+    hasUnread: unreadConversationCount > 0,
+    unreadCount: unreadMessageCount,
+    unreadMessageCount,
+    unreadConversationCount,
+    ...payload
+  })}\n\n`;
+
+  for (const client of clients) {
+    client.write(message);
+  }
+}
+
+function emitHeartbeat(res) {
+  res.write(': keep-alive\n\n');
+}
+
+router.get('/unread-stream', requireAuthSSE, async (req, res) => {
+  const userId = req.user.userId;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  addUnreadStreamClient(userId, res);
+
+  const heartbeat = setInterval(() => {
+    emitHeartbeat(res);
+  }, 25000);
+
+  try {
+    await emitUnreadState(userId, { reason: 'connected' });
+  } catch (err) {
+    clearInterval(heartbeat);
+    removeUnreadStreamClient(userId, res);
+    return res.end();
+  }
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    removeUnreadStreamClient(userId, res);
+    res.end();
+  });
+});
 
 /**
  * @swagger
@@ -37,7 +140,7 @@ router.get('/search-users', requireAuth, async (req, res) => {
   try {
     const { q } = req.query;
     const currentUserId = req.user.userId;
-    
+
     if (!q || q.trim().length < 2) {
       return res.json([]);
     }
@@ -48,8 +151,8 @@ router.get('/search-users', requireAuth, async (req, res) => {
       active: true,
       username: { $regex: q, $options: 'i' }
     })
-    .select('username role email')
-    .limit(20);
+      .select('username role email')
+      .limit(20);
 
     res.json(users);
   } catch (err) {
@@ -125,10 +228,10 @@ router.get('/conversations', requireAuth, async (req, res) => {
     const populatedConversations = await Promise.all(
       conversations.map(async (conv) => {
         // Determine who the "other user" is
-        const otherUserId = conv.lastSender.toString() === currentUserId 
-          ? conv.lastRecipient 
+        const otherUserId = conv.lastSender.toString() === currentUserId
+          ? conv.lastRecipient
           : conv.lastSender;
-        
+
         const otherUser = await User.findById(otherUserId).select('username role email');
 
         return {
@@ -200,6 +303,11 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
       { $set: { read: true } }
     );
 
+    await emitUnreadState(currentUser._id, {
+      reason: 'messages-read',
+      conversationId
+    });
+
     res.json(messages);
   } catch (err) {
     console.error('Get messages error:', err);
@@ -268,6 +376,13 @@ router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) 
     await newMessage.populate('sender', 'username role');
     await newMessage.populate('recipient', 'username role');
 
+    await emitUnreadState(recipient._id, {
+      reason: 'message-received',
+      conversationId,
+      messageId: newMessage._id.toString(),
+      senderId: sender._id.toString()
+    });
+
     res.json(newMessage);
   } catch (err) {
     console.error('Send message error:', err);
@@ -291,13 +406,13 @@ router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) 
 router.get('/unread-count', requireAuth, async (req, res) => {
   try {
     const currentUserId = req.user.userId;
+    const { unreadMessageCount, unreadConversationCount } = await getUnreadState(currentUserId);
 
-    const count = await InternalMessage.countDocuments({
-      recipient: currentUserId,
-      read: false
+    res.json({
+      count: unreadMessageCount,
+      unreadMessageCount,
+      unreadConversationCount
     });
-
-    res.json({ count });
   } catch (err) {
     console.error('Get unread count error:', err);
     res.status(500).json({ error: err.message });
@@ -337,9 +452,9 @@ router.get('/admin/all-conversations', requireAuth, requirePageAccess('ViewAllMe
       const users = await User.find({
         username: { $regex: search, $options: 'i' }
       }).select('_id');
-      
+
       const userIds = users.map(u => u._id);
-      
+
       matchStage = {
         $or: [
           { sender: { $in: userIds } },
