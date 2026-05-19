@@ -5,6 +5,7 @@ import Seller from '../models/Seller.js';
 import User from '../models/User.js';
 import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import SellerSkuIndex from '../models/SellerSkuIndex.js';
+import Order from '../models/Order.js';
 
 const router = Router();
 
@@ -241,7 +242,21 @@ router.get('/sku-duplicates', requireAuth, requirePageAccess('DuplicateSkus'), a
       { $sort: { count: -1 } },
       { $project: { _id: 0, sku: '$_id', count: 1, itemIds: 1, titles: 1 } },
     ]);
-    res.json({ duplicates, total: duplicates.length });
+
+    // Count orders per item ID across all duplicate listings
+    const allItemIds = duplicates.flatMap(d => d.itemIds);
+    const orderCounts = await Order.aggregate([
+      { $match: { seller: new mongoose.Types.ObjectId(sellerId), itemNumber: { $in: allItemIds } } },
+      { $group: { _id: '$itemNumber', orderCount: { $sum: 1 } } },
+    ]);
+    const orderCountMap = Object.fromEntries(orderCounts.map(o => [o._id, o.orderCount]));
+
+    const duplicatesWithOrders = duplicates.map(d => ({
+      ...d,
+      orderCounts: d.itemIds.map(id => orderCountMap[id] ?? 0),
+    }));
+
+    res.json({ duplicates: duplicatesWithOrders, total: duplicates.length });
   } catch (err) {
     console.error('Error fetching SKU duplicates:', err);
     res.status(500).json({ error: 'Failed to fetch SKU duplicates.' });
