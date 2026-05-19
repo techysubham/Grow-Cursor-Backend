@@ -220,15 +220,18 @@ router.delete('/disconnect-ebay', requireAuth, requireRole('seller'), async (req
   }
 });
 
-// GET /sellers/sku-duplicates?sellerId=xxx
+// GET /sellers/sku-duplicates?sellerId=xxx&page=1&limit=25
 // Returns SKUs that appear on more than one itemId for the given seller in the SellerSkuIndex collection
 router.get('/sku-duplicates', requireAuth, requirePageAccess('DuplicateSkus'), async (req, res) => {
   const { sellerId } = req.query;
   if (!sellerId || !mongoose.Types.ObjectId.isValid(sellerId)) {
     return res.status(400).json({ error: 'Valid sellerId query param is required.' });
   }
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
+  const page  = Math.max(1, parseInt(req.query.page)  || 1);
+  const skip  = (page - 1) * limit;
   try {
-    const duplicates = await SellerSkuIndex.aggregate([
+    const [facet] = await SellerSkuIndex.aggregate([
       { $match: { seller: new mongoose.Types.ObjectId(sellerId) } },
       {
         $group: {
@@ -240,15 +243,27 @@ router.get('/sku-duplicates', requireAuth, requirePageAccess('DuplicateSkus'), a
       },
       { $match: { _id: { $ne: '' }, count: { $gt: 1 } } },
       { $sort: { count: -1 } },
-      { $project: { _id: 0, sku: '$_id', count: 1, itemIds: 1, titles: 1 } },
+      {
+        $facet: {
+          total: [{ $count: 'n' }],
+          data: [
+            { $skip: skip },
+            { $limit: limit },
+            { $project: { _id: 0, sku: '$_id', count: 1, itemIds: 1, titles: 1 } },
+          ],
+        },
+      },
     ]);
 
-    // Count orders per item ID across all duplicate listings
-    const allItemIds = duplicates.flatMap(d => d.itemIds);
-    const orderCounts = await Order.aggregate([
-      { $match: { seller: new mongoose.Types.ObjectId(sellerId), itemNumber: { $in: allItemIds } } },
+    const total      = facet?.total?.[0]?.n ?? 0;
+    const duplicates = facet?.data ?? [];
+
+    // Count orders only for the current page's item IDs
+    const pageItemIds = duplicates.flatMap(d => d.itemIds);
+    const orderCounts = pageItemIds.length ? await Order.aggregate([
+      { $match: { seller: new mongoose.Types.ObjectId(sellerId), itemNumber: { $in: pageItemIds } } },
       { $group: { _id: '$itemNumber', orderCount: { $sum: 1 } } },
-    ]);
+    ]) : [];
     const orderCountMap = Object.fromEntries(orderCounts.map(o => [o._id, o.orderCount]));
 
     const duplicatesWithOrders = duplicates.map(d => ({
@@ -256,7 +271,13 @@ router.get('/sku-duplicates', requireAuth, requirePageAccess('DuplicateSkus'), a
       orderCounts: d.itemIds.map(id => orderCountMap[id] ?? 0),
     }));
 
-    res.json({ duplicates: duplicatesWithOrders, total: duplicates.length });
+    res.json({
+      duplicates: duplicatesWithOrders,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+      limit,
+    });
   } catch (err) {
     console.error('Error fetching SKU duplicates:', err);
     res.status(500).json({ error: 'Failed to fetch SKU duplicates.' });
