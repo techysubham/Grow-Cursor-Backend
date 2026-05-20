@@ -55,6 +55,7 @@ export async function fetchAmazonData(asin, region = 'US') {
       material: material || '',
       specialFeatures: specialFeatures || '',
       size: size || '',
+      productInfo: scrapedData.rawData?.product_information || null,
       rawData: scrapedData // Store scraped data for debugging
     };
     
