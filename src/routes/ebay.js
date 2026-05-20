@@ -9010,6 +9010,62 @@ router.get('/all-listings', requireAuth, async (req, res) => {
 });
 
 // ============================================
+// GET ITEM END TIMES — live eBay API, for a list of item IDs
+// ============================================
+// GET /ebay/item-end-times?sellerId=xxx&itemIds=id1,id2,...
+// Fetches EndTime for each itemId via parallel GetItem calls (batched 10 at a time).
+// Returns { [itemId]: "ISO-date-string" }
+router.get('/item-end-times', requireAuth, async (req, res) => {
+  const { sellerId, itemIds } = req.query;
+  if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
+
+  const ids = (itemIds || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 300);
+  if (!ids.length) return res.json({});
+
+  const seller = await Seller.findById(sellerId);
+  if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+  const token = await ensureValidToken(seller);
+  const endTimeMap = {};
+  const BATCH = 10;
+
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const batch = ids.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (itemId) => {
+      try {
+        const xmlReq = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ItemID>${itemId}</ItemID>
+</GetItemRequest>`;
+        const resp = await axios.post('https://api.ebay.com/ws/api.dll', xmlReq, {
+          headers: {
+            'X-EBAY-API-CALL-NAME': 'GetItem',
+            'X-EBAY-API-SITEID': '0',
+            'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+            'Content-Type': 'text/xml',
+          },
+        });
+        const parsed = await parseStringPromise(resp.data, { explicitArray: false });
+        const ack = parsed?.GetItemResponse?.Ack;
+        const item = parsed?.GetItemResponse?.Item;
+        const endTime = item?.EndTime || item?.ListingDetails?.EndTime;
+        if (endTime) {
+          endTimeMap[itemId] = endTime;
+        } else if (ack === 'Failure') {
+          const errMsg = parsed?.GetItemResponse?.Errors?.LongMessage || parsed?.GetItemResponse?.Errors?.ShortMessage || 'unknown';
+          console.warn(`[item-end-times] GetItem Failure for ${itemId}: ${errMsg}`);
+        }
+      } catch (err) {
+        console.warn(`[item-end-times] GetItem threw for ${itemId}:`, err?.message || err);
+      }
+    }));
+  }
+
+  res.json(endTimeMap);
+});
+
+// ============================================
 // GET EXPIRING LOW-ACTIVITY LISTINGS — LIVE via eBay API (SSE stream)
 // ============================================
 // Streams progress events while paging through GetSellerList.
