@@ -7022,7 +7022,7 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
 // 4. GET THREADS (With Pagination & Search)
 router.get('/chat/threads', requireAuth, async (req, res) => {
   try {
-    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false', dateFrom = '', dateTo = '' } = req.query;
+    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false', dateFrom = '', dateTo = '', excludeClient = 'false' } = req.query;
 
 
     const pageNum = parseInt(page);
@@ -7043,6 +7043,14 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       pipeline.push({
         $match: { seller: new mongoose.Types.ObjectId(sellerId) }
       });
+    }
+
+    // 1.1 EXCLUDE CLIENT
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        pipeline.push({ $match: { seller: { $nin: excludedSellerIds } } });
+      }
     }
 
     // 2. Sort by date (Process latest messages first)
