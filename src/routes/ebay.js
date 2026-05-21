@@ -5901,7 +5901,7 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
 // Get stored returns from database
 
 router.get('/stored-returns', requireAuth, async (req, res) => {
-  const { sellerId, status, reason, startDate, endDate, responseDueStartDate, responseDueEndDate, urgentOnly, page = 1, limit = 50 } = req.query;
+  const { sellerId, status, reason, startDate, endDate, responseDueStartDate, responseDueEndDate, urgentOnly, excludeClient = 'false', page = 1, limit = 50 } = req.query;
 
   // Convert a YYYY-MM-DD date string (in PST/PDT) to start/end UTC Date objects for that day
   function pstDateToUTCRange(dateStr, endOfDay = false) {
@@ -5964,6 +5964,15 @@ router.get('/stored-returns', requireAuth, async (req, res) => {
         query.responseDate = { ...query.responseDate, ...responseDateQuery };
       } else {
         query.responseDate = responseDateQuery;
+      }
+    }
+
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        query.seller = query.seller
+          ? { $in: [query.seller], $nin: excludedSellerIds }
+          : { $nin: excludedSellerIds };
       }
     }
 
@@ -6241,13 +6250,19 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
 
 // Get stored INR cases from database
 router.get('/stored-inr-cases', requireAuth, async (req, res) => {
-  const { sellerId, status, caseType, limit = 200 } = req.query;
+  const { sellerId, status, caseType, excludeClient = 'false', limit = 200 } = req.query;
 
   try {
     let query = {};
     if (sellerId) query.seller = sellerId;
     if (status) query.status = status;
     if (caseType) query.caseType = caseType;
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        if (!query.seller) query.seller = { $nin: excludedSellerIds };
+      }
+    }
 
     const cases = await Case.find(query)
       .populate({
@@ -6467,13 +6482,19 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
 
 // Get stored Payment Disputes from database
 router.get('/stored-payment-disputes', requireAuth, async (req, res) => {
-  const { sellerId, status, reason, limit = 200, startDate, endDate, dateField = 'openDate' } = req.query;
+  const { sellerId, status, reason, limit = 200, startDate, endDate, dateField = 'openDate', excludeClient = 'false' } = req.query;
 
   try {
     let query = {};
     if (sellerId) query.seller = sellerId;
     if (status) query.paymentDisputeStatus = status;
     if (reason) query.reason = reason;
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        if (!query.seller) query.seller = { $nin: excludedSellerIds };
+      }
+    }
 
     // Date range filter — whitelist allowed fields to prevent injection
     const allowedDateFields = ['openDate', 'closedDate'];
@@ -7022,7 +7043,7 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
 // 4. GET THREADS (With Pagination & Search)
 router.get('/chat/threads', requireAuth, async (req, res) => {
   try {
-    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false', dateFrom = '', dateTo = '' } = req.query;
+    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false', dateFrom = '', dateTo = '', excludeClient = 'false' } = req.query;
 
 
     const pageNum = parseInt(page);
@@ -7043,6 +7064,14 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       pipeline.push({
         $match: { seller: new mongoose.Types.ObjectId(sellerId) }
       });
+    }
+
+    // 1.1 EXCLUDE CLIENT
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        pipeline.push({ $match: { seller: { $nin: excludedSellerIds } } });
+      }
     }
 
     // 2. Sort by date (Process latest messages first)
