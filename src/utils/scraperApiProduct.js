@@ -47,9 +47,12 @@ function cleanText(str) {
  * Extract price from structured API response
  */
 function extractPriceFromStructured(data) {
+  // Strip any leading currency symbol (£, $, €, ¥, A$, CA$, etc.) before parsing
+  const stripCurrency = (str) => str.replace(/^[^\d]*(\d)/, '$1');
+
   // Try pricing field first
   if (data.pricing) {
-    const price = data.pricing.replace(/^\$/, '');
+    const price = stripCurrency(data.pricing);
     if (price && !isNaN(parseFloat(price))) {
       return price;
     }
@@ -57,7 +60,7 @@ function extractPriceFromStructured(data) {
   
   // Try list_price as fallback
   if (data.list_price) {
-    const price = data.list_price.replace(/^\$/, '');
+    const price = stripCurrency(data.list_price);
     if (price && !isNaN(parseFloat(price))) {
       return price;
     }
@@ -72,14 +75,23 @@ function extractPriceFromStructured(data) {
 function extractColor(data) {
   if (!data) return '';
   
-  // Try product_information.color first
+  // Try product_information.color / colour (US + UK spelling)
   if (data.product_information?.color) {
     return data.product_information.color;
   }
+  if (data.product_information?.colour) {
+    return data.product_information.colour;
+  }
   
-  // Try customization_options.color for selected variant
+  // Try customization_options.color / colour_name for selected variant
   if (data.customization_options?.color && Array.isArray(data.customization_options.color)) {
     const selectedColor = data.customization_options.color.find(c => c.is_selected);
+    if (selectedColor?.value) {
+      return selectedColor.value;
+    }
+  }
+  if (data.customization_options?.colour_name && Array.isArray(data.customization_options.colour_name)) {
+    const selectedColor = data.customization_options.colour_name.find(c => c.is_selected);
     if (selectedColor?.value) {
       return selectedColor.value;
     }
@@ -561,7 +573,7 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
 
         // Extract product data from structured JSON
         const title = cleanText(data.name || '');
-        const brand = cleanText(data.brand?.replace(/^Visit the /, '').replace(/ Store$/, '') || '');
+        const brand = cleanText(data.brand?.replace(/^Visit the /, '').replace(/ Store$/, '').replace(/^Brand:\s*/i, '') || '');
         const price = extractPriceFromStructured(data);
         
         // Extract description — layered fallback chain:
