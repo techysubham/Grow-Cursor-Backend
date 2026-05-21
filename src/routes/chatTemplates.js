@@ -85,6 +85,34 @@ const DEFAULT_TEMPLATES = [
  * GET /chat-templates
  * Get all active templates grouped by category
  */
+/**
+ * @swagger
+ * /chat-templates:
+ *   get:
+ *     tags: [Chat Templates]
+ *     summary: Get all active templates grouped by category
+ *     description: Returns every active chat template grouped by category. Used to populate the quick-reply panel in BuyerChatPage.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Grouped active templates
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 templates:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/TemplateGroup'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     const templates = await ChatTemplate.find({ isActive: true })
@@ -126,6 +154,34 @@ router.get('/', requireAuth, async (req, res) => {
  * GET /chat-templates/all
  * Get all templates (including inactive) for management
  */
+/**
+ * @swagger
+ * /chat-templates/all:
+ *   get:
+ *     tags: [Chat Templates]
+ *     summary: Get all templates including inactive (admin)
+ *     description: Returns every template document regardless of `isActive` status. Requires `BuyerMessages` page access.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Full list of templates
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 templates:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/ChatTemplateDoc'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.get('/all', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const templates = await ChatTemplate.find()
@@ -142,6 +198,58 @@ router.get('/all', requireAuth, requirePageAccess('BuyerMessages'), async (req, 
 /**
  * POST /chat-templates
  * Create a new template
+ */
+/**
+ * @swagger
+ * /chat-templates:
+ *   post:
+ *     tags: [Chat Templates]
+ *     summary: Create a new chat template
+ *     description: Creates a new template and appends it at the end of the specified category's sort order. Requires `BuyerMessages` page access.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [category, label, text]
+ *             properties:
+ *               category:
+ *                 type: string
+ *                 example: ORDER / INVENTORY ISSUES
+ *               label:
+ *                 type: string
+ *                 example: Out of Stock
+ *               text:
+ *                 type: string
+ *                 example: Hi, the item is currently out of stock. We can issue a full refund.
+ *     responses:
+ *       201:
+ *         description: Template created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 template:
+ *                   $ref: '#/components/schemas/ChatTemplateDoc'
+ *       400:
+ *         description: Missing required fields
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  */
 router.post('/', requireAuth, requirePageAccess('BuyerMessages'), validate(createChatTemplateSchema), async (req, res) => {
   try {
@@ -176,6 +284,101 @@ router.post('/', requireAuth, requirePageAccess('BuyerMessages'), validate(creat
  * PATCH /chat-templates/:id
  * Update a template
  */
+/**
+ * @swagger
+ * /chat-templates/{id}:
+ *   patch:
+ *     tags: [Chat Templates]
+ *     summary: Update a chat template
+ *     description: Updates any combination of `category`, `label`, `text`, `isActive`, or `sortOrder`. Requires `BuyerMessages` page access.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Template ObjectId
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               category:
+ *                 type: string
+ *               label:
+ *                 type: string
+ *               text:
+ *                 type: string
+ *               isActive:
+ *                 type: boolean
+ *               sortOrder:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Updated template
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 template:
+ *                   $ref: '#/components/schemas/ChatTemplateDoc'
+ *       404:
+ *         description: Template not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *   delete:
+ *     tags: [Chat Templates]
+ *     summary: Delete a chat template
+ *     description: Soft-deletes the template by setting `isActive: false`. Pass `?hard=true` for permanent removal. Requires `BuyerMessages` page access.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Template ObjectId
+ *       - in: query
+ *         name: hard
+ *         schema:
+ *           type: string
+ *           enum: ['true']
+ *         description: Pass `true` to permanently delete instead of soft-deleting
+ *     responses:
+ *       200:
+ *         description: Deletion successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.patch('/:id', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -209,6 +412,7 @@ router.patch('/:id', requireAuth, requirePageAccess('BuyerMessages'), async (req
  * DELETE /chat-templates/:id
  * Soft delete a template (set isActive to false)
  */
+// Documented under PATCH /{id} above (combined path object)
 router.delete('/:id', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -230,6 +434,41 @@ router.delete('/:id', requireAuth, requirePageAccess('BuyerMessages'), async (re
 /**
  * POST /chat-templates/seed
  * Seed database with default templates (only if empty)
+ */
+/**
+ * @swagger
+ * /chat-templates/seed:
+ *   post:
+ *     tags: [Chat Templates]
+ *     summary: Seed default chat templates
+ *     description: Inserts the built-in set of default templates only when the collection is empty. Returns an error message (not a 4xx) if templates already exist. Requires `BuyerMessages` page access.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Seed result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                   example: Seeded 42 templates
+ *                 count:
+ *                   type: integer
+ *                   example: 42
+ *                 existingCount:
+ *                   type: integer
+ *                   description: Populated when skipped because templates already exist
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  */
 router.post('/seed', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
@@ -273,6 +512,53 @@ router.post('/seed', requireAuth, requirePageAccess('BuyerMessages'), async (req
 /**
  * PATCH /chat-templates/reorder
  * Reorder templates within a category
+ */
+/**
+ * @swagger
+ * /chat-templates/reorder:
+ *   patch:
+ *     tags: [Chat Templates]
+ *     summary: Reorder templates within a category
+ *     description: Accepts an ordered array of template IDs and updates each template's `sortOrder` to match the array index. Requires `BuyerMessages` page access.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [orderedIds]
+ *             properties:
+ *               orderedIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 example: ['664abc1', '664abc2', '664abc3']
+ *                 description: Template ObjectIds in the desired display order
+ *     responses:
+ *       200:
+ *         description: Reorder successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *       400:
+ *         description: orderedIds must be an array
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  */
 router.patch('/reorder', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {

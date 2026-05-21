@@ -151,6 +151,19 @@ const swaggerDefinition = {
             },
 
             // ── ChatTemplate ─────────────────────────────────────────────────────────
+            ChatTemplateDoc: {
+                type: 'object',
+                properties: {
+                    _id: { type: 'string', example: '665abc123def456789012345' },
+                    category: { type: 'string', example: 'ORDER / INVENTORY ISSUES' },
+                    label: { type: 'string', example: 'Out of Stock' },
+                    text: { type: 'string', example: 'Hi, the item is out of stock. We can issue a full refund immediately.' },
+                    isActive: { type: 'boolean', example: true },
+                    sortOrder: { type: 'integer', example: 0 },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' }
+                }
+            },
             TemplateItem: {
                 type: 'object',
                 properties: {
