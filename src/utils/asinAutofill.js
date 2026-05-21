@@ -95,7 +95,13 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
     brand: amazonData.brand,
     description: amazonData.description,
     price: amazonData.price,
-    asin: amazonData.asin
+    asin: amazonData.asin,
+    product_information: amazonData.productInfo
+      ? Object.entries(amazonData.productInfo)
+          .filter(([, v]) => v !== null && v !== '' && v !== undefined)
+          .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
+          .join('\n')
+      : ''
   };
 
   // Images are already an array (same as PAAPI format)
