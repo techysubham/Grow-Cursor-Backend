@@ -581,7 +581,8 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
                   description: amazonData.description || '',
                   images: amazonData.images || [],
                   color: amazonData.color || '',
-                  compatibility: amazonData.compatibility || ''
+                  compatibility: amazonData.compatibility || '',
+                  productInfo: amazonData.productInfo || null
                 };
                 freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : null;
                 const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
@@ -700,7 +701,8 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             description: amazonData.description,
             images: amazonData.images,
             color: amazonData.color,
-            compatibility: amazonData.compatibility
+            compatibility: amazonData.compatibility,
+            productInfo: amazonData.productInfo || null
           },
           generatedListing: {
             ...mergedCoreFields,
@@ -999,7 +1001,8 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             description: amazonData.description,
             images: amazonData.images,
             color: amazonData.color,
-            compatibility: amazonData.compatibility
+            compatibility: amazonData.compatibility,
+            productInfo: amazonData.productInfo || null
           },
           generatedListing: {
             ...mergedCoreFields,
@@ -2365,6 +2368,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             images: amazonData.images,
             color: amazonData.color,
             compatibility: amazonData.compatibility,
+            productInfo: amazonData.productInfo || null,
             rawData: amazonData.rawData
           },
           generatedListing: {
