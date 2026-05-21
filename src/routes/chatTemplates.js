@@ -345,7 +345,7 @@ router.post('/', requireAuth, requirePageAccess('BuyerMessages'), validate(creat
  *   delete:
  *     tags: [Chat Templates]
  *     summary: Delete a chat template
- *     description: Soft-deletes the template by setting `isActive: false`. Pass `?hard=true` for permanent removal. Requires `BuyerMessages` page access.
+ *     description: "Soft-deletes the template by setting isActive to false. Pass `?hard=true` for permanent removal. Requires `BuyerMessages` page access."
  *     security:
  *       - bearerAuth: []
  *     parameters:

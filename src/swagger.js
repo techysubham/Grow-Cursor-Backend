@@ -36,7 +36,11 @@ const swaggerDefinition = {
         { name: 'eBay – Chat Agents', description: 'Agents listed in the "Picked Up By" dropdown' },
         { name: 'eBay – Item Images', description: 'Product thumbnail fetched from eBay and cached' },
         { name: 'Chat Templates', description: 'Reusable response templates grouped by category' },
-        { name: 'Upload', description: 'File / image uploads attached to outgoing messages' }
+        { name: 'Upload', description: 'File / image uploads attached to outgoing messages' },
+        { name: 'Template Listings', description: 'CRUD, pagination, stats and analytics for per-template eBay listings' },
+        { name: 'Template Listings – Bulk Ops', description: 'Bulk create, save, update, delete and ASIN-driven import/autofill' },
+        { name: 'Template Listings – CSV', description: 'eBay CSV export, direct export, and download-batch history' },
+        { name: 'Template Listings – Admin', description: 'Schedule management, SKU activation/deactivation, cache and API-usage admin' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
@@ -186,6 +190,37 @@ const swaggerDefinition = {
                 type: 'object',
                 properties: {
                     error: { type: 'string', example: 'Something went wrong' }
+                }
+            },
+
+            // ── Template Listing ─────────────────────────────────────────────────────
+            TemplateListing: {
+                type: 'object',
+                properties: {
+                    _id: { type: 'string', example: '665abc123def456789012345' },
+                    templateId: { type: 'string', example: '665abc123def456789012346' },
+                    sellerId: { type: 'string', nullable: true, example: '665abc123def456789012347' },
+                    customLabel: { type: 'string', example: 'SKU-00001', description: 'eBay custom label / SKU' },
+                    title: { type: 'string', example: 'Bosch Fuel Injector Set 4pcs' },
+                    description: { type: 'string', example: 'Fits 2010-2015 Ford Focus 2.0L...' },
+                    startPrice: { type: 'number', example: 29.99 },
+                    quantity: { type: 'integer', example: 1 },
+                    status: { type: 'string', enum: ['draft', 'active', 'inactive', 'sold', 'ended'], example: 'active' },
+                    action: { type: 'string', example: 'Add' },
+                    categoryId: { type: 'string', example: '33612' },
+                    categoryName: { type: 'string', example: '/Auto Parts & Accessories/Car & Truck Parts' },
+                    conditionId: { type: 'string', example: '1000-New' },
+                    format: { type: 'string', example: 'FixedPrice' },
+                    duration: { type: 'string', example: 'GTC' },
+                    itemPhotoUrl: { type: 'string', example: 'https://m.media-amazon.com/images/…' },
+                    scheduleTime: { type: 'string', nullable: true, example: '2024-06-01T08:00:00.000Z' },
+                    downloadBatchId: { type: 'string', nullable: true },
+                    downloadBatchNumber: { type: 'integer', nullable: true },
+                    downloadedAt: { type: 'string', format: 'date-time', nullable: true },
+                    pendingRedownload: { type: 'boolean', example: false },
+                    createdBy: { type: 'string', example: '665abc123def456789012348' },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' }
                 }
             }
         }
