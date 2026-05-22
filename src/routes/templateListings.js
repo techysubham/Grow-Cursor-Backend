@@ -506,6 +506,14 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
         asinInOtherTemplates.set(listing._asinReference, listing.templateId);
       }
     });
+
+    // Pre-fetch template names for cross-template ASINs (for user-friendly warnings)
+    const otherTemplateIds1 = [...new Set([...asinInOtherTemplates.values()].map(id => id.toString()))];
+    const otherTemplateNameMap1 = new Map();
+    if (otherTemplateIds1.length > 0) {
+      const otherTpls = await ListingTemplate.find({ _id: { $in: otherTemplateIds1 } }).select('name').lean();
+      otherTpls.forEach(t => otherTemplateNameMap1.set(t._id.toString(), t.name));
+    }
     
     // Pre-generate SKUs and check conflicts
     const generatedSKUs = asins.map(asin => ({
@@ -532,20 +540,11 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
     
     const processPromises = asins.map(async (asin) => {
       try {
-        // Check for blocking conditions
-        if (asinInOtherTemplates.has(asin)) {
-          const item = {
-            id: `preview-${asin}`,
-            asin,
-            sku: generateSKUFromASIN(asin),
-            status: 'blocked',
-            blockedReason: 'cross_template_duplicate',
-            errors: [`ASIN exists in another template`]
-          };
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
-          return;
-        }
-        
+        // If ASIN exists in another template, note warning but continue with generation
+        const crossTemplateWarning1 = asinInOtherTemplates.has(asin)
+          ? `This ASIN also exists in template "${otherTemplateNameMap1.get(asinInOtherTemplates.get(asin)?.toString()) || 'another template'}"`
+          : null;
+
         // Check if ASIN exists in current template (duplicate_updateable case)
         // This must be checked BEFORE SKU conflict check because duplicate ASINs
         // will have the same SKU and should be updateable, not blocked
@@ -672,6 +671,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
         }
         
         const warnings = [];
+        if (crossTemplateWarning1) warnings.push(crossTemplateWarning1);
         const validationErrors = [];
         
         if (!mergedCoreFields.title) {
@@ -818,6 +818,14 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
       }
     });
 
+    // Pre-fetch template names for cross-template ASINs (for user-friendly warnings)
+    const otherTemplateIds2 = [...new Set([...asinInOtherTemplates.values()].map(id => id.toString()))];
+    const otherTemplateNameMap2 = new Map();
+    if (otherTemplateIds2.length > 0) {
+      const otherTpls2 = await ListingTemplate.find({ _id: { $in: otherTemplateIds2 } }).select('name').lean();
+      otherTpls2.forEach(t => otherTemplateNameMap2.set(t._id.toString(), t.name));
+    }
+
     const generatedSKUs = asins.map(asin => ({ asin, sku: generateSKUFromASIN(asin) }));
     const existingBySKU = await TemplateListing.find({
       templateId,
@@ -834,16 +842,10 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
 
     const processPromises = asins.map(async (asin) => {
       try {
-        // Existing in other template — blocked
-        if (asinInOtherTemplates.has(asin)) {
-          const item = {
-            id: `preview-${asin}`, asin, sku: generateSKUFromASIN(asin),
-            status: 'blocked', blockedReason: 'cross_template_duplicate',
-            errors: ['ASIN exists in another template']
-          };
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
-          return;
-        }
+        // If ASIN exists in another template, note warning but continue with generation
+        const crossTemplateWarning2 = asinInOtherTemplates.has(asin)
+          ? `This ASIN also exists in template "${otherTemplateNameMap2.get(asinInOtherTemplates.get(asin)?.toString()) || 'another template'}"`
+          : null;
 
         // Duplicate in current template — updateable
         if (asinInCurrentTemplate.has(asin)) {
@@ -972,6 +974,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
         }
 
         const warnings = [];
+        if (crossTemplateWarning2) warnings.push(crossTemplateWarning2);
         const validationErrors = [];
 
         // Warn if ASIN was never scraped or not found in directory
@@ -2203,6 +2206,14 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         asinInOtherTemplates.set(listing._asinReference, listing.templateId);
       }
     });
+
+    // Pre-fetch template names for cross-template ASINs (for user-friendly warnings)
+    const otherTemplateIds3 = [...new Set([...asinInOtherTemplates.values()].map(id => id.toString()))];
+    const otherTemplateNameMap3 = new Map();
+    if (otherTemplateIds3.length > 0) {
+      const otherTpls3 = await ListingTemplate.find({ _id: { $in: otherTemplateIds3 } }).select('name').lean();
+      otherTpls3.forEach(t => otherTemplateNameMap3.set(t._id.toString(), t.name));
+    }
     
     console.log(`🔍 ASIN Check: ${asinInCurrentTemplate.size} in current template, ${asinInOtherTemplates.size} in other templates`);
     
@@ -2236,29 +2247,10 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
       try {
         console.log(`📦 Processing ASIN for preview: ${asin}`);
         
-        // Check if ASIN exists in OTHER templates for this seller (blocking error)
-        if (asinInOtherTemplates.has(asin)) {
-          const otherTemplateId = asinInOtherTemplates.get(asin);
-          const errorItem = {
-            id: `preview-${asin}`,
-            asin,
-            sku: generateSKUFromASIN(asin),
-            sourceData: null,
-            generatedListing: null,
-            pricingCalculation: null,
-            warnings: [],
-            errors: [`ASIN already exists for this seller in template ${otherTemplateId}. Each ASIN can only be used once per seller.`],
-            status: 'blocked',
-            blockedReason: 'cross_template_duplicate',
-            existingTemplateId: otherTemplateId.toString()
-          };
-          
-          return {
-            success: false,
-            item: errorItem,
-            error: `ASIN exists in another template`
-          };
-        }
+        // If ASIN exists in another template, note warning but continue with generation
+        const crossTemplateWarning3 = asinInOtherTemplates.has(asin)
+          ? `This ASIN also exists in template "${otherTemplateNameMap3.get(asinInOtherTemplates.get(asin)?.toString()) || 'another template'}"`
+          : null;
         
         // Generate SKU early for collision check
         const sku = generateSKUFromASIN(asin);
@@ -2321,6 +2313,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         
         // Check for warnings
         const warnings = [];
+        if (crossTemplateWarning3) warnings.push(crossTemplateWarning3);
         const validationErrors = [];
         
         if (!mergedCoreFields.title) {
@@ -2565,22 +2558,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
     // Process each listing
     for (const listingData of listings) {
       try {
-        // Check for cross-template ASIN duplicate FIRST
-        if (listingData._asinReference && crossTemplateAsinMap.has(listingData._asinReference)) {
-          const existingTemplateId = crossTemplateAsinMap.get(listingData._asinReference);
-          errors.push({
-            asin: listingData._asinReference,
-            error: `ASIN already exists in template ${existingTemplateId} for this seller`
-          });
-          results.push({
-            status: 'blocked',
-            asin: listingData._asinReference,
-            error: `ASIN already exists in another template for this seller`,
-            existingTemplateId: existingTemplateId.toString()
-          });
-          console.log(`🚫 Blocked duplicate ASIN ${listingData._asinReference} (exists in template ${existingTemplateId})`);
-          continue;
-        }
+        // Cross-template ASIN duplicates are allowed; user was notified via warning during preview
         
         // Check if this is a duplicate update request
         if (listingData._isDuplicateUpdate && listingData._existingListingId) {
