@@ -40,7 +40,10 @@ const swaggerDefinition = {
         { name: 'Template Listings', description: 'CRUD, pagination, stats and analytics for per-template eBay listings' },
         { name: 'Template Listings – Bulk Ops', description: 'Bulk create, save, update, delete and ASIN-driven import/autofill' },
         { name: 'Template Listings – CSV', description: 'eBay CSV export, direct export, and download-batch history' },
-        { name: 'Template Listings – Admin', description: 'Schedule management, SKU activation/deactivation, cache and API-usage admin' }
+        { name: 'Template Listings – Admin', description: 'Schedule management, SKU activation/deactivation, cache and API-usage admin' },
+        { name: 'Platforms', description: 'Source and listing platform management' },
+        { name: 'Stores', description: 'Stores linked to a platform' },
+        { name: 'Column Presets', description: 'Saved column-visibility presets per page' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
@@ -219,6 +222,44 @@ const swaggerDefinition = {
                     downloadedAt: { type: 'string', format: 'date-time', nullable: true },
                     pendingRedownload: { type: 'boolean', example: false },
                     createdBy: { type: 'string', example: '665abc123def456789012348' },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── Platform ─────────────────────────────────────────────────────────────
+            Platform: {
+                type: 'object',
+                properties: {
+                    _id:       { type: 'string', example: '665abc123def456789000001' },
+                    name:      { type: 'string', example: 'eBay' },
+                    type:      { type: 'string', enum: ['source', 'listing'], example: 'listing' },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── Store ────────────────────────────────────────────────────────────────
+            Store: {
+                type: 'object',
+                properties: {
+                    _id:      { type: 'string', example: '665abc123def456789000002' },
+                    name:     { type: 'string', example: 'Grow eBay Store' },
+                    platform: { $ref: '#/components/schemas/Platform' },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── ColumnPreset ─────────────────────────────────────────────────────────
+            ColumnPreset: {
+                type: 'object',
+                properties: {
+                    _id:       { type: 'string', example: '665abc123def456789000003' },
+                    name:      { type: 'string', example: 'Default View' },
+                    page:      { type: 'string', example: 'templateListings' },
+                    columns:   { type: 'array', items: { type: 'string' }, example: ['title', 'price', 'quantity'] },
+                    createdBy: { type: 'string', example: '665abc123def456789000004' },
                     createdAt: { type: 'string', format: 'date-time' },
                     updatedAt: { type: 'string', format: 'date-time' }
                 }
