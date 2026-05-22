@@ -29,6 +29,61 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 });
 
+/**
+ * @swagger
+ * /upload:
+ *   post:
+ *     tags: [Upload]
+ *     summary: Upload image files
+ *     description: >
+ *       Accepts up to **5 files** in a single request via `multipart/form-data` using the
+ *       field name `files`. Each file must be ≤ 5 MB. Returns an array of absolute URLs
+ *       pointing to the uploaded files served from `/uploads/`.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [files]
+ *             properties:
+ *               files:
+ *                 type: array
+ *                 maxItems: 5
+ *                 items:
+ *                   type: string
+ *                   format: binary
+ *                 description: Image files to upload (max 5, 5 MB each)
+ *     responses:
+ *       200:
+ *         description: Upload successful — returns public URLs for each uploaded file
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 urls:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                     format: uri
+ *                   example:
+ *                     - https://api.example.com/uploads/1716300000000-123456789.jpg
+ *       400:
+ *         description: No files provided
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Server error during upload
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.post('/', requireAuth, upload.array('files', 5), (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {

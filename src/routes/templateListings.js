@@ -13,6 +13,41 @@ import AsinDirectory from '../models/AsinDirectory.js';
 
 const router = express.Router();
 
+/**
+ * @swagger
+ * /template-listings/counts:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Batch listing counts
+ *     description: "Returns { templateId: count } for one or more template IDs in a single round-trip. Useful for populating per-tab badges in the UI."
+ *     parameters:
+ *       - in: query
+ *         name: templateIds
+ *         required: true
+ *         schema: { type: string }
+ *         description: Comma-separated template IDs
+ *         example: "665abc123def456789012345,665abc123def456789012346"
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *         description: Restrict count to a specific seller
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, default: active }
+ *         description: Listing status filter. Pass `all` to count all statuses.
+ *     responses:
+ *       200:
+ *         description: Map of templateId → listing count
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               additionalProperties: { type: integer }
+ *               example: { "665abc123def456789012345": 42 }
+ *       400: { description: templateIds query param missing }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Batch listing counts — returns { [templateId]: count } for multiple templates in one query
 router.get('/counts', requireAuth, async (req, res) => {
   try {
@@ -43,6 +78,72 @@ router.get('/counts', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: List template listings (paginated)
+ *     description: Returns paginated listings for a given template with optional seller, status, price range, batch, and full-text search filters.
+ *     parameters:
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Template ID
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *         description: Filter by seller
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *       - in: query
+ *         name: batchFilter
+ *         schema: { type: string, default: active }
+ *         description: "`active` = not-yet-downloaded, `downloaded` = already downloaded, `batch` = specific batch"
+ *       - in: query
+ *         name: batchId
+ *         schema: { type: string }
+ *         description: Filter by downloadBatchId (used when batchFilter=batch)
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, default: active }
+ *       - in: query
+ *         name: minPrice
+ *         schema: { type: number }
+ *       - in: query
+ *         name: maxPrice
+ *         schema: { type: number }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Search across title, SKU, and ASIN
+ *     responses:
+ *       200:
+ *         description: Paginated listings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 listings:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/TemplateListing' }
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     page: { type: integer }
+ *                     limit: { type: integer }
+ *                     total: { type: integer }
+ *                     pages: { type: integer }
+ *       400: { description: templateId is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Get all listings for a template
 router.get('/', requireAuth, async (req, res) => {
   try {
@@ -121,6 +222,55 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/database-view:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Database view — cross-template listing browser
+ *     description: Paginated listing browser without a required templateId. Supports cross-seller and cross-template queries with full-text search across title, SKU, and ASIN.
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: templateId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string }
+ *         description: draft | active | inactive | sold | ended
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Full-text search across title, customLabel, and ASIN
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *     responses:
+ *       200:
+ *         description: Paginated listings with populated seller and template references
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 listings:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/TemplateListing' }
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     page: { type: integer }
+ *                     limit: { type: integer }
+ *                     total: { type: integer }
+ *                     pages: { type: integer }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Database view endpoint with comprehensive filters (MUST be before /:id route)
 router.get('/database-view', requireAuth, async (req, res) => {
   try {
@@ -195,6 +345,30 @@ router.get('/database-view', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/database-stats:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Aggregate database statistics
+ *     description: Returns high-level counts across all non-deleted listings (total, unique sellers, unique templates, and per-status counts).
+ *     responses:
+ *       200:
+ *         description: Aggregate stats
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 total:     { type: integer, example: 1240 }
+ *                 sellers:   { type: integer, example: 5 }
+ *                 templates: { type: integer, example: 12 }
+ *                 draft:     { type: integer, example: 30 }
+ *                 active:    { type: integer, example: 900 }
+ *                 inactive:  { type: integer, example: 310 }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Database statistics endpoint (MUST be before /:id route)
 router.get('/database-stats', requireAuth, async (req, res) => {
   try {
@@ -233,6 +407,36 @@ router.get('/database-stats', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/stats:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Listing creation stats (today / week / month / total)
+ *     parameters:
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Listing creation counts grouped by time window
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 today:     { type: integer, example: 12 }
+ *                 thisWeek:  { type: integer, example: 58 }
+ *                 thisMonth: { type: integer, example: 201 }
+ *                 total:     { type: integer, example: 840 }
+ *       400: { description: templateId is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Get statistics for template listings (today, week, month, total)
 router.get('/stats', requireAuth, async (req, res) => {
   try {
@@ -292,6 +496,90 @@ router.get('/stats', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/analytics:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Detailed listing analytics with daily & user breakdown
+ *     description: Returns paginated listings plus a per-day and per-user creation breakdown for the given template (optionally filtered by seller, date range, and user).
+ *     parameters:
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *         example: "2024-01-01"
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *         example: "2024-12-31"
+ *       - in: query
+ *         name: userId
+ *         schema: { type: string }
+ *         description: Filter by creator. Pass `all` or omit to include everyone.
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 100 }
+ *     responses:
+ *       200:
+ *         description: Paginated listings with dailyBreakdown, userBreakdown, and summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 listings:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/TemplateListing' }
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     page: { type: integer }
+ *                     limit: { type: integer }
+ *                     total: { type: integer }
+ *                     pages: { type: integer }
+ *                 dailyBreakdown:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       date: { type: string, example: "2024-06-01" }
+ *                       total: { type: integer }
+ *                       users:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           properties:
+ *                             userId: { type: string }
+ *                             username: { type: string }
+ *                             count: { type: integer }
+ *                 userBreakdown:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       userId: { type: string }
+ *                       username: { type: string }
+ *                       role: { type: string }
+ *                       count: { type: integer }
+ *                 summary:
+ *                   type: object
+ *                   properties:
+ *                     totalInPeriod: { type: integer }
+ *                     uniqueUsers: { type: integer }
+ *       400: { description: templateId is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Get detailed analytics for template listings
 router.get('/analytics', requireAuth, async (req, res) => {
   try {
@@ -438,6 +726,56 @@ router.get('/analytics', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-preview-stream:
+ *   get:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk ASIN preview — SSE stream (live scraping)
+ *     description: |
+ *       Fetches and AI-processes up to 100 ASINs in real-time and streams results as Server-Sent Events.
+ *       Uses `requireAuthSSE` middleware (passes the JWT via `?token=` query param).
+ *
+ *       **Event types emitted:**
+ *       - `started` — stream begins, includes `total` count
+ *       - `item` — one preview result, includes `item`, `progress`, and `total`
+ *       - `complete` — stream finished
+ *       - `error` — fatal error (stream closes after this)
+ *     parameters:
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: asins
+ *         required: true
+ *         schema: { type: string }
+ *         description: Comma-separated ASIN list (max 100)
+ *         example: "B01N5IB20Q,B07K1RZWMC"
+ *       - in: query
+ *         name: region
+ *         schema: { type: string, default: US }
+ *         description: Amazon marketplace region
+ *       - in: query
+ *         name: token
+ *         schema: { type: string }
+ *         description: JWT token (used instead of Authorization header for EventSource)
+ *     responses:
+ *       200:
+ *         description: Server-Sent Events stream
+ *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
+ *               example: "data: {\"type\":\"item\",\"item\":{...},\"progress\":1,\"total\":10}\n\n"
+ *       400: { description: Missing required parameters or too many ASINs }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk preview with SSE streaming (real-time updates) - MUST be before /:id route
 router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
   try {
@@ -751,6 +1089,48 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-preview-from-directory-stream:
+ *   get:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk ASIN preview from ASIN Directory — SSE stream (no scraping)
+ *     description: |
+ *       Like `bulk-preview-stream` but reads from the locally stored ASIN Directory instead of
+ *       scraping Amazon live. Much faster and does not consume ScraperAPI quota.
+ *
+ *       **Event types emitted:** same as `bulk-preview-stream` (`started`, `item`, `complete`, `error`).
+ *     parameters:
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: asins
+ *         required: true
+ *         schema: { type: string }
+ *         description: Comma-separated ASIN list (max 100)
+ *         example: "B01N5IB20Q,B07K1RZWMC"
+ *       - in: query
+ *         name: token
+ *         schema: { type: string }
+ *         description: JWT token (used instead of Authorization header for EventSource)
+ *     responses:
+ *       200:
+ *         description: Server-Sent Events stream
+ *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
+ *               example: "data: {\"type\":\"item\",\"item\":{...},\"progress\":1,\"total\":10}\n\n"
+ *       400: { description: Missing required parameters or too many ASINs }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk preview from ASIN Directory (no scraping — reads stored data) with SSE streaming
 router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, res) => {
   try {
@@ -1046,6 +1426,28 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/{id}:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Get a single listing by ID
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Listing document ID
+ *     responses:
+ *       200:
+ *         description: Listing document with populated createdBy and templateId
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/TemplateListing' }
+ *       401: { description: Unauthorized }
+ *       404: { description: Listing not found }
+ *       500: { description: Server error }
+ */
 // Get single listing by ID
 router.get('/:id', requireAuth, async (req, res) => {
   try {
@@ -1064,6 +1466,52 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/:
+ *   post:
+ *     tags: [Template Listings]
+ *     summary: Create a new listing
+ *     description: |
+ *       Creates a new active listing for a template. If an inactive listing with the same SKU
+ *       already exists it is reactivated instead. Returns `409` if an active listing with the
+ *       same SKU already exists.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, customLabel, title, startPrice]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId: { type: string }
+ *               customLabel: { type: string, description: eBay SKU }
+ *               title: { type: string }
+ *               startPrice: { type: number }
+ *               description: { type: string }
+ *               quantity: { type: integer, default: 1 }
+ *               categoryId: { type: string }
+ *               categoryName: { type: string }
+ *               conditionId: { type: string }
+ *               itemPhotoUrl: { type: string }
+ *               customFields: { type: object, additionalProperties: { type: string } }
+ *     responses:
+ *       201:
+ *         description: Created or reactivated listing
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 listing: { $ref: '#/components/schemas/TemplateListing' }
+ *                 wasReactivated: { type: boolean }
+ *       400: { description: Missing required fields }
+ *       401: { description: Unauthorized }
+ *       404: { description: Seller not found }
+ *       409: { description: Active listing with this SKU already exists }
+ *       500: { description: Server error }
+ */
 // Create new listing
 router.post('/', requireAuth, async (req, res) => {
   try {
@@ -1174,6 +1622,47 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-apply-schedule:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Assign sequential schedule times to listings
+ *     description: |
+ *       Assigns sequential `scheduleTime` values (IST wall-clock, format `YYYY-MM-DD HH:MM:SS`) to all
+ *       matched listings, spaced by `stepMinutes`. Listings are ordered by `createdAt ASC`.
+ *       Optionally scoped to a specific batch or row range.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, startDateTime, stepMinutes]
+ *             properties:
+ *               templateId:    { type: string }
+ *               sellerId:      { type: string }
+ *               startDateTime: { type: string, example: "2024-06-01 08:00:00", description: "YYYY-MM-DD HH:MM:SS" }
+ *               stepMinutes:   { type: integer, example: 5 }
+ *               batchFilter:   { type: string, description: active | downloaded | batch }
+ *               batchId:       { type: string, description: Filter to a specific download batch }
+ *               fromRow:       { type: integer, description: 1-based start row (inclusive) }
+ *               toRow:         { type: integer, description: 1-based end row (inclusive) }
+ *     responses:
+ *       200:
+ *         description: Schedule applied
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 updated:   { type: integer, example: 48 }
+ *                 firstTime: { type: string, example: "2024-06-01 08:00:00" }
+ *                 lastTime:  { type: string, example: "2024-06-01 11:55:00" }
+ *       400: { description: Missing required fields or invalid stepMinutes / date format }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // ============================================
 // BULK APPLY SCHEDULE TIMES
 // POST /template-listings/bulk-apply-schedule
@@ -1284,6 +1773,38 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/clear-schedule:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Clear schedule times for listings
+ *     description: Sets `scheduleTime` to an empty string for all matched listings. Scope can be narrowed by batchId or batchFilter.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId]
+ *             properties:
+ *               templateId:  { type: string }
+ *               sellerId:    { type: string }
+ *               batchFilter: { type: string, description: active | downloaded | batch }
+ *               batchId:     { type: string, description: Target a specific download batch }
+ *     responses:
+ *       200:
+ *         description: Number of cleared listings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 cleared: { type: integer, example: 24 }
+ *       400: { description: templateId and sellerId are required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // ============================================
 // CLEAR SCHEDULE TIMES
 // POST /template-listings/clear-schedule
@@ -1313,6 +1834,45 @@ router.post('/clear-schedule', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-update:
+ *   put:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk update listing fields
+ *     description: Applies partial field updates to multiple listings at once. Only editable fields are patched; unknown fields are ignored.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [listings]
+ *             properties:
+ *               listings:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     _id: { type: string, description: Listing ID (or _existingListingId) }
+ *                     _existingListingId: { type: string }
+ *                     title: { type: string }
+ *                     startPrice: { type: number }
+ *                     scheduleTime: { type: string }
+ *                     customFields: { type: object }
+ *     responses:
+ *       200:
+ *         description: Number of successfully updated listings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 updated: { type: integer, example: 5 }
+ *       400: { description: listings array is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk update listings
 router.put('/bulk-update', requireAuth, async (req, res) => {
   try {
@@ -1352,6 +1912,53 @@ router.put('/bulk-update', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/{id}:
+ *   put:
+ *     tags: [Template Listings]
+ *     summary: Update a single listing
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { $ref: '#/components/schemas/TemplateListing' }
+ *     responses:
+ *       200:
+ *         description: Updated listing
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/TemplateListing' }
+ *       401: { description: Unauthorized }
+ *       404: { description: Listing not found }
+ *       409: { description: SKU conflict }
+ *       500: { description: Server error }
+ *   delete:
+ *     tags: [Template Listings]
+ *     summary: Delete a single listing
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string, example: Listing deleted successfully }
+ *       401: { description: Unauthorized }
+ *       404: { description: Listing not found }
+ *       500: { description: Server error }
+ */
 // Update listing
 router.put('/:id', requireAuth, async (req, res) => {
   try {
@@ -1402,6 +2009,53 @@ router.delete('/:id', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/autofill-from-asin:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: ASIN autofill — single ASIN
+ *     description: Fetches Amazon product data for one ASIN, applies the template's field configs and pricing rules, and returns the generated field values without persisting anything.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [asin, templateId]
+ *             properties:
+ *               asin:       { type: string, example: B01N5IB20Q }
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               region:     { type: string, default: US }
+ *     responses:
+ *       200:
+ *         description: Autofilled field data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:            { type: boolean }
+ *                 asin:               { type: string }
+ *                 autoFilledData:
+ *                   type: object
+ *                   properties:
+ *                     coreFields:   { type: object }
+ *                     customFields: { type: object }
+ *                 amazonSource:
+ *                   type: object
+ *                   properties:
+ *                     title:      { type: string }
+ *                     brand:      { type: string }
+ *                     price:      { type: number }
+ *                     imageCount: { type: integer }
+ *                 pricingCalculation: { type: object, nullable: true }
+ *       400: { description: ASIN and templateId are required or automation not enabled }
+ *       401: { description: Unauthorized }
+ *       404: { description: Template not found }
+ *       500: { description: Server error }
+ */
 // ASIN Autofill endpoint
 router.post('/autofill-from-asin', requireAuth, async (req, res) => {
   try {
@@ -1475,6 +2129,60 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-autofill-from-asins:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: ASIN autofill — batch (up to 100 ASINs)
+ *     description: |
+ *       Processes up to 100 ASINs in parallel batches. Each result has a `status` of:
+ *       - `success` — autofill data generated
+ *       - `duplicate_updateable` — ASIN already in this template (returns existing data for editing)
+ *       - `blocked` — ASIN in another seller template, or SKU conflict
+ *       - `error` — scraping or AI processing failed
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [asins, templateId, sellerId]
+ *             properties:
+ *               asins:      { type: array, items: { type: string }, example: ["B01N5IB20Q", "B07K1RZWMC"] }
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               region:     { type: string, default: US }
+ *     responses:
+ *       200:
+ *         description: Batch autofill results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:        { type: boolean }
+ *                 total:          { type: integer }
+ *                 successful:     { type: integer }
+ *                 failed:         { type: integer }
+ *                 duplicates:     { type: integer }
+ *                 blocked:        { type: integer }
+ *                 processingTime: { type: string, example: "4.2s" }
+ *                 results:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       asin:   { type: string }
+ *                       status: { type: string, enum: [success, duplicate_updateable, blocked, error] }
+ *                       autoFilledData: { type: object, nullable: true }
+ *                       pricingCalculation: { type: object, nullable: true }
+ *                       error:  { type: string, nullable: true }
+ *       400: { description: Validation error or automation not enabled }
+ *       401: { description: Unauthorized }
+ *       404: { description: Template not found }
+ *       500: { description: Server error }
+ */
 // Bulk auto-fill from multiple ASINs
 router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
   try {
@@ -1760,6 +2468,38 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-delete:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Permanently delete multiple listings
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [listingIds]
+ *             properties:
+ *               listingIds:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["665abc...", "665def..."]
+ *     responses:
+ *       200:
+ *         description: Delete result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:      { type: string, example: Listings deleted successfully }
+ *                 deletedCount: { type: integer, example: 3 }
+ *       400: { description: listingIds array is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk update existing listings (used by Proof Read → List Directly flow)
 // Bulk delete listings
 router.post('/bulk-delete', requireAuth, async (req, res) => {
@@ -1784,6 +2524,58 @@ router.post('/bulk-delete', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-create:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk create listings from autofill results (max 50)
+ *     description: |
+ *       Creates or reactivates up to 50 listings at once. Per-listing result status:
+ *       - `created` — new listing saved
+ *       - `reactivated` — existing inactive listing updated and reactivated
+ *       - `skipped` — active duplicate (when skipDuplicates=true)
+ *       - `blocked` — SKU conflict with existing active/draft listing
+ *       - `failed` — validation or DB error
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, listings]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               listings:
+ *                 type: array
+ *                 items: { $ref: '#/components/schemas/TemplateListing' }
+ *               options:
+ *                 type: object
+ *                 properties:
+ *                   autoGenerateSKU: { type: boolean, default: true }
+ *                   skipDuplicates:  { type: boolean, default: true }
+ *     responses:
+ *       200:
+ *         description: Bulk create summary with per-listing results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:     { type: boolean }
+ *                 total:       { type: integer }
+ *                 created:     { type: integer }
+ *                 reactivated: { type: integer }
+ *                 failed:      { type: integer }
+ *                 skipped:     { type: integer }
+ *                 results:     { type: array, items: { type: object } }
+ *                 errors:      { type: array, items: { type: object } }
+ *       400: { description: Validation error or too many listings }
+ *       401: { description: Unauthorized }
+ *       404: { description: Seller or Template not found }
+ *       500: { description: Server error }
+ */
 // Bulk create listings from auto-fill results
 router.post('/bulk-create', requireAuth, async (req, res) => {
   try {
@@ -2100,6 +2892,40 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-preview:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk ASIN preview — REST (non-streaming)
+ *     description: Synchronous version of `bulk-preview-stream`. Processes up to 100 ASINs and returns all results at once (no SSE). Suitable for small batches or environments where SSE is unavailable.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, asins]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               asins:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["B01N5IB20Q", "B07K1RZWMC"]
+ *               region: { type: string, default: US }
+ *     responses:
+ *       200:
+ *         description: Array of preview items
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items: { type: object }
+ *       400: { description: Validation error or too many ASINs }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk preview: Process ASINs and return preview data (no save to database)
 router.post('/bulk-preview', requireAuth, async (req, res) => {
   try {
@@ -2463,6 +3289,46 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-save:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk save reviewed/edited preview listings to the database
+ *     description: Persists an array of reviewed listing objects. Applies the same deduplication and reactivation logic as `bulk-create`.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, listings]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               listings:
+ *                 type: array
+ *                 items: { $ref: '#/components/schemas/TemplateListing' }
+ *               options: { type: object }
+ *     responses:
+ *       200:
+ *         description: Bulk save summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:     { type: boolean }
+ *                 total:       { type: integer }
+ *                 created:     { type: integer }
+ *                 reactivated: { type: integer }
+ *                 failed:      { type: integer }
+ *                 skipped:     { type: integer }
+ *                 results:     { type: array, items: { type: object } }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk save: Save reviewed/edited listings to database
 router.post('/bulk-save', requireAuth, async (req, res) => {
   try {
@@ -2843,6 +3709,45 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-import-asins:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Quick ASIN import (no Amazon data fetch)
+ *     description: Creates draft `TemplateListing` stubs for each ASIN without scraping Amazon. Useful for pre-loading a batch before running autofill later.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, asins]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               asins:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["B01N5IB20Q", "B07K1RZWMC"]
+ *     responses:
+ *       200:
+ *         description: Import result summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:  { type: boolean }
+ *                 total:    { type: integer }
+ *                 imported: { type: integer }
+ *                 skipped:  { type: integer }
+ *                 results:  { type: array, items: { type: object } }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       404: { description: Template or Seller not found }
+ *       500: { description: Server error }
+ */
 // Bulk import ASINs (quick import without fetching Amazon data)
 router.post('/bulk-import-asins', requireAuth, async (req, res) => {
   try {
@@ -3089,6 +3994,45 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-import-skus:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Quick SKU import (no Amazon data fetch)
+ *     description: Creates draft `TemplateListing` stubs for each SKU string without scraping Amazon. Useful for importing eBay SKU lists that need data filled later.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, skus]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               skus:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["GRW25B20Q", "GRW25K1RZ"]
+ *     responses:
+ *       200:
+ *         description: Import result summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:  { type: boolean }
+ *                 total:    { type: integer }
+ *                 imported: { type: integer }
+ *                 skipped:  { type: integer }
+ *                 results:  { type: array, items: { type: object } }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       404: { description: Template or Seller not found }
+ *       500: { description: Server error }
+ */
 // Bulk import SKUs (quick import with SKUs directly)
 router.post('/bulk-import-skus', requireAuth, async (req, res) => {
   try {
@@ -3350,6 +4294,49 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-import:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Raw listing import (CSV parse result array)
+ *     description: Inserts an array of pre-built listing objects directly using `insertMany`. Intended for the CSV import flow. Duplicate key errors return HTTP 207 with partial results.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, listings]
+ *             properties:
+ *               templateId: { type: string }
+ *               listings:
+ *                 type: array
+ *                 items: { $ref: '#/components/schemas/TemplateListing' }
+ *     responses:
+ *       200:
+ *         description: All listings imported successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:       { type: string, example: Listings imported successfully }
+ *                 importedCount: { type: integer, example: 25 }
+ *       207:
+ *         description: Import completed with some duplicates skipped
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:       { type: string }
+ *                 importedCount: { type: integer }
+ *                 errors:        { type: array, items: { type: object } }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk import from CSV
 router.post('/bulk-import', requireAuth, async (req, res) => {
   try {
@@ -3396,6 +4383,48 @@ router.post('/bulk-import', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/export-csv/{templateId}:
+ *   get:
+ *     tags: [Template Listings – CSV]
+ *     summary: Export active listings as eBay-format CSV
+ *     description: |
+ *       Generates and downloads an eBay bulk-upload CSV file.
+ *
+ *       **Default behaviour** (no `listingIds`): exports all `active` listings that have not
+ *       yet been downloaded (i.e. `downloadBatchId` is null or `pendingRedownload` is true).
+ *
+ *       When `listingIds` is provided the status/batch filter is bypassed and only the
+ *       explicitly listed IDs are exported.
+ *
+ *       On success the matched listings are marked with a `downloadBatchId`, `downloadBatchNumber`,
+ *       and `downloadedAt` timestamp. A fire-and-forget seller-snapshot upsert also runs.
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: listingIds
+ *         schema: { type: string }
+ *         description: Comma-separated listing IDs to export (bypasses status filter)
+ *     responses:
+ *       200:
+ *         description: CSV file download
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       400: { description: No active listings to download }
+ *       401: { description: Unauthorized }
+ *       404: { description: Template not found }
+ *       500: { description: Server error }
+ */
 // Export listings as eBay CSV
 router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
   try {
@@ -3703,6 +4732,45 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/export-csv-direct/{templateId}:
+ *   post:
+ *     tags: [Template Listings – CSV]
+ *     summary: Export CSV from inline data (“List Directly” flow)
+ *     description: |
+ *       Generates an eBay CSV using the listing array supplied in the request body rather than
+ *       reading from the database. Edits made in the review modal are captured without needing
+ *       a prior save. Does NOT update `downloadBatchId` on DB records.
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [listings]
+ *             properties:
+ *               sellerId: { type: string }
+ *               listings:
+ *                 type: array
+ *                 items: { $ref: '#/components/schemas/TemplateListing' }
+ *     responses:
+ *       200:
+ *         description: CSV file download
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       400: { description: listings array is required or template not found }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Export CSV using inline listing data (no DB read for field values — used by Proof Read → List Directly)
 // Edits made in the review modal are carried into the CSV without being persisted to the database.
 router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
@@ -3938,6 +5006,38 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/download-history/{templateId}:
+ *   get:
+ *     tags: [Template Listings – CSV]
+ *     summary: Get download batch history for a template
+ *     description: Returns all distinct download batches for a template (and optional seller), ordered by batch number. Each batch includes the count of exported listings.
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Array of batch history objects
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   batchId:      { type: string }
+ *                   batchNumber:  { type: integer }
+ *                   downloadedAt: { type: string, format: date-time }
+ *                   listingCount: { type: integer }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Get download history for a template/seller
 router.get('/download-history/:templateId', requireAuth, async (req, res) => {
   try {
@@ -4006,6 +5106,37 @@ router.get('/download-history/:templateId', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/re-download-batch/{templateId}/{batchId}:
+ *   get:
+ *     tags: [Template Listings – CSV]
+ *     summary: Re-download a previously exported batch as CSV
+ *     description: Regenerates the eBay CSV for a specific `downloadBatchId`. Uses the `downloadedActionField` stored at original download time so the Action column is preserved exactly.
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: CSV file download for the specified batch
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       401: { description: Unauthorized }
+ *       404: { description: Template not found or batch not found }
+ *       500: { description: Server error }
+ */
 // Re-download a specific batch
 router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, res) => {
   try {
@@ -4198,6 +5329,51 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/search-inactive-skus:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Search for inactive listings by SKU array
+ *     description: Looks up a list of SKUs and partitions them into `found` (inactive), `alreadyActive`, and `notFound` categories. Used before bulk-reactivate to preview what will happen.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, skus]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               skus:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["GRW25B20Q", "GRW25K1RZ"]
+ *     responses:
+ *       200:
+ *         description: Partitioned SKU lookup results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 found:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/TemplateListing' }
+ *                   description: Inactive listings that can be reactivated
+ *                 notFound:
+ *                   type: array
+ *                   items: { type: string }
+ *                   description: SKUs not found in the database
+ *                 alreadyActive:
+ *                   type: array
+ *                   items: { type: string }
+ *                   description: SKUs that are already active
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Search for inactive listings by SKU
 router.post('/search-inactive-skus', requireAuth, async (req, res) => {
   try {
@@ -4248,6 +5424,45 @@ router.post('/search-inactive-skus', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-reactivate:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Reactivate inactive listings by ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [listingIds]
+ *             properties:
+ *               listingIds:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["665abc...", "665def..."]
+ *     responses:
+ *       200:
+ *         description: Reactivation summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:     { type: boolean }
+ *                 reactivated: { type: integer, example: 5 }
+ *                 details:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       customLabel: { type: string }
+ *                       title:       { type: string }
+ *       400: { description: listingIds array is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk reactivate inactive listings
 router.post('/bulk-reactivate', requireAuth, async (req, res) => {
   try {
@@ -4290,6 +5505,52 @@ router.post('/bulk-reactivate', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-deactivate:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Deactivate active listings by SKU array
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, skus]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               skus:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["GRW25B20Q", "GRW25K1RZ"]
+ *     responses:
+ *       200:
+ *         description: Deactivation summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 summary:
+ *                   type: object
+ *                   properties:
+ *                     total:           { type: integer }
+ *                     deactivated:     { type: integer }
+ *                     notFound:        { type: integer }
+ *                     alreadyInactive: { type: integer }
+ *                 details:
+ *                   type: object
+ *                   properties:
+ *                     deactivated:     { type: array, items: { type: object } }
+ *                     notFound:        { type: array, items: { type: string } }
+ *                     alreadyInactive: { type: array, items: { type: string } }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk deactivate active listings
 router.post('/bulk-deactivate', requireAuth, async (req, res) => {
   try {
@@ -4368,8 +5629,40 @@ router.post('/bulk-deactivate', requireAuth, async (req, res) => {
 });
 
 /**
- * GET /api/seller/:sellerId/template-listings/api-usage-stats
- * Get API usage statistics (ScraperAPI, PAAPI, Gemini)
+ * @swagger
+ * /template-listings/api/seller/{sellerId}/template-listings/api-usage-stats:
+ *   get:
+ *     tags: [Template Listings – Admin]
+ *     summary: API usage statistics (ScraperAPI / PAAPI / Gemini)
+ *     description: Returns monthly usage totals per service. Optionally filter by service name, year, and month.
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: service
+ *         schema: { type: string }
+ *         description: scraperapi | paapi | gemini
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer, example: 2024 }
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, example: 6 }
+ *     responses:
+ *       200:
+ *         description: Usage statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 stats:   { type: object }
+ *                 message: { type: string }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.get('/api/seller/:sellerId/template-listings/api-usage-stats', requireAuth, async (req, res) => {
   try {
@@ -4399,8 +5692,42 @@ router.get('/api/seller/:sellerId/template-listings/api-usage-stats', requireAut
 });
 
 /**
- * GET /api/seller/:sellerId/template-listings/api-usage-field-stats
- * Get field extraction statistics for a specific service
+ * @swagger
+ * /template-listings/api/seller/{sellerId}/template-listings/api-usage-field-stats:
+ *   get:
+ *     tags: [Template Listings – Admin]
+ *     summary: Field extraction statistics for a service
+ *     description: Returns per-field extraction success/failure counts for the given service and period.
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: service
+ *         required: true
+ *         schema: { type: string }
+ *         description: scraperapi | paapi | gemini
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Field extraction statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 stats:   { type: object }
+ *                 message: { type: string }
+ *       400: { description: service parameter is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.get('/api/seller/:sellerId/template-listings/api-usage-field-stats', requireAuth, async (req, res) => {
   try {
@@ -4435,8 +5762,38 @@ router.get('/api/seller/:sellerId/template-listings/api-usage-field-stats', requ
 });
 
 /**
- * GET /api/seller/:sellerId/template-listings/api-usage-errors
- * Get recent API errors for debugging
+ * @swagger
+ * /template-listings/api/seller/{sellerId}/template-listings/api-usage-errors:
+ *   get:
+ *     tags: [Template Listings – Admin]
+ *     summary: Recent API errors for a service
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: service
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *     responses:
+ *       200:
+ *         description: Recent error records
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 errors:  { type: array, items: { type: object } }
+ *                 count:   { type: integer }
+ *                 message: { type: string }
+ *       400: { description: service parameter is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.get('/api/seller/:sellerId/template-listings/api-usage-errors', requireAuth, async (req, res) => {
   try {
@@ -4468,8 +5825,45 @@ router.get('/api/seller/:sellerId/template-listings/api-usage-errors', requireAu
 });
 
 /**
- * GET /api/seller/:sellerId/template-listings/api-quota-status
- * Check quota status for a service
+ * @swagger
+ * /template-listings/api/seller/{sellerId}/template-listings/api-quota-status:
+ *   get:
+ *     tags: [Template Listings – Admin]
+ *     summary: Quota status for a service
+ *     description: Checks current period usage against the specified quota and returns a status of `ok`, `warning`, or `exceeded`.
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: service
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: quota
+ *         schema: { type: integer, default: 5000 }
+ *         description: Monthly quota limit to check against
+ *     responses:
+ *       200:
+ *         description: Quota status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:     { type: boolean }
+ *                 quotaStatus:
+ *                   type: object
+ *                   properties:
+ *                     status:      { type: string, enum: [ok, warning, exceeded] }
+ *                     percentUsed: { type: number }
+ *                     used:        { type: integer }
+ *                     limit:       { type: integer }
+ *                 message: { type: string }
+ *       400: { description: service parameter is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.get('/api/seller/:sellerId/template-listings/api-quota-status', requireAuth, async (req, res) => {
   try {
@@ -4500,8 +5894,30 @@ router.get('/api/seller/:sellerId/template-listings/api-quota-status', requireAu
 });
 
 /**
- * GET /template-listings/cache-stats
- * Get ASIN cache statistics
+ * @swagger
+ * /template-listings/cache-stats:
+ *   get:
+ *     tags: [Template Listings – Admin]
+ *     summary: ASIN cache statistics
+ *     description: Returns NodeCache stats for the in-memory ASIN cache (hit rate, key count, enabled state).
+ *     responses:
+ *       200:
+ *         description: Cache statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 cache:
+ *                   type: object
+ *                   properties:
+ *                     enabled: { type: boolean }
+ *                     keys:    { type: integer, example: 42 }
+ *                     hitRate: { type: number, example: 78.5 }
+ *                 message: { type: string }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.get('/cache-stats', requireAuth, async (req, res) => {
   try {
@@ -4522,8 +5938,24 @@ router.get('/cache-stats', requireAuth, async (req, res) => {
 });
 
 /**
- * POST /template-listings/cache-clear
- * Clear ASIN cache
+ * @swagger
+ * /template-listings/cache-clear:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Clear the ASIN cache
+ *     description: Flushes the entire in-memory NodeCache for ASINs. Useful after updating ASIN data or troubleshooting stale results.
+ *     responses:
+ *       200:
+ *         description: Cache cleared
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string, example: ASIN cache cleared successfully }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.post('/cache-clear', requireAuth, async (req, res) => {
   try {
