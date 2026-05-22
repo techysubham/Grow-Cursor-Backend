@@ -25,6 +25,39 @@ function getOpenAI() {
 // Body: { title: string, description: string }
 // Returns: { make, model, startYear, endYear, allFitments }
 // ============================================
+/**
+ * @swagger
+ * /ai/suggest-fitment:
+ *   post:
+ *     tags: [AI]
+ *     summary: Suggest vehicle fitments from a product listing
+ *     description: "Sends the product title and description to GPT-4o-mini and extracts all vehicle make/model/year/trim/engine fitments. Tracks usage in AiFitmentUsage."
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               title:
+ *                 type: string
+ *               description:
+ *                 type: string
+ *                 description: Raw HTML or plain text product description
+ *     responses:
+ *       200:
+ *         description: Best fitment plus full array
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AiFitmentSuggestion'
+ *       400:
+ *         description: title or description is required
+ *       500:
+ *         description: AI request failed or parse error
+ */
 router.post('/suggest-fitment', requireAuth, async (req, res) => {
     try {
         const { title = '', description = '' } = req.body;
@@ -165,6 +198,38 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
 // POST /api/ai/track-save-next
 // Body: { hadData: boolean }
 // ============================================
+/**
+ * @swagger
+ * /ai/track-save-next:
+ *   post:
+ *     tags: [AI]
+ *     summary: Track a "save and move to next" action
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hadData:
+ *                 type: boolean
+ *                 description: Whether the fitment had data when saved
+ *                 default: false
+ *     responses:
+ *       200:
+ *         description: Tracked
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok:
+ *                   type: boolean
+ *       500:
+ *         description: Failed to track action
+ */
 router.post('/track-save-next', requireAuth, async (req, res) => {
     try {
         const { hadData = false } = req.body;
@@ -193,6 +258,52 @@ router.post('/track-save-next', requireAuth, async (req, res) => {
 // Body: { currentTitle, sourceTitle, brand, color, compatibility }
 // Returns: { rephrasedTitle }
 // ============================================
+/**
+ * @swagger
+ * /ai/rephrase-title:
+ *   post:
+ *     tags: [AI]
+ *     summary: Rephrase an eBay product title for SEO
+ *     description: "Uses GPT-4o-mini to rephrase the title to 75–80 characters while retaining meaning. Optionally injects verified vehicle compatibility."
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [currentTitle]
+ *             properties:
+ *               currentTitle:
+ *                 type: string
+ *               sourceTitle:
+ *                 type: string
+ *                 description: Amazon source title for context
+ *               brand:
+ *                 type: string
+ *               color:
+ *                 type: string
+ *               compatibility:
+ *                 type: string
+ *               vehicleMentions:
+ *                 type: string
+ *                 description: Verified vehicle models from reviews to include
+ *     responses:
+ *       200:
+ *         description: Rephrased title
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 rephrasedTitle:
+ *                   type: string
+ *       400:
+ *         description: currentTitle is required
+ *       500:
+ *         description: AI request failed
+ */
 router.post('/rephrase-title', requireAuth, async (req, res) => {
     try {
         const { currentTitle = '', sourceTitle = '', brand = '', color = '', compatibility = '', vehicleMentions = '' } = req.body;
@@ -246,6 +357,39 @@ eBay title to rephrase: ${currentTitle}`;
 // GET /api/ai/fitment-usage-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
 // Returns day-wise, user-wise stats
 // ============================================
+/**
+ * @swagger
+ * /ai/fitment-usage-stats:
+ *   get:
+ *     tags: [AI]
+ *     summary: Get AI fitment usage stats (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         example: '2024-06-01'
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         example: '2024-06-30'
+ *     responses:
+ *       200:
+ *         description: Per-user per-day action counts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/AiFitmentUsageStat'
+ *       500:
+ *         description: Failed to fetch usage stats
+ */
 router.get('/fitment-usage-stats', requireAuth, requirePageAccess('AiFitmentUsage'), async (req, res) => {
     try {
         const { startDate, endDate } = req.query;

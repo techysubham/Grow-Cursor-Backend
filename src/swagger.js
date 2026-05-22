@@ -48,7 +48,11 @@ const swaggerDefinition = {
         { name: 'Seller Upload Limits', description: 'Daily eBay feed upload caps per seller+country' },
         { name: 'CSV Storage', description: 'Stored CSV exports with download and scheduled-upload management' },
         { name: 'Item Category Map', description: 'Map eBay item numbers to category/range/product (CRP) and propagate to orders' },
-        { name: 'User Sellers', description: 'User-seller assignments and daily performance tracking' }
+        { name: 'User Sellers', description: 'User-seller assignments and daily performance tracking' },
+        { name: 'Remark Templates', description: 'Buyer-message remark templates with bulk save and soft-delete' },
+        { name: 'Resolution Options', description: 'Dispute resolution options (e.g. Replace, Reorder)' },
+        { name: 'Credit Card Names', description: 'Lookup list of credit card names for expense tracking' },
+        { name: 'AI', description: 'OpenAI-powered fitment extraction, title rephrasing, and usage stats' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
@@ -353,6 +357,69 @@ const swaggerDefinition = {
                     remarks:    { type: 'string', enum: ['Good', 'Average', 'Need for improvement', ''] },
                     createdAt:  { type: 'string', format: 'date-time' },
                     updatedAt:  { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── RemarkTemplate ────────────────────────────────────────────────────
+            RemarkTemplate: {
+                type: 'object',
+                properties: {
+                    id:   { type: 'string', example: '665abc123def456789000040' },
+                    name: { type: 'string', example: 'Delivered' },
+                    text: { type: 'string', example: 'Hello {{buyer_first_name}}, ...' }
+                }
+            },
+
+            // ── ResolutionOption ──────────────────────────────────────────────────
+            ResolutionOption: {
+                type: 'object',
+                properties: {
+                    _id:       { type: 'string', example: '665abc123def456789000041' },
+                    name:      { type: 'string', example: 'Replace' },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── CreditCardName ────────────────────────────────────────────────────
+            CreditCardName: {
+                type: 'object',
+                properties: {
+                    _id:       { type: 'string', example: '665abc123def456789000042' },
+                    name:      { type: 'string', example: 'Visa ending 4242' },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── AiFitmentSuggestion ───────────────────────────────────────────────
+            AiFitmentSuggestion: {
+                type: 'object',
+                properties: {
+                    make:             { type: 'string', nullable: true, example: 'Toyota' },
+                    model:            { type: 'string', nullable: true, example: 'Camry' },
+                    startYear:        { type: 'string', nullable: true, example: '2018' },
+                    endYear:          { type: 'string', nullable: true, example: '2022' },
+                    suggestedTrims:   { type: 'array', items: { type: 'string' } },
+                    excludedTrims:    { type: 'array', items: { type: 'string' } },
+                    suggestedEngines: { type: 'array', items: { type: 'string' } },
+                    excludedEngines:  { type: 'array', items: { type: 'string' } },
+                    allFitments:      { type: 'array', items: { type: 'object' } }
+                }
+            },
+
+            // ── AiFitmentUsageStat ────────────────────────────────────────────────
+            AiFitmentUsageStat: {
+                type: 'object',
+                properties: {
+                    userId:               { type: 'string' },
+                    username:             { type: 'string' },
+                    name:                 { type: 'string' },
+                    role:                 { type: 'string' },
+                    date:                 { type: 'string', example: '2024-06-01' },
+                    aiSuggestCount:       { type: 'integer' },
+                    saveNextCount:        { type: 'integer' },
+                    saveNextWithDataCount:{ type: 'integer' }
                 }
             }
         }

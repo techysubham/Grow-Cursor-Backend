@@ -114,9 +114,31 @@ async function ensureDefaultTemplatesPresent() {
   await RemarkTemplate.insertMany(toInsert);
 }
 
+/**
+ * @swagger
+ * /remark-templates:
+ *   get:
+ *     tags: [Remark Templates]
+ *     summary: List all active remark templates
+ *     description: Seeds missing default templates on first call, then returns all active templates sorted by sortOrder.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Active templates
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 templates:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/RemarkTemplate'
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, async (req, res) => {
-  try {
-    await ensureDefaultTemplatesPresent();
 
     const templates = await RemarkTemplate.find({ isActive: true })
       .sort({ sortOrder: 1, createdAt: 1 })
@@ -129,6 +151,55 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /remark-templates:
+ *   put:
+ *     tags: [Remark Templates]
+ *     summary: Bulk replace remark templates
+ *     description: Upserts all provided templates in order and soft-deletes any omitted ones. Validates for duplicate names.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templates]
+ *             properties:
+ *               templates:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [name, text]
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                       description: Existing _id to update; omit to create new
+ *                     name:
+ *                       type: string
+ *                     text:
+ *                       type: string
+ *     responses:
+ *       200:
+ *         description: Saved templates
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 templates:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/RemarkTemplate'
+ *       400:
+ *         description: Validation error (missing fields, duplicate name)
+ *       500:
+ *         description: Internal server error
+ */
 router.put('/', requireAuth, requirePageAccess('BuyerMessages'), validate(updateRemarkTemplatesSchema), async (req, res) => {
   try {
     const incoming = Array.isArray(req.body?.templates) ? req.body.templates : null;
