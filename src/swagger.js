@@ -52,7 +52,13 @@ const swaggerDefinition = {
         { name: 'Remark Templates', description: 'Buyer-message remark templates with bulk save and soft-delete' },
         { name: 'Resolution Options', description: 'Dispute resolution options (e.g. Replace, Reorder)' },
         { name: 'Credit Card Names', description: 'Lookup list of credit card names for expense tracking' },
-        { name: 'AI', description: 'OpenAI-powered fitment extraction, title rephrasing, and usage stats' }
+        { name: 'AI', description: 'OpenAI-powered fitment extraction, title rephrasing, and usage stats' },
+        { name: 'Affiliate Orders', description: 'Amazon sourcing queue, gift-card balances, spend tracking, and daily summary' },
+        { name: 'Micro Orders', description: 'Paginated orders with subtotal < $3 and computed INR profit metrics' },
+        { name: 'Payment Accounts', description: 'Payment accounts linked to a bank account' },
+        { name: 'Payoneer', description: 'Payoneer receipt records with auto-synced Transaction entries' },
+        { name: 'Price Change Logs', description: 'Audit log of eBay price change attempts' },
+        { name: 'Exchange Rates', description: 'Marketplace exchange rates with optional order back-fill' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
@@ -420,6 +426,71 @@ const swaggerDefinition = {
                     aiSuggestCount:       { type: 'integer' },
                     saveNextCount:        { type: 'integer' },
                     saveNextWithDataCount:{ type: 'integer' }
+                }
+            },
+
+            // ── PaymentAccount ────────────────────────────────────────────────────
+            PaymentAccount: {
+                type: 'object',
+                properties: {
+                    _id:         { type: 'string', example: '665abc123def456789000050' },
+                    name:        { type: 'string', example: 'Payoneer USD' },
+                    bankAccount: { type: 'object', description: 'Populated bank account with name' },
+                    createdAt:   { type: 'string', format: 'date-time' },
+                    updatedAt:   { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── PayoneerRecord ─────────────────────────────────────────────────────
+            PayoneerRecord: {
+                type: 'object',
+                properties: {
+                    _id:                { type: 'string', example: '665abc123def456789000051' },
+                    store:              { type: 'object', description: 'Populated store with user.username' },
+                    bankAccount:        { type: 'object', description: 'Populated bank account with name' },
+                    paymentDate:        { type: 'string', format: 'date-time' },
+                    amount:             { type: 'number', example: 500.00 },
+                    exchangeRate:       { type: 'number', example: 83.5 },
+                    actualExchangeRate: { type: 'number', example: 85.17 },
+                    bankDeposit:        { type: 'number', example: 41750.00 },
+                    periodStart:        { type: 'string', format: 'date-time', nullable: true },
+                    periodEnd:          { type: 'string', format: 'date-time', nullable: true },
+                    profit:             { type: 'number', nullable: true },
+                    createdAt:          { type: 'string', format: 'date-time' },
+                    updatedAt:          { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── PriceChangeLog ────────────────────────────────────────────────────
+            PriceChangeLog: {
+                type: 'object',
+                properties: {
+                    _id:          { type: 'string', example: '665abc123def456789000052' },
+                    legacyItemId: { type: 'string', example: '123456789012' },
+                    orderId:      { type: 'string' },
+                    user:         { type: 'object', description: 'Populated user with username and email' },
+                    seller:       { type: 'object', description: 'Populated seller with user.username' },
+                    oldPrice:     { type: 'number' },
+                    newPrice:     { type: 'number' },
+                    success:      { type: 'boolean' },
+                    errorMessage: { type: 'string', nullable: true },
+                    createdAt:    { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── ExchangeRate ────────────────────────────────────────────────────────
+            ExchangeRate: {
+                type: 'object',
+                properties: {
+                    _id:             { type: 'string', example: '665abc123def456789000053' },
+                    rate:            { type: 'number', example: 83.5 },
+                    marketplace:     { type: 'string', example: 'EBAY_US' },
+                    effectiveDate:   { type: 'string', format: 'date-time' },
+                    applicationMode: { type: 'string', enum: ['effective', 'specific-date'] },
+                    notes:           { type: 'string', nullable: true },
+                    createdBy:       { type: 'string' },
+                    createdAt:       { type: 'string', format: 'date-time' },
+                    updatedAt:       { type: 'string', format: 'date-time' }
                 }
             }
         }

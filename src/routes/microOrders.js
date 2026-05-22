@@ -46,6 +46,57 @@ const IGST_FACTOR   = 90 * 0.04 * 0.18;  // 0.648 — subtotal → INR IGST
  * Response:
  *   { orders, totalRecords, totalPages, currentPage, totalCount, totalProfitFake }
  */
+/**
+ * @swagger
+ * /micro-orders:
+ *   get:
+ *     tags: [Micro Orders]
+ *     summary: List micro orders (subtotal $0.01–$2.99) with computed INR profit
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: seller
+ *         schema: { type: string }
+ *       - in: query
+ *         name: dateMode
+ *         schema: { type: string, enum: ['none','single','range'], default: 'none' }
+ *       - in: query
+ *         name: date
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: dateFrom
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: dateTo
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: excludeClient
+ *         schema: { type: string, enum: ['true','false'] }
+ *         description: Exclude the Vergo client seller
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50, maximum: 200 }
+ *     responses:
+ *       200:
+ *         description: Paginated micro orders with computed metrics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 orders:          { type: array, items: { type: object } }
+ *                 totalRecords:    { type: integer }
+ *                 totalPages:      { type: integer }
+ *                 currentPage:     { type: integer }
+ *                 totalCount:      { type: integer }
+ *                 totalProfitFake: { type: number }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, requirePageAccess('MicroOrders'), async (req, res) => {
   try {
     const {

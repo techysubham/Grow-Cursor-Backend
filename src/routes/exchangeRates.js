@@ -17,6 +17,28 @@ import {
 const router = express.Router();
 
 // Get current exchange rate
+/**
+ * @swagger
+ * /exchange-rates/current:
+ *   get:
+ *     tags: [Exchange Rates]
+ *     summary: Get the current exchange rate for a marketplace
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: marketplace
+ *         schema: { type: string, default: EBAY_US }
+ *     responses:
+ *       200:
+ *         description: Current exchange rate record (or default if none set)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ExchangeRate'
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/current', requireAuth, async (req, res) => {
   try {
     const { marketplace = 'EBAY_US' } = req.query;
@@ -38,6 +60,33 @@ router.get('/current', requireAuth, async (req, res) => {
 });
 
 // Get rate history
+/**
+ * @swagger
+ * /exchange-rates/history:
+ *   get:
+ *     tags: [Exchange Rates]
+ *     summary: Get exchange rate history for a marketplace
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: marketplace
+ *         schema: { type: string, default: EBAY_US }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *     responses:
+ *       200:
+ *         description: Array of exchange rate records sorted newest first
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/ExchangeRate'
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/history', requireAuth, async (req, res) => {
   try {
     const { marketplace = 'EBAY_US', limit = 50 } = req.query;
@@ -53,6 +102,34 @@ router.get('/history', requireAuth, async (req, res) => {
 });
 
 // Get rate for a specific date
+/**
+ * @swagger
+ * /exchange-rates/for-date:
+ *   get:
+ *     tags: [Exchange Rates]
+ *     summary: Get the exchange rate effective on a specific date
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: date
+ *         required: true
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: marketplace
+ *         schema: { type: string, default: EBAY_US }
+ *     responses:
+ *       200:
+ *         description: Exchange rate for that date (or default fallback)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ExchangeRate'
+ *       400:
+ *         description: Date parameter is required
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/for-date', requireAuth, async (req, res) => {
   try {
     const { date, marketplace = 'EBAY_US' } = req.query;
@@ -79,6 +156,45 @@ router.get('/for-date', requireAuth, async (req, res) => {
 });
 
 // Set new exchange rate
+/**
+ * @swagger
+ * /exchange-rates:
+ *   post:
+ *     tags: [Exchange Rates]
+ *     summary: Set or update an exchange rate (optionally back-fills orders)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [rate, effectiveDate]
+ *             properties:
+ *               rate:                 { type: number }
+ *               effectiveDate:        { type: string, format: date-time }
+ *               marketplace:          { type: string, default: EBAY_US }
+ *               notes:                { type: string }
+ *               applicationMode:      { type: string, enum: ['effective','specific-date'], default: 'effective' }
+ *               updateExistingOrders: { type: boolean, default: true }
+ *     responses:
+ *       200:
+ *         description: Rate created/updated with count of orders recalculated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:           { type: string }
+ *                 rate:              { $ref: '#/components/schemas/ExchangeRate' }
+ *                 updatedOrders:     { type: integer }
+ *                 persistedToDatabase: { type: boolean }
+ *       400:
+ *         description: Missing rate/effectiveDate or invalid applicationMode
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/', requireAuth, async (req, res) => {
   try {
     const {
@@ -196,6 +312,27 @@ router.post('/', requireAuth, async (req, res) => {
 });
 
 // Delete exchange rate entry
+/**
+ * @swagger
+ * /exchange-rates/{id}:
+ *   delete:
+ *     tags: [Exchange Rates]
+ *     summary: Delete an exchange rate entry
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Rate deleted
+ *       404:
+ *         description: Rate not found
+ *       500:
+ *         description: Internal server error
+ */
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;

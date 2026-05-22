@@ -26,6 +26,47 @@ const calculateFields = (amount, exchangeRate) => {
 };
 
 // GET /api/payoneer - List all records with pagination and filtering
+/**
+ * @swagger
+ * /payoneer:
+ *   get:
+ *     tags: [Payoneer]
+ *     summary: List Payoneer records (paginated)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: store
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Paginated records with totals
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 records:         { type: array, items: { $ref: '#/components/schemas/PayoneerRecord' } }
+ *                 totalRecords:    { type: integer }
+ *                 totalPages:      { type: integer }
+ *                 currentPage:     { type: integer }
+ *                 totalAmount:     { type: number }
+ *                 totalBankDeposit:{ type: number }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { page = 1, limit = 50, startDate, endDate, store } = req.query;
@@ -99,6 +140,42 @@ router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => 
 });
 
 // POST /api/payoneer - Create new record
+/**
+ * @swagger
+ * /payoneer:
+ *   post:
+ *     tags: [Payoneer]
+ *     summary: Create a Payoneer record (auto-creates a Transaction)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [bankAccount, paymentDate, amount, exchangeRate, store]
+ *             properties:
+ *               bankAccount:  { type: string }
+ *               paymentDate:  { type: string, format: date-time }
+ *               amount:       { type: number }
+ *               exchangeRate: { type: number }
+ *               store:        { type: string }
+ *               periodStart:  { type: string, format: date-time }
+ *               periodEnd:    { type: string, format: date-time }
+ *               profit:       { type: number }
+ *     responses:
+ *       201:
+ *         description: Created record with computed actualExchangeRate and bankDeposit
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/PayoneerRecord'
+ *       400:
+ *         description: Missing required fields
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit } = req.body;
@@ -156,6 +233,45 @@ router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) =>
 });
 
 // PUT /api/payoneer/:id - Update record
+/**
+ * @swagger
+ * /payoneer/{id}:
+ *   put:
+ *     tags: [Payoneer]
+ *     summary: Update a Payoneer record (syncs the linked Transaction)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               bankAccount:  { type: string }
+ *               paymentDate:  { type: string, format: date-time }
+ *               amount:       { type: number }
+ *               exchangeRate: { type: number }
+ *               store:        { type: string }
+ *               periodStart:  { type: string, format: date-time }
+ *               periodEnd:    { type: string, format: date-time }
+ *               profit:       { type: number }
+ *     responses:
+ *       200:
+ *         description: Updated record
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/PayoneerRecord'
+ *       404:
+ *         description: Record not found
+ *       500:
+ *         description: Internal server error
+ */
 router.put('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { id } = req.params;
@@ -219,6 +335,25 @@ router.put('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) 
 });
 
 // DELETE /api/payoneer/:id - Delete record
+/**
+ * @swagger
+ * /payoneer/{id}:
+ *   delete:
+ *     tags: [Payoneer]
+ *     summary: Delete a Payoneer record (also deletes the linked Transaction)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Record deleted
+ *       500:
+ *         description: Internal server error
+ */
 router.delete('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { id } = req.params;
