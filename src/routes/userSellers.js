@@ -9,6 +9,26 @@ const router = express.Router();
 // ASSIGNMENTS
 // ============================================
 
+/**
+ * @swagger
+ * /user-sellers/assignments:
+ *   get:
+ *     tags: [User Sellers]
+ *     summary: List all user-seller assignments
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Array of assignments with populated user and seller
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/UserSellerAssignment'
+ *       500:
+ *         description: Internal server error
+ */
 // Get all assignments
 router.get('/assignments', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
     try {
@@ -28,6 +48,46 @@ router.get('/assignments', requireAuth, requirePageAccess('UserSellerAssignments
     }
 });
 
+/**
+ * @swagger
+ * /user-sellers/assignments:
+ *   post:
+ *     tags: [User Sellers]
+ *     summary: Assign a seller to a user
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId, sellerId]
+ *             properties:
+ *               userId:
+ *                 type: string
+ *               sellerId:
+ *                 type: string
+ *               dailyTarget:
+ *                 type: integer
+ *                 default: 0
+ *     responses:
+ *       201:
+ *         description: Assignment created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 assignment:
+ *                   $ref: '#/components/schemas/UserSellerAssignment'
+ *       400:
+ *         description: Missing fields or duplicate assignment
+ *       500:
+ *         description: Internal server error
+ */
 // Assign seller to user
 router.post('/assignments', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
     try {
@@ -58,6 +118,49 @@ router.post('/assignments', requireAuth, requirePageAccess('UserSellerAssignment
     }
 });
 
+/**
+ * @swagger
+ * /user-sellers/assignments/{id}/target:
+ *   patch:
+ *     tags: [User Sellers]
+ *     summary: Update the daily listing target for an assignment
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [dailyTarget]
+ *             properties:
+ *               dailyTarget:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Target updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 assignment:
+ *                   $ref: '#/components/schemas/UserSellerAssignment'
+ *       400:
+ *         description: Invalid daily target
+ *       404:
+ *         description: Assignment not found
+ *       500:
+ *         description: Internal server error
+ */
 // Update assignment daily target
 router.patch('/assignments/:id/target', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
     try {
@@ -85,6 +188,28 @@ router.patch('/assignments/:id/target', requireAuth, requirePageAccess('UserSell
     }
 });
 
+/**
+ * @swagger
+ * /user-sellers/assignments/{id}:
+ *   delete:
+ *     tags: [User Sellers]
+ *     summary: Unassign a seller from a user
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Unassigned successfully
+ *       404:
+ *         description: Assignment not found
+ *       500:
+ *         description: Internal server error
+ */
 // Unassign seller
 router.delete('/assignments/:id', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
     try {
@@ -106,6 +231,27 @@ router.delete('/assignments/:id', requireAuth, requirePageAccess('UserSellerAssi
 
 import { syncDailyQuantities } from '../utils/performanceSync.js';
 
+/**
+ * @swagger
+ * /user-sellers/performance:
+ *   get:
+ *     tags: [User Sellers]
+ *     summary: Get daily performance records
+ *     description: "Syncs daily quantities before returning. Non-manager roles only see their own records."
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Array of daily performance records
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/UserDailyQuantity'
+ *       500:
+ *         description: Internal server error
+ */
 // Get performance records
 router.get('/performance', requireAuth, async (req, res) => {
     try {
@@ -136,6 +282,50 @@ router.get('/performance', requireAuth, async (req, res) => {
     }
 });
 
+/**
+ * @swagger
+ * /user-sellers/performance/{id}/remarks:
+ *   patch:
+ *     tags: [User Sellers]
+ *     summary: Update remarks on a daily performance record
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [remarks]
+ *             properties:
+ *               remarks:
+ *                 type: string
+ *                 enum: ['Good', 'Average', 'Need for improvement', '']
+ *     responses:
+ *       200:
+ *         description: Remarks updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 record:
+ *                   $ref: '#/components/schemas/UserDailyQuantity'
+ *       400:
+ *         description: Invalid remark value
+ *       404:
+ *         description: Performance record not found
+ *       500:
+ *         description: Internal server error
+ */
 // Update remarks
 router.patch('/performance/:id/remarks', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
     try {

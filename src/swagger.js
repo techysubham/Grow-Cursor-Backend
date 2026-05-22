@@ -46,7 +46,9 @@ const swaggerDefinition = {
         { name: 'Column Presets', description: 'Saved column-visibility presets per page' },
         { name: 'Seller Pricing Config', description: 'Per-seller pricing config overrides for a template' },
         { name: 'Seller Upload Limits', description: 'Daily eBay feed upload caps per seller+country' },
-        { name: 'CSV Storage', description: 'Stored CSV exports with download and scheduled-upload management' }
+        { name: 'CSV Storage', description: 'Stored CSV exports with download and scheduled-upload management' },
+        { name: 'Item Category Map', description: 'Map eBay item numbers to category/range/product (CRP) and propagate to orders' },
+        { name: 'User Sellers', description: 'User-seller assignments and daily performance tracking' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
@@ -307,6 +309,50 @@ const swaggerDefinition = {
                     scheduledUploadStatus:{ type: 'string', nullable: true, enum: ['pending', 'processing', 'done', 'failed'] },
                     createdAt:            { type: 'string', format: 'date-time' },
                     updatedAt:            { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── ItemCategoryMap ───────────────────────────────────────────────────
+            ItemCategoryMap: {
+                type: 'object',
+                properties: {
+                    _id:        { type: 'string', example: '665abc123def456789000030' },
+                    itemNumber: { type: 'string', example: '123456789012' },
+                    categoryId: { type: 'object', description: 'Populated category with name' },
+                    rangeId:    { type: 'object', nullable: true, description: 'Populated range with name' },
+                    productId:  { type: 'object', nullable: true, description: 'Populated product with name' },
+                    assignedBy: { type: 'string', description: 'User ID who last set this mapping' },
+                    createdAt:  { type: 'string', format: 'date-time' },
+                    updatedAt:  { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── UserSellerAssignment ──────────────────────────────────────────────
+            UserSellerAssignment: {
+                type: 'object',
+                properties: {
+                    _id:         { type: 'string', example: '665abc123def456789000031' },
+                    user:        { type: 'object', description: 'Populated user (username, email, role, department)' },
+                    seller:      { type: 'object', description: 'Populated seller with user.username' },
+                    dailyTarget: { type: 'integer', example: 50 },
+                    createdAt:   { type: 'string', format: 'date-time' },
+                    updatedAt:   { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── UserDailyQuantity ─────────────────────────────────────────────────
+            UserDailyQuantity: {
+                type: 'object',
+                properties: {
+                    _id:        { type: 'string', example: '665abc123def456789000032' },
+                    user:       { type: 'object', description: 'Populated user (username, email, department)' },
+                    seller:     { type: 'object', description: 'Populated seller with user.username' },
+                    dateString: { type: 'string', example: '2024-06-01' },
+                    quantity:   { type: 'integer', example: 48 },
+                    dailyTarget:{ type: 'integer', example: 50 },
+                    remarks:    { type: 'string', enum: ['Good', 'Average', 'Need for improvement', ''] },
+                    createdAt:  { type: 'string', format: 'date-time' },
+                    updatedAt:  { type: 'string', format: 'date-time' }
                 }
             }
         }
