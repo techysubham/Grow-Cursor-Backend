@@ -6,7 +6,47 @@ import { validateProfitTiers } from '../utils/pricingCalculator.js';
 
 const router = express.Router();
 
-// Get pricing config for specific seller+template
+/**
+ * @swagger
+ * /seller-pricing-config:
+ *   get:
+ *     tags: [Seller Pricing Config]
+ *     summary: Get pricing config for a seller+template pair
+ *     description: Returns the seller-specific override if one exists, otherwise falls back to the template's default config.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Pricing config with isCustom flag
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 pricingConfig:
+ *                   type: object
+ *                   description: "Config fields: enabled, spentRate, payoutRate, desiredProfit, fixedFee, saleTax, ebayFee, adsFee, tdsFee, shippingCost, taxRate, profitTiers"
+ *                 isCustom:
+ *                   type: boolean
+ *                   description: true if a seller-specific override exists
+ *       400:
+ *         description: Missing sellerId or templateId
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { sellerId, templateId } = req.query;
@@ -59,6 +99,46 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /seller-pricing-config:
+ *   post:
+ *     tags: [Seller Pricing Config]
+ *     summary: Create or update a seller pricing config (upsert)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sellerId, templateId, pricingConfig]
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               templateId:
+ *                 type: string
+ *               pricingConfig:
+ *                 type: object
+ *                 description: Pricing config object (spentRate, payoutRate, desiredProfit, fees, profitTiers, etc.)
+ *     responses:
+ *       200:
+ *         description: Upserted config
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 config:
+ *                   type: object
+ *       400:
+ *         description: Bad request or invalid profit tiers
+ *       500:
+ *         description: Internal server error
+ */
 // Create or update pricing config for seller+template
 router.post('/', requireAuth, async (req, res) => {
   try {
@@ -111,6 +191,42 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /seller-pricing-config:
+ *   delete:
+ *     tags: [Seller Pricing Config]
+ *     summary: Delete a seller pricing config (revert to template default)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Config deleted, reverted to template default
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *       400:
+ *         description: Missing sellerId or templateId
+ *       500:
+ *         description: Internal server error
+ */
 // Delete pricing config (revert to template default)
 router.delete('/', requireAuth, async (req, res) => {
   try {

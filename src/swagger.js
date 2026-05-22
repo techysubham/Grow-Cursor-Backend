@@ -43,7 +43,10 @@ const swaggerDefinition = {
         { name: 'Template Listings – Admin', description: 'Schedule management, SKU activation/deactivation, cache and API-usage admin' },
         { name: 'Platforms', description: 'Source and listing platform management' },
         { name: 'Stores', description: 'Stores linked to a platform' },
-        { name: 'Column Presets', description: 'Saved column-visibility presets per page' }
+        { name: 'Column Presets', description: 'Saved column-visibility presets per page' },
+        { name: 'Seller Pricing Config', description: 'Per-seller pricing config overrides for a template' },
+        { name: 'Seller Upload Limits', description: 'Daily eBay feed upload caps per seller+country' },
+        { name: 'CSV Storage', description: 'Stored CSV exports with download and scheduled-upload management' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
@@ -262,6 +265,48 @@ const swaggerDefinition = {
                     createdBy: { type: 'string', example: '665abc123def456789000004' },
                     createdAt: { type: 'string', format: 'date-time' },
                     updatedAt: { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── SellerUploadLimit ────────────────────────────────────────────────
+            SellerUploadLimit: {
+                type: 'object',
+                properties: {
+                    _id:          { type: 'string', example: '665abc123def456789000010' },
+                    seller:       { type: 'string', description: 'Seller ObjectId' },
+                    sellerName:   { type: 'string', example: 'john_seller', description: 'Populated username (list endpoint only)' },
+                    country:      { type: 'string', enum: ['US', 'UK', 'AU', 'Canada'], example: 'US' },
+                    limit:        { type: 'integer', example: 50, description: 'Daily upload cap' },
+                    currentCount: { type: 'integer', example: 12, description: 'Uploads since midnight IST (list endpoint only)' },
+                    isBlocked:    { type: 'boolean', example: false, description: 'True when currentCount >= limit' },
+                    createdAt:    { type: 'string', format: 'date-time' },
+                    updatedAt:    { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── CsvStorageRecord ──────────────────────────────────────────────────
+            CsvStorageRecord: {
+                type: 'object',
+                description: 'CSV record with csvData excluded',
+                properties: {
+                    _id:                  { type: 'string', example: '665abc123def456789000020' },
+                    name:                 { type: 'string', example: 'ebay-export-2024-06-01' },
+                    fileName:             { type: 'string', example: 'ebay-export-2024-06-01.csv' },
+                    mimeType:             { type: 'string', example: 'text/csv' },
+                    seller:               { type: 'object', description: 'Populated seller with storeName and username' },
+                    templateId:           { type: 'string', nullable: true },
+                    listingCount:         { type: 'integer', example: 120 },
+                    categoryName:         { type: 'string', example: 'Phone Cases' },
+                    rangeName:            { type: 'string', example: 'iPhone 13-14' },
+                    productName:          { type: 'string', example: '' },
+                    source:               { type: 'string', nullable: true },
+                    country:              { type: 'string', nullable: true, example: 'US' },
+                    feedUploadId:         { type: 'object', nullable: true, description: 'Populated FeedUpload (status, taskId)' },
+                    scheduledUploadAt:    { type: 'string', format: 'date-time', nullable: true },
+                    scheduledSellerId:    { type: 'string', nullable: true },
+                    scheduledUploadStatus:{ type: 'string', nullable: true, enum: ['pending', 'processing', 'done', 'failed'] },
+                    createdAt:            { type: 'string', format: 'date-time' },
+                    updatedAt:            { type: 'string', format: 'date-time' }
                 }
             }
         }
