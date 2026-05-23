@@ -6,6 +6,67 @@ import { parsePagination } from '../utils/paginate.js';
 const router = express.Router();
 
 // GET /api/price-change-logs — Get price change history with filters
+/**
+ * @swagger
+ * /price-change-logs:
+ *   get:
+ *     tags: [Price Change Logs]
+ *     summary: Get eBay price change audit log (paginated)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: legacyItemId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: orderId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: userId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: successOnly
+ *         schema: { type: string, enum: ['true','false'] }
+ *       - in: query
+ *         name: failedOnly
+ *         schema: { type: string, enum: ['true','false'] }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *     responses:
+ *       200:
+ *         description: Paginated price change logs
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 logs:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/PriceChangeLog'
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     total:      { type: integer }
+ *                     page:       { type: integer }
+ *                     limit:      { type: integer }
+ *                     totalPages: { type: integer }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req, res) => {
   try {
     const {

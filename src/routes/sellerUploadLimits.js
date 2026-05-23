@@ -7,6 +7,26 @@ import { checkUploadLimit } from '../lib/ebayFeedUpload.js';
 
 const router = express.Router();
 
+/**
+ * @swagger
+ * /seller-upload-limits:
+ *   get:
+ *     tags: [Seller Upload Limits]
+ *     summary: List all seller upload limits with live counts
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Array of limit records with currentCount and isBlocked status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/SellerUploadLimit'
+ *       500:
+ *         description: Internal server error
+ */
 // ─── GET /seller-upload-limits ───────────────────────────────────────────────
 // Returns all configured limits with live currentCount and isBlocked status.
 router.get('/', requireAuth, requirePageAccess('SellerUploadLimits'), async (req, res) => {
@@ -35,6 +55,43 @@ router.get('/', requireAuth, requirePageAccess('SellerUploadLimits'), async (req
     }
 });
 
+/**
+ * @swagger
+ * /seller-upload-limits/check:
+ *   get:
+ *     tags: [Seller Upload Limits]
+ *     summary: Check upload limit status for a seller+country pair
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: country
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [US, UK, AU, Canada]
+ *     responses:
+ *       200:
+ *         description: Upload limit check result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 isBlocked:
+ *                   type: boolean
+ *                 currentCount:
+ *                   type: integer
+ *       400:
+ *         description: Missing or invalid sellerId / country
+ *       500:
+ *         description: Internal server error
+ */
 // ─── GET /seller-upload-limits/check ─────────────────────────────────────────
 // Lightweight check used by FeedUploadPage and SelectSellerPage.
 // Query params: sellerId, country
@@ -55,6 +112,44 @@ router.get('/check', requireAuth, async (req, res) => {
     }
 });
 
+/**
+ * @swagger
+ * /seller-upload-limits:
+ *   post:
+ *     tags: [Seller Upload Limits]
+ *     summary: Create or update a daily upload limit (upsert)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sellerId, country, limit]
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               country:
+ *                 type: string
+ *                 enum: [US, UK, AU, Canada]
+ *               limit:
+ *                 type: integer
+ *                 minimum: 1
+ *     responses:
+ *       200:
+ *         description: Created or updated limit record
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SellerUploadLimit'
+ *       400:
+ *         description: Bad request
+ *       404:
+ *         description: Seller not found
+ *       500:
+ *         description: Internal server error
+ */
 // ─── POST /seller-upload-limits ──────────────────────────────────────────────
 // Creates or updates a daily limit for a seller+country pair (upsert).
 router.post('/', requireAuth, requirePageAccess('SellerUploadLimits'), async (req, res) => {
@@ -89,6 +184,37 @@ router.post('/', requireAuth, requirePageAccess('SellerUploadLimits'), async (re
     }
 });
 
+/**
+ * @swagger
+ * /seller-upload-limits/{id}:
+ *   delete:
+ *     tags: [Seller Upload Limits]
+ *     summary: Delete a seller upload limit
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *       400:
+ *         description: Invalid id
+ *       404:
+ *         description: Limit not found
+ *       500:
+ *         description: Internal server error
+ */
 // ─── DELETE /seller-upload-limits/:id ────────────────────────────────────────
 router.delete('/:id', requireAuth, requirePageAccess('SellerUploadLimits'), async (req, res) => {
     const { id } = req.params;
