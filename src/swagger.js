@@ -63,7 +63,10 @@ const swaggerDefinition = {
         { name: 'Best Offers', description: 'eBay Trading API best offers and seller-initiated negotiation offers' },
         { name: 'Amazon Accounts', description: 'Amazon fulfillment account profiles' },
         { name: 'ASIN Directory', description: 'Searchable catalogue of Amazon ASINs with auto-enrichment' },
-        { name: 'ASIN List Categories', description: 'Top-level categories for the ASIN product list organiser' }
+        { name: 'ASIN List Categories', description: 'Top-level categories for the ASIN product list organiser' },
+        { name: 'ASIN List Ranges', description: 'Ranges (sub-groups) within ASIN list categories' },
+        { name: 'ASIN List Products', description: 'Products within an ASIN list range' },
+        { name: 'Listing Templates', description: 'eBay listing templates with custom columns, automation, and pricing config' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
@@ -571,6 +574,53 @@ const swaggerDefinition = {
                     name:      { type: 'string', example: 'Electronics' },
                     createdAt: { type: 'string', format: 'date-time' },
                     updatedAt: { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── AsinListRange ──────────────────────────────────────────────────
+            AsinListRange: {
+                type: 'object',
+                properties: {
+                    _id:        { type: 'string', example: '665abc123def456789000064' },
+                    name:       { type: 'string', example: 'Q4 Range' },
+                    categoryId: { type: 'string' },
+                    createdAt:  { type: 'string', format: 'date-time' },
+                    updatedAt:  { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── AsinListProduct ───────────────────────────────────────────────
+            AsinListProduct: {
+                type: 'object',
+                properties: {
+                    _id:        { type: 'string', example: '665abc123def456789000065' },
+                    name:       { type: 'string', example: 'USB Chargers' },
+                    rangeId:    { type: 'string' },
+                    categoryId: { type: 'string' },
+                    createdAt:  { type: 'string', format: 'date-time' },
+                    updatedAt:  { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── ListingTemplate ───────────────────────────────────────────────
+            ListingTemplate: {
+                type: 'object',
+                properties: {
+                    _id:              { type: 'string', example: '665abc123def456789000066' },
+                    name:             { type: 'string' },
+                    description:      { type: 'string' },
+                    category:         { type: 'string' },
+                    ebayCategory:     { type: 'string' },
+                    customColumns:    { type: 'array', items: { type: 'object' } },
+                    asinAutomation:   { type: 'object', properties: { enabled: { type: 'boolean' } } },
+                    pricingConfig:    { type: 'object', properties: { enabled: { type: 'boolean' } } },
+                    coreFieldDefaults:{ type: 'object' },
+                    customActionField:{ type: 'string' },
+                    rangeId:          { type: 'string', nullable: true },
+                    listProductId:    { type: 'string', nullable: true },
+                    createdBy:        { type: 'object', properties: { name: { type: 'string' }, email: { type: 'string' } } },
+                    createdAt:        { type: 'string', format: 'date-time' },
+                    updatedAt:        { type: 'string', format: 'date-time' }
                 }
             }
         }
