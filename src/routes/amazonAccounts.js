@@ -8,6 +8,26 @@ import AmazonAccount from '../models/AmazonAccount.js';
 const router = Router();
 
 // GET: Fetch all Amazon Accounts (Accessible by authenticated users so Dashboard can read it)
+/**
+ * @swagger
+ * /amazon-accounts:
+ *   get:
+ *     tags: [Amazon Accounts]
+ *     summary: List all Amazon accounts
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Array of account documents
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/AmazonAccount'
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     const accounts = await AmazonAccount.find().sort({ name: 1 });
@@ -18,6 +38,41 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // POST: Add new Amazon Account (Restricted to specific roles)
+/**
+ * @swagger
+ * /amazon-accounts:
+ *   post:
+ *     tags: [Amazon Accounts]
+ *     summary: Create a new Amazon account
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:        { type: string }
+ *               addressLine1:{ type: string }
+ *               addressLine2:{ type: string }
+ *               city:        { type: string }
+ *               state:       { type: string }
+ *               postalCode:  { type: string }
+ *               country:     { type: string }
+ *               phoneNumber: { type: string }
+ *               notes:       { type: string }
+ *     responses:
+ *       200:
+ *         description: Created account document
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AmazonAccount'
+ *       400:
+ *         description: Validation error or duplicate name
+ */
 router.post('/', requireAuth, requirePageAccess('AmazonAccounts'), validate(createAmazonAccountSchema), async (req, res) => {
   const { name, addressLine1, addressLine2, city, state, postalCode, country, phoneNumber, notes } = req.body;
   if (!name) return res.status(400).json({ error: 'Account name is required' });
@@ -44,6 +99,57 @@ router.post('/', requireAuth, requirePageAccess('AmazonAccounts'), validate(crea
 });
 
 // PATCH: Update an account
+/**
+ * @swagger
+ * /amazon-accounts/{id}:
+ *   patch:
+ *     tags: [Amazon Accounts]
+ *     summary: Update an Amazon account
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/AmazonAccount'
+ *     responses:
+ *       200:
+ *         description: Updated account document
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AmazonAccount'
+ *       400:
+ *         description: Duplicate name
+ *       404:
+ *         description: Account not found
+ *   delete:
+ *     tags: [Amazon Accounts]
+ *     summary: Delete an Amazon account
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion confirmed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *       500:
+ *         description: Internal server error
+ */
 router.patch('/:id', requireAuth, requirePageAccess('AmazonAccounts'), async (req, res) => {
   const { name, addressLine1, addressLine2, city, state, postalCode, country, phoneNumber, notes } = req.body;
   

@@ -60,7 +60,10 @@ const swaggerDefinition = {
         { name: 'Price Change Logs', description: 'Audit log of eBay price change attempts' },
         { name: 'Exchange Rates', description: 'Marketplace exchange rates with optional order back-fill' },
         { name: 'Template Overrides', description: 'Per-seller overrides on top of a base listing template' },
-        { name: 'Best Offers', description: 'eBay Trading API best offers and seller-initiated negotiation offers' }
+        { name: 'Best Offers', description: 'eBay Trading API best offers and seller-initiated negotiation offers' },
+        { name: 'Amazon Accounts', description: 'Amazon fulfillment account profiles' },
+        { name: 'ASIN Directory', description: 'Searchable catalogue of Amazon ASINs with auto-enrichment' },
+        { name: 'ASIN List Categories', description: 'Top-level categories for the ASIN product list organiser' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
@@ -514,6 +517,58 @@ const swaggerDefinition = {
                             customActionField: { type: 'boolean' }
                         }
                     },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── AmazonAccount ──────────────────────────────────────────────────
+            AmazonAccount: {
+                type: 'object',
+                properties: {
+                    _id:         { type: 'string', example: '665abc123def456789000061' },
+                    name:        { type: 'string', example: 'Amazon US Main' },
+                    addressLine1:{ type: 'string' },
+                    addressLine2:{ type: 'string' },
+                    city:        { type: 'string' },
+                    state:       { type: 'string' },
+                    postalCode:  { type: 'string' },
+                    country:     { type: 'string' },
+                    phoneNumber: { type: 'string' },
+                    notes:       { type: 'string' },
+                    createdAt:   { type: 'string', format: 'date-time' },
+                    updatedAt:   { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── AsinDirectoryEntry ────────────────────────────────────────────
+            AsinDirectoryEntry: {
+                type: 'object',
+                properties: {
+                    _id:              { type: 'string', example: '665abc123def456789000062' },
+                    asin:             { type: 'string', example: 'B08N5WRWNW' },
+                    title:            { type: 'string' },
+                    brand:            { type: 'string' },
+                    price:            { type: 'string', example: '$12.99' },
+                    images:           { type: 'array', items: { type: 'string' } },
+                    description:      { type: 'string' },
+                    region:           { type: 'string', example: 'US' },
+                    listProductId:    { type: 'string', nullable: true },
+                    scraped:          { type: 'boolean' },
+                    scrapedAt:        { type: 'string', format: 'date-time', nullable: true },
+                    scrapeError:      { type: 'string', nullable: true },
+                    manuallyEdited:   { type: 'boolean' },
+                    addedByUserId:    { type: 'string', nullable: true },
+                    addedAt:          { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── AsinListCategory ──────────────────────────────────────────────
+            AsinListCategory: {
+                type: 'object',
+                properties: {
+                    _id:       { type: 'string', example: '665abc123def456789000063' },
+                    name:      { type: 'string', example: 'Electronics' },
                     createdAt: { type: 'string', format: 'date-time' },
                     updatedAt: { type: 'string', format: 'date-time' }
                 }
