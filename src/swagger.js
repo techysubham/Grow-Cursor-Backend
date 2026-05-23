@@ -58,7 +58,9 @@ const swaggerDefinition = {
         { name: 'Payment Accounts', description: 'Payment accounts linked to a bank account' },
         { name: 'Payoneer', description: 'Payoneer receipt records with auto-synced Transaction entries' },
         { name: 'Price Change Logs', description: 'Audit log of eBay price change attempts' },
-        { name: 'Exchange Rates', description: 'Marketplace exchange rates with optional order back-fill' }
+        { name: 'Exchange Rates', description: 'Marketplace exchange rates with optional order back-fill' },
+        { name: 'Template Overrides', description: 'Per-seller overrides on top of a base listing template' },
+        { name: 'Best Offers', description: 'eBay Trading API best offers and seller-initiated negotiation offers' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
@@ -491,6 +493,29 @@ const swaggerDefinition = {
                     createdBy:       { type: 'string' },
                     createdAt:       { type: 'string', format: 'date-time' },
                     updatedAt:       { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── TemplateOverride ───────────────────────────────────────────────────
+            TemplateOverride: {
+                type: 'object',
+                properties: {
+                    _id:            { type: 'string', example: '665abc123def456789000060' },
+                    baseTemplateId: { type: 'string' },
+                    sellerId:       { type: 'string' },
+                    overrides: {
+                        type: 'object',
+                        description: 'Flags indicating which sections are overridden',
+                        properties: {
+                            customColumns:     { type: 'boolean' },
+                            asinAutomation:    { type: 'boolean' },
+                            pricingConfig:     { type: 'boolean' },
+                            coreFieldDefaults: { type: 'boolean' },
+                            customActionField: { type: 'boolean' }
+                        }
+                    },
+                    createdAt: { type: 'string', format: 'date-time' },
+                    updatedAt: { type: 'string', format: 'date-time' }
                 }
             }
         }
