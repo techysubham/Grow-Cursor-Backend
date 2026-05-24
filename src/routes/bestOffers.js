@@ -113,6 +113,43 @@ function parseOffer(item, offer) {
 //   - Note: when no ItemID is given, the status filter is effectively always
 //     "Active" regardless of what is passed (eBay API limitation).
 // =============================================================================
+/**
+ * @swagger
+ * /ebay/best-offers:
+ *   get:
+ *     tags: [Best Offers]
+ *     summary: Fetch active best offers for a seller via eBay Trading API
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [Active, Accepted, Declined, Expired, All], default: Active }
+ *         description: Status filter — only honoured when an ItemID is also supplied (eBay API limitation)
+ *     responses:
+ *       200:
+ *         description: List of offers enriched with SKU
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:      { type: boolean }
+ *                 offers:       { type: array, items: { type: object } }
+ *                 totalEntries: { type: integer }
+ *                 totalPages:   { type: integer }
+ *                 currentPage:  { type: integer }
+ *       400:
+ *         description: Missing sellerId or eBay API error
+ *       404:
+ *         description: Seller not found
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/best-offers', requireAuth, async (req, res) => {
   try {
     const { sellerId, status = 'Active' } = req.query;
@@ -200,6 +237,47 @@ router.get('/best-offers', requireAuth, async (req, res) => {
 // Body: { sellerId, itemId, bestOfferId, action, counterPrice?, counterQuantity?, sellerResponse? }
 // action: 'Accept' | 'Decline' | 'Counter'
 // =============================================================================
+/**
+ * @swagger
+ * /ebay/best-offers/respond:
+ *   post:
+ *     tags: [Best Offers]
+ *     summary: Accept, decline, or counter a buyer's best offer
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sellerId, itemId, bestOfferId, action]
+ *             properties:
+ *               sellerId:       { type: string }
+ *               itemId:         { type: string }
+ *               bestOfferId:    { type: string }
+ *               action:         { type: string, enum: [Accept, Decline, Counter] }
+ *               counterPrice:   { type: number, description: Required when action is Counter }
+ *               counterQuantity:{ type: integer }
+ *               sellerResponse: { type: string }
+ *     responses:
+ *       200:
+ *         description: Action applied successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 ack:     { type: string }
+ *                 message: { type: string }
+ *       400:
+ *         description: Missing fields, invalid action, or eBay API error
+ *       404:
+ *         description: Seller not found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/best-offers/respond', requireAuth, async (req, res) => {
   try {
     const {
@@ -291,6 +369,37 @@ router.post('/best-offers/respond', requireAuth, async (req, res) => {
 // send offers" count shown in eBay Seller Hub.
 // Query: sellerId
 // =============================================================================
+/**
+ * @swagger
+ * /ebay/eligible-offers:
+ *   get:
+ *     tags: [Best Offers]
+ *     summary: Find listings eligible for seller-initiated offers (eBay Negotiation API)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Listings with interestedBuyers count
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 items:   { type: array, items: { type: object } }
+ *                 total:   { type: integer }
+ *       400:
+ *         description: Missing sellerId
+ *       404:
+ *         description: Seller not found
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/eligible-offers', requireAuth, async (req, res) => {
   try {
     const { sellerId } = req.query;
@@ -338,6 +447,46 @@ router.get('/eligible-offers', requireAuth, async (req, res) => {
 // interested buyers on a listing.
 // Body: { sellerId, listingId, price, currency?, quantity?, message?, allowCounter? }
 // =============================================================================
+/**
+ * @swagger
+ * /ebay/eligible-offers/send:
+ *   post:
+ *     tags: [Best Offers]
+ *     summary: Send a seller-initiated offer to all interested buyers on a listing
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sellerId, listingId, price]
+ *             properties:
+ *               sellerId:     { type: string }
+ *               listingId:    { type: string }
+ *               price:        { type: number }
+ *               currency:     { type: string, default: USD }
+ *               quantity:     { type: integer, default: 1 }
+ *               message:      { type: string }
+ *               allowCounter: { type: boolean, default: true }
+ *     responses:
+ *       200:
+ *         description: Offer sent successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string }
+ *       400:
+ *         description: Missing required fields or eBay API error
+ *       404:
+ *         description: Seller not found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/eligible-offers/send', requireAuth, async (req, res) => {
   try {
     const { sellerId, listingId, price, currency, quantity, message, allowCounter = true } = req.body;
