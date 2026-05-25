@@ -4220,6 +4220,28 @@ router.patch('/orders/:orderId/order-total', requireAuth, requirePageAccess('All
 });
 
 // Handle Amazon refund received - zero out Amazon costs
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/amazon-refund-received:
+ *   post:
+ *     tags: [eBay Financials]
+ *     summary: Zero out Amazon costs for a refunded order and recalculate financials
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Amazon financial fields zeroed and order updated
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/orders/:orderId/amazon-refund-received', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -4264,6 +4286,41 @@ router.post('/orders/:orderId/amazon-refund-received', requireAuth, requirePageA
 
 // Backfill ad fees from eBay Finances API for orders since a given date
 // Supports single seller (sellerId) or all sellers (allSellers: true)
+/**
+ * @swagger
+ * /ebay/backfill-ad-fees:
+ *   post:
+ *     tags: [eBay Financials]
+ *     summary: Backfill ad fees from eBay Finances API for all orders since a date
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               sinceDate:
+ *                 type: string
+ *                 format: date
+ *               skipAlreadySet:
+ *                 type: boolean
+ *                 default: true
+ *               allSellers:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Backfill complete with success/skip/fail counts
+ *       400:
+ *         description: sellerId or allSellers:true is required
+ *       404:
+ *         description: Seller not found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/backfill-ad-fees', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { sellerId, sinceDate, skipAlreadySet = true, allSellers } = req.body;
 
@@ -4390,6 +4447,36 @@ router.post('/backfill-ad-fees', requireAuth, requirePageAccess('AllOrdersSheet'
 
 // Backfill / recalculate orderEarnings for existing orders using totalDueSeller.value - adFeeGeneral
 // Supports single seller (sellerId) or all sellers (allSellers: true)
+/**
+ * @swagger
+ * /ebay/backfill-earnings:
+ *   post:
+ *     tags: [eBay Financials]
+ *     summary: Recalculate orderEarnings for existing orders (totalDueSeller - adFeeGeneral)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               sinceDate:
+ *                 type: string
+ *                 format: date
+ *               allSellers:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Earnings recalculated with success/fail counts
+ *       400:
+ *         description: sellerId or allSellers:true is required
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/backfill-earnings', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { sellerId, sinceDate, allSellers } = req.body;
 
@@ -4463,6 +4550,36 @@ router.post('/backfill-earnings', requireAuth, requirePageAccess('AllOrdersSheet
 });
 
 // Backfill Amazon financials (amazonTotal, amazonTotalINR, marketplaceFee, igst, totalCC, profit) from raw beforeTax / estimatedTax
+/**
+ * @swagger
+ * /ebay/backfill-amazon-financials:
+ *   post:
+ *     tags: [eBay Financials]
+ *     summary: Recalculate Amazon financial fields for existing orders
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               sinceDate:
+ *                 type: string
+ *                 format: date
+ *               allSellers:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Amazon financials recalculated with success/fail counts
+ *       400:
+ *         description: sellerId or allSellers:true is required
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/backfill-amazon-financials', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { sellerId, sinceDate, allSellers } = req.body;
 
@@ -4523,6 +4640,40 @@ router.post('/backfill-amazon-financials', requireAuth, requirePageAccess('AllOr
 });
 
 // Update manual tracking number for an order (does NOT affect fulfillment tracking)
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/manual-tracking:
+ *   patch:
+ *     tags: [eBay Orders]
+ *     summary: Set a manual tracking number on an order (local only, not sent to eBay)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [manualTrackingNumber]
+ *             properties:
+ *               manualTrackingNumber:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Order updated with manual tracking number
+ *       400:
+ *         description: Missing manualTrackingNumber
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Internal server error
+ */
 router.patch('/orders/:orderId/manual-tracking', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { manualTrackingNumber } = req.body;
@@ -4549,6 +4700,43 @@ router.patch('/orders/:orderId/manual-tracking', requireAuth, async (req, res) =
 });
 
 // Upload tracking number to eBay and mark order as shipped
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/upload-tracking:
+ *   post:
+ *     tags: [eBay Orders]
+ *     summary: Upload a tracking number to eBay Fulfillment API and mark order as shipped
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [trackingNumber]
+ *             properties:
+ *               trackingNumber:
+ *                 type: string
+ *               shippingCarrier:
+ *                 type: string
+ *                 default: USPS
+ *     responses:
+ *       200:
+ *         description: Tracking uploaded and order marked as FULFILLED
+ *       400:
+ *         description: Missing tracking number, seller not connected, or eBay rejected tracking
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/orders/:orderId/upload-tracking', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { trackingNumber, shippingCarrier = 'USPS' } = req.body;
@@ -4749,6 +4937,52 @@ router.post('/orders/:orderId/upload-tracking', requireAuth, async (req, res) =>
 });
 
 // Upload multiple tracking numbers to eBay (for orders with multiple different items)
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/upload-tracking-multiple:
+ *   post:
+ *     tags: [eBay Orders]
+ *     summary: Upload multiple tracking numbers to eBay (one per line item)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [trackingData]
+ *             properties:
+ *               trackingData:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     itemId:
+ *                       type: string
+ *                     trackingNumber:
+ *                       type: string
+ *                     carrier:
+ *                       type: string
+ *               shippingCarrier:
+ *                 type: string
+ *                 default: USPS
+ *     responses:
+ *       200:
+ *         description: Tracking numbers uploaded (may include partial success)
+ *       400:
+ *         description: Missing/invalid trackingData or all uploads failed
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/orders/:orderId/upload-tracking-multiple', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { trackingData, shippingCarrier = 'USPS' } = req.body;
@@ -4939,6 +5173,20 @@ router.post('/orders/:orderId/upload-tracking-multiple', requireAuth, async (req
 
 
 // Poll all sellers for NEW ORDERS ONLY (Phase 1)
+/**
+ * @swagger
+ * /ebay/poll-new-orders:
+ *   post:
+ *     tags: [eBay Orders]
+ *     summary: Poll all connected sellers for new eBay orders (Phase 1)
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Poll results with new order counts per seller
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true, $ne: null } })
@@ -5135,6 +5383,20 @@ router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), a
 
 
 // Poll all sellers for ORDER UPDATES ONLY (Phase 2)
+/**
+ * @swagger
+ * /ebay/poll-order-updates:
+ *   post:
+ *     tags: [eBay Orders]
+ *     summary: Poll all connected sellers for eBay order status updates (Phase 2)
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Poll results with update counts per seller
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     // Helper function to normalize dates for comparison (ignore milliseconds/format)
@@ -5505,6 +5767,20 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
 });
 
 // Resync recent orders (last 10 days) - catches silent eBay changes where lastModifiedDate wasn't updated
+/**
+ * @swagger
+ * /ebay/resync-recent:
+ *   post:
+ *     tags: [eBay Orders]
+ *     summary: Resync orders from the last 10 days to catch silent eBay changes
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Resync results per seller
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
     // Fields that should NOT be overwritten (manually set by team)
@@ -6240,6 +6516,41 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
 }
 
 // Update messaging status for an order
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/messaging-status:
+ *   patch:
+ *     tags: [eBay Orders]
+ *     summary: Update the messaging status of an order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [messagingStatus]
+ *             properties:
+ *               messagingStatus:
+ *                 type: string
+ *                 enum: [Not Yet Started, Ongoing Conversation, Resolved]
+ *     responses:
+ *       200:
+ *         description: Order updated with new messaging status
+ *       400:
+ *         description: Missing or invalid messagingStatus
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Internal server error
+ */
 router.patch('/orders/:orderId/messaging-status', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { messagingStatus } = req.body;
@@ -6278,6 +6589,43 @@ router.patch('/orders/:orderId/messaging-status', requireAuth, async (req, res) 
 });
 
 // Update item status for an order
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/item-status:
+ *   patch:
+ *     tags: [eBay Orders]
+ *     summary: Update the item status of an order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [itemStatus]
+ *             properties:
+ *               itemStatus:
+ *                 type: string
+ *                 enum: [None, Out of Stock, Delayed Delivery, Label Created, Other]
+ *               resolvedFrom:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Order updated with new item status
+ *       400:
+ *         description: Missing or invalid itemStatus
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Internal server error
+ */
 router.patch('/orders/:orderId/item-status', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { itemStatus, resolvedFrom } = req.body;
@@ -6321,7 +6669,41 @@ router.patch('/orders/:orderId/item-status', requireAuth, async (req, res) => {
   }
 });
 
-// Update notes for an order from awaiting shipment page 
+// Update notes for an order from awaiting shipment page
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/notes:
+ *   patch:
+ *     tags: [eBay Orders]
+ *     summary: Update the notes field of an order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [notes]
+ *             properties:
+ *               notes:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Order updated with new notes
+ *       400:
+ *         description: Missing notes value
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Internal server error
+ */
 router.patch('/orders/:orderId/notes', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { notes } = req.body;
@@ -6354,6 +6736,37 @@ router.patch('/orders/:orderId/notes', requireAuth, async (req, res) => {
 });
 
 // --- NEW ROUTE: Update Fulfillment Notes ---
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/fulfillment-notes:
+ *   patch:
+ *     tags: [eBay Orders]
+ *     summary: Update the fulfillment notes field of an order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               fulfillmentNotes:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Order updated with new fulfillment notes
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Internal server error
+ */
 router.patch('/orders/:orderId/fulfillment-notes', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const { fulfillmentNotes } = req.body;
@@ -6373,6 +6786,28 @@ router.patch('/orders/:orderId/fulfillment-notes', requireAuth, async (req, res)
 });
 
 // Dismiss order from Amazon Arrivals (soft delete - clears arrivingDate)
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/dismiss-arrival:
+ *   patch:
+ *     tags: [eBay Orders]
+ *     summary: Dismiss an order from the Amazon Arrivals view by clearing its arriving date
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Order dismissed from Amazon Arrivals
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Internal server error
+ */
 router.patch('/orders/:orderId/dismiss-arrival', requireAuth, async (req, res) => {
   const { orderId } = req.params;
 
@@ -6408,6 +6843,26 @@ router.patch('/orders/:orderId/dismiss-arrival', requireAuth, async (req, res) =
 // ===== RETURN REQUESTS ENDPOINTS =====
 
 // Get all distinct return reasons stored in DB (lightweight distinct query)
+/**
+ * @swagger
+ * /ebay/return-reasons:
+ *   get:
+ *     tags: [eBay Returns]
+ *     summary: Get all distinct return reasons stored in the database
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Sorted array of distinct return reason strings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: string
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/return-reasons', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
     const reasons = await Return.distinct('returnReason', { returnReason: { $exists: true, $nin: [null, ''] } });
@@ -6418,6 +6873,26 @@ router.get('/return-reasons', requireAuth, requirePageAccess('Disputes'), async 
 });
 
 // Get all distinct return statuses stored in DB (lightweight distinct query)
+/**
+ * @swagger
+ * /ebay/return-statuses:
+ *   get:
+ *     tags: [eBay Returns]
+ *     summary: Get all distinct return statuses stored in the database
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Sorted array of distinct return status strings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: string
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/return-statuses', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
     const statuses = await Return.distinct('returnStatus', { returnStatus: { $exists: true, $nin: [null, ''] } });
@@ -6430,6 +6905,20 @@ router.get('/return-statuses', requireAuth, requirePageAccess('Disputes'), async
 // Fetch return requests from eBay Post-Order API and store in DB
 
 // Fetch return requests from eBay Post-Order API and store in DB
+/**
+ * @swagger
+ * /ebay/fetch-returns:
+ *   post:
+ *     tags: [eBay Returns]
+ *     summary: Fetch return requests from eBay Post-Order API and upsert into database
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Returns synced with new/updated counts
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
@@ -6624,6 +7113,58 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
 });
 // Get stored returns from database
 
+/**
+ * @swagger
+ * /ebay/stored-returns:
+ *   get:
+ *     tags: [eBay Returns]
+ *     summary: Get stored return requests with pagination and filtering
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: reason
+ *         schema:
+ *           type: string
+ *         description: Comma-separated list of return reasons
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: urgentOnly
+ *         schema:
+ *           type: boolean
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *     responses:
+ *       200:
+ *         description: Paginated return list with product name and date sold attached
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/stored-returns', requireAuth, async (req, res) => {
   const { sellerId, status, reason, startDate, endDate, responseDueStartDate, responseDueEndDate, urgentOnly, excludeClient = 'false', page = 1, limit = 50 } = req.query;
 
@@ -6758,6 +7299,20 @@ router.get('/stored-returns', requireAuth, async (req, res) => {
 // ===== INR CASES ENDPOINTS =====
 
 // Fetch INR cases from eBay Post-Order API and store in DB
+/**
+ * @swagger
+ * /ebay/fetch-inr-cases:
+ *   post:
+ *     tags: [eBay Returns]
+ *     summary: Fetch Item Not Received cases from eBay Post-Order API and upsert into database
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: INR cases synced with new/updated counts
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })

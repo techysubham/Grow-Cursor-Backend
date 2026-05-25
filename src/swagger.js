@@ -71,7 +71,8 @@ const swaggerDefinition = {
         { name: 'eBay Feed', description: 'eBay Bulk Data Exchange feed upload, task status, and result download' },
         { name: 'eBay OAuth', description: 'eBay OAuth2 connect and callback flow' },
         { name: 'eBay Orders', description: 'Fetch, sync, and query eBay orders' },
-        { name: 'eBay Financials', description: 'Ad fees, earnings, and order-total calculations for eBay orders' }
+        { name: 'eBay Financials', description: 'Ad fees, earnings, and order-total calculations for eBay orders' },
+        { name: 'eBay Returns', description: 'Return requests and INR (Item Not Received) cases from eBay Post-Order API' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
