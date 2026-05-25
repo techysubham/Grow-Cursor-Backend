@@ -10449,6 +10449,57 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
 // Processes items sequentially to avoid rate limits.
 // Returns per-item results and creates a CompatibilityBatchLog.
 // ============================================
+/**
+ * @swagger
+ * /ebay/bulk-update-compatibility:
+ *   post:
+ *     summary: Bulk update vehicle compatibility for multiple listings
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sellerId
+ *               - items
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               items:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     itemId:
+ *                       type: string
+ *                     title:
+ *                       type: string
+ *                     sku:
+ *                       type: string
+ *                     compatibilityList:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *               totalItems:
+ *                 type: integer
+ *               skippedCount:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Per-item results and batch log
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Missing required fields
+ *       404:
+ *         description: Seller not found
+ */
 router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
   const { sellerId, items, totalItems: clientTotalItems, skippedCount: clientSkippedCount } = req.body;
   if (!sellerId || !Array.isArray(items) || items.length === 0) {
@@ -10598,6 +10649,65 @@ router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
 // GET /api/ebay/compatibility-batch-history
 // Query: ?sellerId=...&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&page=1&limit=20
 // ============================================
+/**
+ * @swagger
+ * /ebay/compatibility-batch-history:
+ *   get:
+ *     summary: Get compatibility batch update history
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: userId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: date
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *     responses:
+ *       200:
+ *         description: Paginated batch history
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 logs:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 total:
+ *                   type: integer
+ *                 pages:
+ *                   type: integer
+ */
 router.get('/compatibility-batch-history', requireAuth, async (req, res) => {
   try {
     const { sellerId, userId, date, startDate, endDate, page = 1, limit = 20 } = req.query;
@@ -10649,6 +10759,35 @@ router.get('/compatibility-batch-history', requireAuth, async (req, res) => {
 // EDIT ACTIVE LISTINGS - SYNC ALL LISTINGS
 // ============================================
 // Syncs ALL active listings (not just Motors) for editing title/description/price
+/**
+ * @swagger
+ * /ebay/sync-all-listings:
+ *   post:
+ *     summary: Sync all active listings for a seller (for title/description/price editing)
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sellerId
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Sync results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Seller not found
+ */
 router.post('/sync-all-listings', requireAuth, async (req, res) => {
   const { sellerId } = req.body;
 
@@ -10768,6 +10907,48 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
 });
 
 // GET ALL LISTINGS (Without Motors filter)
+/**
+ * @swagger
+ * /ebay/all-listings:
+ *   get:
+ *     summary: Get all active listings with search and pagination
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Paginated listings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 listings:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 pagination:
+ *                   type: object
+ */
 router.get('/all-listings', requireAuth, async (req, res) => {
   const { sellerId, page = 1, limit = 50, search } = req.query;
   try {
@@ -10813,6 +10994,39 @@ router.get('/all-listings', requireAuth, async (req, res) => {
 // GET /ebay/item-end-times?sellerId=xxx&itemIds=id1,id2,...
 // Fetches EndTime for each itemId via parallel GetItem calls (batched 10 at a time).
 // Returns { [itemId]: "ISO-date-string" }
+/**
+ * @swagger
+ * /ebay/item-end-times:
+ *   get:
+ *     summary: Fetch end times for a list of eBay item IDs
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: itemIds
+ *         description: Comma-separated list of eBay item IDs (max 300)
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Map of itemId to ISO end-time string
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               additionalProperties:
+ *                 type: string
+ *       400:
+ *         description: Missing sellerId
+ *       404:
+ *         description: Seller not found
+ */
 router.get('/item-end-times', requireAuth, async (req, res) => {
   const { sellerId, itemIds } = req.query;
   if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
@@ -10876,6 +11090,36 @@ router.get('/item-end-times', requireAuth, async (req, res) => {
 // Query params:
 //   sellerId  — required
 //   hours     — optional, one of [24, 48, 72, 96], default 24
+/**
+ * @swagger
+ * /ebay/expiring-low-activity-listings:
+ *   get:
+ *     summary: Stream expiring low-activity listings via SSE
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: hours
+ *         description: Expiry window in hours (24, 48, 72, or 96)
+ *         schema:
+ *           type: integer
+ *           default: 24
+ *     responses:
+ *       200:
+ *         description: Server-Sent Events stream of expiring listings
+ *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
+ *       400:
+ *         description: Missing sellerId
+ */
 router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
   const { sellerId } = req.query;
   if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
@@ -11066,6 +11310,30 @@ const CURRENCY_TO_MARKETPLACE = {
   GBP: { label: 'eBay UK', flag: '🇬🇧' },
   EUR: { label: 'eBay Europe', flag: '🇪🇺' },
 };
+/**
+ * @swagger
+ * /ebay/active-listings/live-tiers:
+ *   get:
+ *     summary: Stream live pricing tier data for active listings via SSE
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Server-Sent Events stream of listing tier data
+ *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
+ *       400:
+ *         description: Missing sellerId
+ */
 router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
   const { sellerId } = req.query;
   if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
@@ -11211,6 +11479,48 @@ router.get('/active-listings/live-tiers', requireAuth, async (req, res) => {
 });
 
 // UPDATE LISTING (Title, Description, Price)
+/**
+ * @swagger
+ * /ebay/update-listing:
+ *   post:
+ *     summary: Update an eBay listing's title, description, and/or price
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sellerId
+ *               - itemId
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               itemId:
+ *                 type: string
+ *               title:
+ *                 type: string
+ *               description:
+ *                 type: string
+ *               price:
+ *                 type: number
+ *               orderId:
+ *                 type: string
+ *               productTitle:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Listing updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Seller not found
+ */
 router.post('/update-listing', requireAuth, async (req, res) => {
   const { sellerId, itemId, title, description, price, orderId, productTitle } = req.body;
 
@@ -11415,6 +11725,32 @@ async function fetchEbayRateLimits(accessToken, forceRefresh = false) {
 }
 
 // 4.5. GET EBAY API USAGE STATS (single seller — for compatibility dashboard badge)
+/**
+ * @swagger
+ * /ebay/api-usage-stats:
+ *   get:
+ *     summary: Get eBay API usage stats for a single seller
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: API usage stats
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Missing sellerId
+ *       404:
+ *         description: Seller not found
+ */
 router.get('/api-usage-stats', requireAuth, async (req, res) => {
   const { sellerId } = req.query;
 
@@ -11454,6 +11790,28 @@ router.get('/api-usage-stats', requireAuth, async (req, res) => {
 // 4.6. GET EBAY API USAGE STATS (app-level — same for all sellers)
 // Calls eBay ONCE (not once per seller) since limits are app-level.
 // Uses a 5-minute cache to avoid inflating developer API usage.
+/**
+ * @swagger
+ * /ebay/api-usage-stats/all:
+ *   get:
+ *     summary: Get app-level eBay API usage stats (cached 5 min)
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: refresh
+ *         description: Pass 'true' to force cache refresh
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: App-level API rate limit stats
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
 router.get('/api-usage-stats/all', requireAuth, async (req, res) => {
   try {
     const forceRefresh = req.query.refresh === 'true';
@@ -11495,6 +11853,45 @@ router.get('/api-usage-stats/all', requireAuth, async (req, res) => {
 });
 
 // 5. GET COMPATIBILITY METADATA (REST API Version)
+/**
+ * @swagger
+ * /ebay/compatibility/values:
+ *   post:
+ *     summary: Get compatibility metadata values (year/make/model etc.)
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sellerId
+ *               - propertyName
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               propertyName:
+ *                 type: string
+ *               constraints:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     name:
+ *                       type: string
+ *                     value:
+ *                       type: string
+ *     responses:
+ *       200:
+ *         description: List of allowed values for the property
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
 router.post('/compatibility/values', requireAuth, async (req, res) => {
   const { sellerId, propertyName, constraints } = req.body;
 
@@ -11877,6 +12274,40 @@ function buildConversationManagementMessageStages() {
   ];
 }
 
+/**
+ * @swagger
+ * /ebay/conversation-management/list:
+ *   get:
+ *     summary: List conversations with pagination and filters
+ *     tags: [eBay – Conversation Meta]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 25
+ *     responses:
+ *       200:
+ *         description: Paginated conversation list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 records:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 totalCount:
+ *                   type: integer
+ */
 router.get('/conversation-management/list', requireAuth, async (req, res) => {
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 250);
@@ -11922,6 +12353,24 @@ router.get('/conversation-management/list', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /ebay/conversation-management/export:
+ *   get:
+ *     summary: Export all conversations (no pagination)
+ *     tags: [eBay – Conversation Meta]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Full conversation list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ */
 router.get('/conversation-management/export', requireAuth, async (req, res) => {
   try {
     const list = await ConversationMeta.aggregate([
@@ -11938,6 +12387,41 @@ router.get('/conversation-management/export', requireAuth, async (req, res) => {
 });
 
 // --- NEW ROUTE 4: RESOLVE CONVERSATION (Called from Management Modal) ---
+/**
+ * @swagger
+ * /ebay/conversation-management/{id}/resolve:
+ *   patch:
+ *     summary: Resolve or update a conversation's status
+ *     tags: [eBay – Conversation Meta]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               notes:
+ *                 type: string
+ *               status:
+ *                 type: string
+ *               pickedUpBy:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Updated conversation meta
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
 router.patch('/conversation-management/:id/resolve', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { notes, status, pickedUpBy } = req.body;
@@ -11965,6 +12449,37 @@ router.patch('/conversation-management/:id/resolve', requireAuth, async (req, re
 
 
 // --- PATCH PICKED UP BY only ---
+/**
+ * @swagger
+ * /ebay/conversation-management/{id}/pick-up:
+ *   patch:
+ *     summary: Assign a conversation to an agent
+ *     tags: [eBay – Conversation Meta]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               pickedUpBy:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Updated conversation meta
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
 router.patch('/conversation-management/:id/pick-up', requireAuth, async (req, res) => {
   const { pickedUpBy } = req.body;
   try {
@@ -11989,6 +12504,35 @@ router.get('/chat-agents', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /ebay/chat-agents:
+ *   post:
+ *     summary: Create a new chat agent
+ *     tags: [eBay – Chat Agents]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *             properties:
+ *               name:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Created agent
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Name is required
+ */
 router.post('/chat-agents', requireAuth, async (req, res) => {
   const { name } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
