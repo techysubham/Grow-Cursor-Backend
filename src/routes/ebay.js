@@ -34,6 +34,7 @@ import ItemCategoryMap from '../models/ItemCategoryMap.js';
 import AutoCompatibilityBatch from '../models/AutoCompatibilityBatch.js';
 import AutoCompatibilityBatchItem from '../models/AutoCompatibilityBatchItem.js';
 import AsinListCategory from '../models/AsinListCategory.js';
+import EndListingLog from '../models/EndListingLog.js';
 import AsinListRange from '../models/AsinListRange.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import PriceChangeLog from '../models/PriceChangeLog.js';
@@ -11541,7 +11542,7 @@ router.get('/selling/summary', requireAuth, async (req, res) => {
 // ============================================
 router.post('/end-item', requireAuth, async (req, res) => {
   try {
-    const { sellerId, itemId, endingReason = 'NotAvailable' } = req.body;
+    const { sellerId, itemId, endingReason = 'NotAvailable', source } = req.body;
 
     if (!sellerId || !itemId) {
       return res.status(400).json({ error: 'Missing sellerId or itemId' });
@@ -11588,6 +11589,15 @@ router.post('/end-item', requireAuth, async (req, res) => {
       const errors = result.EndItemResponse.Errors;
       const errorMsg = Array.isArray(errors) ? errors[0].LongMessage : errors.LongMessage;
       throw new Error(`eBay API Error: ${errorMsg}`);
+    }
+
+    // Log successful end-listing action if a valid source is provided
+    if (source && ['duplicate_sku', 'expiry_listing'].includes(source)) {
+      try {
+        await EndListingLog.create({ seller: sellerId, itemId, source });
+      } catch (logErr) {
+        console.error('[End Item] Failed to write EndListingLog:', logErr.message);
+      }
     }
 
     res.json({

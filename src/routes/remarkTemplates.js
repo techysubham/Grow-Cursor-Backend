@@ -139,7 +139,7 @@ async function ensureDefaultTemplatesPresent() {
  *         description: Internal server error
  */
 router.get('/', requireAuth, async (req, res) => {
-
+  try {
     const templates = await RemarkTemplate.find({ isActive: true })
       .sort({ sortOrder: 1, createdAt: 1 })
       .lean();
