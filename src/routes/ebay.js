@@ -7528,6 +7528,54 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
 });
 
 // Get stored INR cases from database
+/**
+ * @swagger
+ * /ebay/stored-inr-cases:
+ *   get:
+ *     summary: Get stored INR cases from the database
+ *     tags: [eBay Returns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: caseType
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: excludeClient
+ *         schema:
+ *           type: string
+ *           default: 'false'
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 200
+ *     responses:
+ *       200:
+ *         description: List of INR cases
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 cases:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 totalCases:
+ *                   type: integer
+ *                 totalCount:
+ *                   type: integer
+ */
 router.get('/stored-inr-cases', requireAuth, async (req, res) => {
   const { sellerId, status, caseType, excludeClient = 'false', limit = 200 } = req.query;
 
@@ -7567,6 +7615,27 @@ router.get('/stored-inr-cases', requireAuth, async (req, res) => {
 // ===== PAYMENT DISPUTES ENDPOINTS =====
 
 // Fetch Payment Disputes from eBay Fulfillment API and store in DB
+/**
+ * @swagger
+ * /ebay/fetch-payment-disputes:
+ *   post:
+ *     summary: Fetch and sync payment disputes from eBay Fulfillment API
+ *     tags: [eBay Returns]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Sync result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 totalNewDisputes:
+ *                   type: integer
+ *                 totalUpdatedDisputes:
+ *                   type: integer
+ */
 router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
@@ -7760,6 +7829,69 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
 });
 
 // Get stored Payment Disputes from database
+/**
+ * @swagger
+ * /ebay/stored-payment-disputes:
+ *   get:
+ *     summary: Get stored payment disputes from the database
+ *     tags: [eBay Returns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: reason
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 200
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: dateField
+ *         schema:
+ *           type: string
+ *           default: openDate
+ *       - in: query
+ *         name: excludeClient
+ *         schema:
+ *           type: string
+ *           default: 'false'
+ *     responses:
+ *       200:
+ *         description: List of payment disputes
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 disputes:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 totalDisputes:
+ *                   type: integer
+ *                 totalCount:
+ *                   type: integer
+ */
 router.get('/stored-payment-disputes', requireAuth, async (req, res) => {
   const { sellerId, status, reason, limit = 200, startDate, endDate, dateField = 'openDate', excludeClient = 'false' } = req.query;
 
@@ -7807,6 +7939,29 @@ router.get('/stored-payment-disputes', requireAuth, async (req, res) => {
 
 // Get a lightweight index of all issues (INR/SNAD cases, returns, disputes) keyed by orderId
 // Used by Fulfillment Dashboard to show an "Issues" column
+/**
+ * @swagger
+ * /ebay/issues-by-order:
+ *   get:
+ *     summary: Get a lightweight index of all issues keyed by orderId
+ *     tags: [eBay Returns]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Issue index keyed by orderId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 index:
+ *                   type: object
+ *                   additionalProperties:
+ *                     type: array
+ *                     items:
+ *                       type: object
+ */
 router.get('/issues-by-order', requireAuth, async (req, res) => {
   try {
     const [cases, returns, disputes, conversationMeta] = await Promise.all([
@@ -8859,6 +9014,43 @@ router.get('/chat/messages', requireAuth, async (req, res) => {
 });
 
 // 6. SEARCH ORDER FOR NEW CHAT
+/**
+ * @swagger
+ * /ebay/chat/search-order:
+ *   get:
+ *     summary: Search an order to start a new chat thread
+ *     tags: [eBay – Inbox]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Order thread data for new chat
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 orderId:
+ *                   type: string
+ *                 buyerUsername:
+ *                   type: string
+ *                 buyerName:
+ *                   type: string
+ *                 itemId:
+ *                   type: string
+ *                 itemTitle:
+ *                   type: string
+ *                 sellerId:
+ *                   type: string
+ *       404:
+ *         description: Order not found
+ */
 
 router.get('/chat/search-order', requireAuth, async (req, res) => {
   const { orderId } = req.query;
@@ -8921,6 +9113,31 @@ router.post('/chat/mark-unread', requireAuth, async (req, res) => {
 
 // Fetch buyer messages/inquiries from eBay Post-Order API and store in DB
 // Fetch buyer messages/inquiries from eBay Post-Order API and store in DB
+/**
+ * @swagger
+ * /ebay/fetch-messages:
+ *   post:
+ *     summary: Fetch buyer messages/inquiries from eBay Post-Order API
+ *     tags: [eBay – Buyer Messages]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Sync result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 totalNewMessages:
+ *                   type: integer
+ *                 totalUpdatedMessages:
+ *                   type: integer
+ *                 results:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ */
 router.post('/fetch-messages', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
@@ -9065,6 +9282,43 @@ router.post('/fetch-messages', requireAuth, requirePageAccess('BuyerMessages'), 
 });
 
 // Get stored messages from database
+/**
+ * @swagger
+ * /ebay/stored-messages:
+ *   get:
+ *     summary: Get stored buyer messages from the database
+ *     tags: [eBay – Buyer Messages]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: isResolved
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 100
+ *     responses:
+ *       200:
+ *         description: List of buyer messages
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 messages:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 totalMessages:
+ *                   type: integer
+ */
 router.get('/stored-messages', requireAuth, async (req, res) => {
   const { sellerId, isResolved, limit = 100 } = req.query;
 
@@ -9094,6 +9348,46 @@ router.get('/stored-messages', requireAuth, async (req, res) => {
 
 
 // Mark message as resolved
+/**
+ * @swagger
+ * /ebay/messages/{messageId}/resolve:
+ *   patch:
+ *     summary: Mark a buyer message as resolved or unresolved
+ *     tags: [eBay – Buyer Messages]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: messageId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - isResolved
+ *             properties:
+ *               isResolved:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Message resolve status updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: object
+ *       404:
+ *         description: Message not found
+ */
 router.patch('/messages/:messageId/resolve', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   const { messageId } = req.params;
   const { isResolved } = req.body;
@@ -9143,6 +9437,35 @@ function extractCleanDescription(fullHtml) {
 }
 
 // 1. POLL ACTIVE LISTINGS (With Pagination Loop)
+/**
+ * @swagger
+ * /ebay/sync-listings:
+ *   post:
+ *     summary: Sync active listings for a seller from eBay
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sellerId
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Sync results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Seller not found
+ */
 router.post('/sync-listings', requireAuth, async (req, res) => {
   const { sellerId } = req.body;
 
@@ -9304,6 +9627,31 @@ let syncAllStatus = {
   completedAt: null
 };
 
+/**
+ * @swagger
+ * /ebay/sync-all-sellers-listings:
+ *   post:
+ *     summary: Start background listing sync for all sellers
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Sync started
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 sellersTotal:
+ *                   type: integer
+ *       409:
+ *         description: Sync already in progress
+ */
 router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
   if (syncAllStatus.running) {
     return res.status(409).json({
@@ -9332,11 +9680,81 @@ router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
 });
 
 // 1C. STATUS ENDPOINT for Poll All Sellers
+/**
+ * @swagger
+ * /ebay/sync-all-sellers-status:
+ *   get:
+ *     summary: Get status of the sync-all-sellers background job
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Current sync status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 running:
+ *                   type: boolean
+ *                 currentSeller:
+ *                   type: string
+ *                 sellersComplete:
+ *                   type: integer
+ *                 sellersTotal:
+ *                   type: integer
+ */
 router.get('/sync-all-sellers-status', requireAuth, async (req, res) => {
   res.json(syncAllStatus);
 });
 
 // 2. GET LISTINGS (With Search & Sort) - For Compatibility Dashboard (Uses Listing collection)
+/**
+ * @swagger
+ * /ebay/listings:
+ *   get:
+ *     summary: Get active listings with search and pagination
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: listedFrom
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: listedTo
+ *         schema:
+ *           type: string
+ *           format: date
+ *     responses:
+ *       200:
+ *         description: Paginated list of active listings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
 router.get('/listings', requireAuth, async (req, res) => {
   const { sellerId, page = 1, limit = 50, search, listedFrom, listedTo } = req.query;
   try {
@@ -9385,6 +9803,36 @@ router.get('/listings', requireAuth, async (req, res) => {
 });
 
 // 3. REFRESH SINGLE ITEM (GetItem)
+/**
+ * @swagger
+ * /ebay/refresh-item:
+ *   post:
+ *     summary: Refresh a single eBay listing via GetItem API
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sellerId
+ *               - itemId
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               itemId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Updated listing data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
 router.post('/refresh-item', requireAuth, async (req, res) => {
   const { sellerId, itemId } = req.body;
 
@@ -9784,6 +10232,48 @@ const retryCompatWithTitleDiff = async (token, itemId, compatibilityList) => {
   throw lastError || new Error('Max duplicate-listing retries exceeded');
 };
 
+/**
+ * @swagger
+ * /ebay/update-compatibility:
+ *   post:
+ *     summary: Update vehicle compatibility list for an eBay listing
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sellerId
+ *               - itemId
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               itemId:
+ *                 type: string
+ *               sku:
+ *                 type: string
+ *               compatibilityList:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *               batchId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Compatibility list updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Missing required fields
+ *       404:
+ *         description: Seller not found
+ */
 router.post('/update-compatibility', requireAuth, async (req, res) => {
   const { sellerId, itemId, sku, compatibilityList: rawCompatibilityList, batchId } = req.body;
   try {

@@ -72,7 +72,9 @@ const swaggerDefinition = {
         { name: 'eBay OAuth', description: 'eBay OAuth2 connect and callback flow' },
         { name: 'eBay Orders', description: 'Fetch, sync, and query eBay orders' },
         { name: 'eBay Financials', description: 'Ad fees, earnings, and order-total calculations for eBay orders' },
-        { name: 'eBay Returns', description: 'Return requests and INR (Item Not Received) cases from eBay Post-Order API' }
+        { name: 'eBay Returns', description: 'Return requests and INR (Item Not Received) cases from eBay Post-Order API' },
+        { name: 'eBay – Buyer Messages', description: 'Buyer messages/inquiries fetched via eBay Post-Order API' },
+        { name: 'eBay Listings', description: 'Active listing sync and management' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
