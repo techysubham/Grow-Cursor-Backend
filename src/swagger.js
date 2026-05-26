@@ -74,7 +74,8 @@ const swaggerDefinition = {
         { name: 'eBay Financials', description: 'Ad fees, earnings, and order-total calculations for eBay orders' },
         { name: 'eBay Returns', description: 'Return requests and INR (Item Not Received) cases from eBay Post-Order API' },
         { name: 'eBay – Buyer Messages', description: 'Buyer messages/inquiries fetched via eBay Post-Order API' },
-        { name: 'eBay Listings', description: 'Active listing sync and management' }
+        { name: 'eBay Listings', description: 'Active listing sync and management' },
+        { name: 'eBay Sellers', description: 'Seller-level eBay account and selling privileges' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────

@@ -12556,6 +12556,31 @@ router.patch('/chat-agents/:id', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /ebay/chat-agents/{id}:
+ *   delete:
+ *     summary: Delete a chat agent
+ *     tags: [eBay – Chat Agents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Agent deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ */
 router.delete('/chat-agents/:id', requireAuth, async (req, res) => {
   try {
     await ChatAgent.findByIdAndDelete(req.params.id);
@@ -12566,6 +12591,59 @@ router.delete('/chat-agents/:id', requireAuth, async (req, res) => {
 });
 
 //Manual fields to upadte for amazon 
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/manual-fields:
+ *   patch:
+ *     summary: Update manual order fields (Amazon account, dates, costs, remarks)
+ *     tags: [eBay Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               amazonAccount:
+ *                 type: string
+ *               arrivingDate:
+ *                 type: string
+ *               beforeTax:
+ *                 type: number
+ *               estimatedTax:
+ *                 type: number
+ *               azOrderId:
+ *                 type: string
+ *               amazonRefund:
+ *                 type: number
+ *               cardName:
+ *                 type: string
+ *               resolution:
+ *                 type: string
+ *               remark:
+ *                 type: string
+ *               alreadyInUse:
+ *                 type: boolean
+ *               remarkMessageSent:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Updated order
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Order not found
+ */
 router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const updates = req.body;
@@ -12783,6 +12861,22 @@ router.get('/item-images/:itemId', requireAuth, async (req, res) => {
 // ============================================
 
 // Get cache statistics (Admin only)
+/**
+ * @swagger
+ * /ebay/cache/stats:
+ *   get:
+ *     summary: Get image cache statistics
+ *     tags: [eBay – Item Images]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Cache statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ */
 router.get('/cache/stats', requireAuth, requirePageAccess('SellerFunds'), (req, res) => {
   try {
     const stats = imageCache.getStats();
@@ -12800,6 +12894,27 @@ router.get('/cache/stats', requireAuth, requirePageAccess('SellerFunds'), (req, 
 });
 
 // Clear cache (Admin only)
+/**
+ * @swagger
+ * /ebay/cache/clear:
+ *   post:
+ *     summary: Clear the image cache
+ *     tags: [eBay – Item Images]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Cache cleared
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ */
 router.post('/cache/clear', requireAuth, requirePageAccess('SellerFunds'), (req, res) => {
   try {
     imageCache.clear();
@@ -12814,6 +12929,51 @@ router.post('/cache/clear', requireAuth, requirePageAccess('SellerFunds'), (req,
 });
 
 // Seller Analytics - Aggregated data by day/week/month
+/**
+ * @swagger
+ * /ebay/seller-analytics:
+ *   get:
+ *     summary: Get aggregated seller analytics by day/week/month
+ *     tags: [eBay Financials]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: groupBy
+ *         schema:
+ *           type: string
+ *           enum: [day, week, month]
+ *           default: day
+ *       - in: query
+ *         name: startDate
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: marketplace
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Aggregated analytics data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Start date and end date are required
+ */
 router.get('/seller-analytics', requireAuth, requirePageAccess('SellerAnalytics'), async (req, res) => {
   try {
     const { sellerId, groupBy = 'day', startDate, endDate, marketplace } = req.query;
@@ -12964,6 +13124,44 @@ router.get('/seller-analytics', requireAuth, requirePageAccess('SellerAnalytics'
 });
 
 // Update worksheet status for an order (cancellation)
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/worksheet-status:
+ *   patch:
+ *     summary: Update worksheet status for an order
+ *     tags: [eBay Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - worksheetStatus
+ *             properties:
+ *               worksheetStatus:
+ *                 type: string
+ *                 enum: [open, attended, resolved]
+ *     responses:
+ *       200:
+ *         description: Updated order
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Invalid worksheet status
+ *       404:
+ *         description: Order not found
+ */
 router.patch('/orders/:orderId/worksheet-status', requireAuth, async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -12991,6 +13189,44 @@ router.patch('/orders/:orderId/worksheet-status', requireAuth, async (req, res) 
 });
 
 // Update worksheet status for a return
+/**
+ * @swagger
+ * /ebay/returns/{returnId}/worksheet-status:
+ *   patch:
+ *     summary: Update worksheet status for a return
+ *     tags: [eBay Returns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: returnId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - worksheetStatus
+ *             properties:
+ *               worksheetStatus:
+ *                 type: string
+ *                 enum: [open, attended, resolved]
+ *     responses:
+ *       200:
+ *         description: Updated return
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Invalid worksheet status
+ *       404:
+ *         description: Return not found
+ */
 router.patch('/returns/:returnId/worksheet-status', requireAuth, async (req, res) => {
   try {
     const { returnId } = req.params;
@@ -13018,6 +13254,43 @@ router.patch('/returns/:returnId/worksheet-status', requireAuth, async (req, res
 });
 
 // Update manual eBay/Amazon statuses for a return
+/**
+ * @swagger
+ * /ebay/returns/{returnId}/marketplace-statuses:
+ *   patch:
+ *     summary: Update manual eBay and Amazon marketplace statuses for a return
+ *     tags: [eBay Returns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: returnId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               ebayStatus:
+ *                 type: string
+ *               amazonStatus:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Updated return
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Invalid status value
+ *       404:
+ *         description: Return not found
+ */
 router.patch('/returns/:returnId/marketplace-statuses', requireAuth, async (req, res) => {
   try {
     const { returnId } = req.params;
@@ -13066,6 +13339,44 @@ router.patch('/returns/:returnId/marketplace-statuses', requireAuth, async (req,
 });
 
 // Update worksheet status for a case (INR)
+/**
+ * @swagger
+ * /ebay/cases/{caseId}/worksheet-status:
+ *   patch:
+ *     summary: Update worksheet status for an INR case
+ *     tags: [eBay Returns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: caseId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - worksheetStatus
+ *             properties:
+ *               worksheetStatus:
+ *                 type: string
+ *                 enum: [open, attended, resolved]
+ *     responses:
+ *       200:
+ *         description: Updated case
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Invalid worksheet status
+ *       404:
+ *         description: Case not found
+ */
 router.patch('/cases/:caseId/worksheet-status', requireAuth, async (req, res) => {
   try {
     const { caseId } = req.params;
@@ -13093,6 +13404,39 @@ router.patch('/cases/:caseId/worksheet-status', requireAuth, async (req, res) =>
 });
 
 // Update logs for a case (INR)
+/**
+ * @swagger
+ * /ebay/cases/{caseId}/logs:
+ *   patch:
+ *     summary: Update logs text for an INR case
+ *     tags: [eBay Returns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: caseId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               logs:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Updated case
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Case not found
+ */
 router.patch('/cases/:caseId/logs', requireAuth, async (req, res) => {
   try {
     const { caseId } = req.params;
@@ -13116,6 +13460,39 @@ router.patch('/cases/:caseId/logs', requireAuth, async (req, res) => {
 });
 
 // Update logs for a return
+/**
+ * @swagger
+ * /ebay/returns/{returnId}/logs:
+ *   patch:
+ *     summary: Update logs text for a return
+ *     tags: [eBay Returns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: returnId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               logs:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Updated return
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Return not found
+ */
 router.patch('/returns/:returnId/logs', requireAuth, async (req, res) => {
   try {
     const { returnId } = req.params;
@@ -13139,6 +13516,43 @@ router.patch('/returns/:returnId/logs', requireAuth, async (req, res) => {
 });
 
 // Mark / unmark a return as SNAD (manual BBE override)
+/**
+ * @swagger
+ * /ebay/returns/{returnId}/mark-snad:
+ *   patch:
+ *     summary: Mark or unmark a return as SNAD
+ *     tags: [eBay Returns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: returnId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - markedAsSNAD
+ *             properties:
+ *               markedAsSNAD:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Updated return
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: markedAsSNAD must be a boolean
+ *       404:
+ *         description: Return not found
+ */
 router.patch('/returns/:returnId/mark-snad', requireAuth, async (req, res) => {
   try {
     const { returnId } = req.params;
@@ -13166,6 +13580,39 @@ router.patch('/returns/:returnId/mark-snad', requireAuth, async (req, res) => {
 });
 
 // Update logs for an order (Cancellation)
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/logs:
+ *   patch:
+ *     summary: Update logs text for an order
+ *     tags: [eBay Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               logs:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Updated order
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Order not found
+ */
 router.patch('/orders/:orderId/logs', requireAuth, async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -13226,6 +13673,39 @@ function getPolicyMessageQuery(now = new Date()) {
 }
 
 // Compatibility endpoint kept for existing UI wiring
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/auto-message-toggle:
+ *   patch:
+ *     summary: Toggle policy follow-up message for an order
+ *     tags: [eBay Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               disabled:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Updated order
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Order not found
+ */
 router.patch('/orders/:orderId/auto-message-toggle', requireAuth, async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -13249,6 +13729,37 @@ router.patch('/orders/:orderId/auto-message-toggle', requireAuth, async (req, re
 });
 
 // Fetch ship-by date for a single order from eBay and store it (without touching lastModifiedDate)
+/**
+ * @swagger
+ * /ebay/orders/{orderId}/fetch-ship-by-date:
+ *   post:
+ *     summary: Fetch and store the ship-by date from eBay for an order
+ *     tags: [eBay Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         description: MongoDB _id of the order
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Ship-by date fetched and stored
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 shipByDate:
+ *                   type: string
+ *                   format: date-time
+ *       404:
+ *         description: Order not found
+ */
 router.post('/orders/:orderId/fetch-ship-by-date', requireAuth, async (req, res) => {
   try {
     const { orderId } = req.params; // MongoDB _id
@@ -13299,6 +13810,29 @@ router.post('/orders/:orderId/fetch-ship-by-date', requireAuth, async (req, res)
 });
 
 // Compatibility endpoint kept for existing UI wiring
+/**
+ * @swagger
+ * /ebay/orders/auto-message-stats:
+ *   get:
+ *     summary: Get policy follow-up message statistics
+ *     tags: [eBay Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Policy message counts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 pending:
+ *                   type: integer
+ *                 sent:
+ *                   type: integer
+ *                 disabled:
+ *                   type: integer
+ */
 router.get('/orders/auto-message-stats', requireAuth, async (req, res) => {
   try {
     const pending = await Order.countDocuments(getPolicyMessageQuery(new Date()));
@@ -13410,6 +13944,31 @@ async function processPendingPolicyMessages(limit = 50) {
 }
 
 // Compatibility endpoint path kept to avoid breaking existing UI button
+/**
+ * @swagger
+ * /ebay/orders/send-auto-messages:
+ *   post:
+ *     summary: Send pending policy follow-up messages (up to 50)
+ *     tags: [eBay Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Processing result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 processed:
+ *                   type: integer
+ *                 sent:
+ *                   type: integer
+ *                 failed:
+ *                   type: integer
+ */
 router.post('/orders/send-auto-messages', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   try {
     const result = await processPendingPolicyMessages(50);
@@ -13426,6 +13985,39 @@ router.post('/orders/send-auto-messages', requireAuth, requirePageAccess('BuyerM
 // =====================================================
 // AWAITING SHEET SUMMARY - Order counts by seller (no tracking)
 // =====================================================
+/**
+ * @swagger
+ * /ebay/awaiting-sheet-summary:
+ *   get:
+ *     summary: Get order counts by seller for the awaiting sheet
+ *     tags: [eBay Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: date
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: marketplace
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: excludeClient
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Per-seller order counts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Date is required
+ */
 router.get('/awaiting-sheet-summary', requireAuth, requirePageAccess('AwaitingSheet'), async (req, res) => {
   try {
     const { date, marketplace, excludeClient } = req.query;
@@ -13681,6 +14273,24 @@ router.get('/awaiting-sheet-summary', requireAuth, requirePageAccess('AwaitingSh
 // ============================================
 // GET ALL SELLING PRIVILEGES (BULK)
 // ============================================
+/**
+ * @swagger
+ * /ebay/selling/summary/all:
+ *   get:
+ *     summary: Get selling privileges for all sellers
+ *     tags: [eBay Sellers]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Selling privileges per seller
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ */
 router.get('/selling/summary/all', requireAuth, async (req, res) => {
   try {
     const sellers = await Seller.find({}).populate('user');
@@ -13764,6 +14374,39 @@ router.get('/selling/summary/all', requireAuth, async (req, res) => {
 // ============================================
 // GET SELLING PRIVILEGES / LIMITS
 // ============================================
+/**
+ * @swagger
+ * /ebay/selling/summary:
+ *   get:
+ *     summary: Get selling limits and summary for a specific seller
+ *     tags: [eBay Sellers]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Selling limits and summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 sellerId:
+ *                   type: string
+ *                 limits:
+ *                   type: object
+ *       400:
+ *         description: Missing sellerId
+ *       404:
+ *         description: Seller not found
+ */
 router.get('/selling/summary', requireAuth, async (req, res) => {
   try {
     const { sellerId } = req.query;
@@ -13852,6 +14495,49 @@ router.get('/selling/summary', requireAuth, async (req, res) => {
 // ============================================
 // END ITEM
 // ============================================
+/**
+ * @swagger
+ * /ebay/end-item:
+ *   post:
+ *     summary: End an active eBay listing via Trading API
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sellerId
+ *               - itemId
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               itemId:
+ *                 type: string
+ *               endingReason:
+ *                 type: string
+ *                 default: NotAvailable
+ *     responses:
+ *       200:
+ *         description: Item ended
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 endTime:
+ *                   type: string
+ *                   format: date-time
+ *       400:
+ *         description: Missing sellerId or itemId
+ *       404:
+ *         description: Seller not found
+ */
 router.post('/end-item', requireAuth, async (req, res) => {
   try {
     const { sellerId, itemId, endingReason = 'NotAvailable' } = req.body;
@@ -13927,6 +14613,51 @@ export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDa
 // FEED UPLOAD SUCCESS STATS (aggregated day-wise by seller)
 // GET /api/ebay/feed/upload-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&sellerId=...
 // ============================================
+/**
+ * @swagger
+ * /ebay/feed/upload-stats:
+ *   get:
+ *     summary: Get feed upload success stats aggregated by day and seller
+ *     tags: [eBay Feed]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: country
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: categoryId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: rangeId
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Feed upload stats per seller per day
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ */
 router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId, country, categoryId, rangeId } = req.query;
@@ -14055,6 +14786,54 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
 // GET FEED CATEGORY/RANGE STATS
 // ============================================
 // GET /api/ebay/feed/category-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&country=X
+/**
+ * @swagger
+ * /ebay/feed/category-stats:
+ *   get:
+ *     summary: Get feed upload stats grouped by category and range
+ *     tags: [eBay Feed]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: country
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: categoryId
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Stats grouped by category and range
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 categories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 ranges:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ */
 router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
   try {
     const { startDate, endDate, country, sellerId: catSellerId, categoryId: catFilterId } = req.query;
@@ -14168,6 +14947,40 @@ router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadSta
 // ============================================
 // SELLER FUNDS SUMMARY (All connected sellers)
 // ============================================
+/**
+ * @swagger
+ * /ebay/seller-funds-summary:
+ *   get:
+ *     summary: Get funds summary for all eBay-connected sellers
+ *     tags: [eBay Financials]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Funds summary per seller
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   sellerId:
+ *                     type: string
+ *                   sellerName:
+ *                     type: string
+ *                   totalFunds:
+ *                     type: object
+ *                   availableFunds:
+ *                     type: object
+ *                   processingFunds:
+ *                     type: object
+ *                   fundsOnHold:
+ *                     type: object
+ *                   error:
+ *                     type: string
+ *                     nullable: true
+ */
 router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
   try {
     // Get all sellers with eBay tokens
@@ -14237,6 +15050,43 @@ router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'
 // ============================================
 // PROCESSING TRANSACTIONS for a specific seller
 // ============================================
+/**
+ * @swagger
+ * /ebay/processing-transactions/{sellerId}:
+ *   get:
+ *     summary: Get processing (FUNDS_PROCESSING) transactions for a seller
+ *     tags: [eBay Financials]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Processing transactions for the seller
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 sellerId:
+ *                   type: string
+ *                 sellerName:
+ *                   type: string
+ *                 totalProcessingTransactions:
+ *                   type: integer
+ *                 transactions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       400:
+ *         description: Seller not connected to eBay
+ *       404:
+ *         description: Seller not found
+ */
 router.get('/processing-transactions/:sellerId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
   try {
     const seller = await Seller.findById(req.params.sellerId).populate('user', 'username');
@@ -14384,6 +15234,43 @@ router.get('/processing-transactions/:sellerId', requireAuth, requirePageAccess(
 // ============================================
 // UPCOMING PAYOUTS for a specific seller
 // ============================================
+/**
+ * @swagger
+ * /ebay/upcoming-payouts/{sellerId}:
+ *   get:
+ *     summary: Get upcoming and recent payouts for a seller
+ *     tags: [eBay Financials]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Payouts for the seller
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 sellerId:
+ *                   type: string
+ *                 sellerName:
+ *                   type: string
+ *                 totalPayouts:
+ *                   type: integer
+ *                 payouts:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       400:
+ *         description: Seller not connected to eBay
+ *       404:
+ *         description: Seller not found
+ */
 router.get('/upcoming-payouts/:sellerId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
   try {
     const seller = await Seller.findById(req.params.sellerId).populate('user', 'username');
@@ -14446,6 +15333,43 @@ router.get('/upcoming-payouts/:sellerId', requireAuth, requirePageAccess('Seller
 // ============================================
 // ON HOLD TRANSACTIONS for a specific seller
 // ============================================
+/**
+ * @swagger
+ * /ebay/onhold-transactions/{sellerId}:
+ *   get:
+ *     summary: Get on-hold (FUNDS_ON_HOLD) transactions for a seller
+ *     tags: [eBay Financials]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: On-hold transactions for the seller
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 sellerId:
+ *                   type: string
+ *                 sellerName:
+ *                   type: string
+ *                 totalOnHoldTransactions:
+ *                   type: integer
+ *                 transactions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       400:
+ *         description: Seller not connected to eBay
+ *       404:
+ *         description: Seller not found
+ */
 router.get('/onhold-transactions/:sellerId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
   try {
     const seller = await Seller.findById(req.params.sellerId).populate('user', 'username');
@@ -14705,6 +15629,51 @@ async function fetchCompatValues(token, propertyName, constraints) {
 
 // POST /api/ebay/auto-compatibility
 // Body: { sellerId, targetDate (YYYY-MM-DD), itemLimit (0 = no limit) }
+/**
+ * @swagger
+ * /ebay/auto-compatibility:
+ *   post:
+ *     summary: Start an automated fitment batch for a seller on a target date
+ *     tags: [Compatibility]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - sellerId
+ *               - targetDate
+ *             properties:
+ *               sellerId:
+ *                 type: string
+ *               targetDate:
+ *                 type: string
+ *                 format: date
+ *               itemLimit:
+ *                 type: integer
+ *                 default: 0
+ *     responses:
+ *       200:
+ *         description: Batch started
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 batchId:
+ *                   type: string
+ *                 totalListings:
+ *                   type: integer
+ *       400:
+ *         description: sellerId and targetDate are required
+ *       404:
+ *         description: Seller not found
+ */
 router.post('/auto-compatibility', requireAuth, async (req, res) => {
   const { sellerId, targetDate, itemLimit = 0 } = req.body;
   if (!sellerId || !targetDate) {
@@ -14762,6 +15731,38 @@ router.post('/auto-compatibility', requireAuth, async (req, res) => {
 
 // POST /api/ebay/auto-compatibility-status/bulk — lightweight bulk status for All-Sellers dashboard
 // Returns only the fields needed for the cards (no items array)
+/**
+ * @swagger
+ * /ebay/auto-compatibility-status/bulk:
+ *   post:
+ *     summary: Get bulk status for multiple auto-compatibility batches
+ *     tags: [Compatibility]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - batchIds
+ *             properties:
+ *               batchIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       200:
+ *         description: Batch statuses keyed by batchId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 batches:
+ *                   type: object
+ */
 router.post('/auto-compatibility-status/bulk', requireAuth, async (req, res) => {
   try {
     const { batchIds } = req.body;
@@ -14778,6 +15779,30 @@ router.post('/auto-compatibility-status/bulk', requireAuth, async (req, res) => 
 });
 
 // GET /api/ebay/auto-compatibility-status/:batchId
+/**
+ * @swagger
+ * /ebay/auto-compatibility-status/{batchId}:
+ *   get:
+ *     summary: Get status and items for an auto-compatibility batch
+ *     tags: [Compatibility]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Batch status and items
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Batch not found
+ */
 router.get('/auto-compatibility-status/:batchId', requireAuth, async (req, res) => {
   try {
     const batch = await AutoCompatibilityBatch.findById(req.params.batchId)
@@ -14814,6 +15839,30 @@ router.get('/auto-compatibility-status/:batchId', requireAuth, async (req, res) 
 });
 
 // GET /api/ebay/auto-compatibility-batch/:batchId — Full batch with compat lists (for manual review)
+/**
+ * @swagger
+ * /ebay/auto-compatibility-batch/{batchId}:
+ *   get:
+ *     summary: Get full auto-compatibility batch with compatibility lists for manual review
+ *     tags: [Compatibility]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Full batch with items and compatibility data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Batch not found
+ */
 router.get('/auto-compatibility-batch/:batchId', requireAuth, async (req, res) => {
   try {
     const [batch, newItems] = await Promise.all([
@@ -14842,6 +15891,60 @@ router.get('/auto-compatibility-batch/:batchId', requireAuth, async (req, res) =
 });
 
 // GET /api/ebay/auto-compatibility-batches — History of auto-compat batches
+/**
+ * @swagger
+ * /ebay/auto-compatibility-batches:
+ *   get:
+ *     summary: Get paginated history of auto-compatibility batches
+ *     tags: [Compatibility]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: listingDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: runOnDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *     responses:
+ *       200:
+ *         description: Paginated batch history
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 batches:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 total:
+ *                   type: integer
+ *                 pages:
+ *                   type: integer
+ */
 router.get('/auto-compatibility-batches', requireAuth, async (req, res) => {
   try {
     const { sellerId, page = 1, limit = 20 } = req.query;
@@ -14895,6 +15998,46 @@ router.get('/auto-compatibility-batches', requireAuth, async (req, res) => {
 });
 
 // PATCH /api/ebay/auto-compatibility-batch/:batchId/review-summary — Save manual review action counts
+/**
+ * @swagger
+ * /ebay/auto-compatibility-batch/{batchId}/review-summary:
+ *   patch:
+ *     summary: Save manual review action counts for an auto-compatibility batch
+ *     tags: [Compatibility]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               correctCount:
+ *                 type: integer
+ *               skippedCount:
+ *                 type: integer
+ *               endedCount:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Review summary saved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *       404:
+ *         description: Batch not found
+ */
 router.patch('/auto-compatibility-batch/:batchId/review-summary', requireAuth, async (req, res) => {
   try {
     const { correctCount, skippedCount, endedCount } = req.body;
@@ -14922,6 +16065,30 @@ router.patch('/auto-compatibility-batch/:batchId/review-summary', requireAuth, a
 });
 
 // GET /api/ebay/listing/:itemId — Get full listing details for review
+/**
+ * @swagger
+ * /ebay/listing/{itemId}:
+ *   get:
+ *     summary: Get full listing details by eBay item ID
+ *     tags: [eBay Listings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: itemId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Full listing document
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       404:
+ *         description: Listing not found
+ */
 router.get('/listing/:itemId', requireAuth, async (req, res) => {
   try {
     const listing = await Listing.findOne({ itemId: req.params.itemId }).lean();
@@ -14935,6 +16102,50 @@ router.get('/listing/:itemId', requireAuth, async (req, res) => {
 // POST /api/ebay/auto-compatibility/run-for-date
 // Body: { targetDate, itemLimit?, excludeSellerIds? }
 // Creates batches for every seller (except those in AUTO_COMPAT_EXCLUDED_USERNAMES) and processes them sequentially.
+/**
+ * @swagger
+ * /ebay/auto-compatibility/run-for-date:
+ *   post:
+ *     summary: Run auto-compatibility for all sellers on a given date
+ *     tags: [Compatibility]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - targetDate
+ *             properties:
+ *               targetDate:
+ *                 type: string
+ *                 format: date
+ *               itemLimit:
+ *                 type: integer
+ *                 default: 0
+ *               excludeSellerIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       200:
+ *         description: Batches created for all sellers
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 batches:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       400:
+ *         description: targetDate is required
+ */
 router.post('/auto-compatibility/run-for-date', requireAuth, async (req, res) => {
   const { targetDate, itemLimit = 0, excludeSellerIds = [] } = req.body;
   if (!targetDate) {
@@ -14956,6 +16167,36 @@ router.post('/auto-compatibility/run-for-date', requireAuth, async (req, res) =>
 
 // GET /api/ebay/auto-compatibility-batches-for-date?targetDate=YYYY-MM-DD
 // Returns all batches for a given date (all sellers), used by the "Run All" dashboard.
+/**
+ * @swagger
+ * /ebay/auto-compatibility-batches-for-date:
+ *   get:
+ *     summary: Get all auto-compatibility batches for a specific target date
+ *     tags: [Compatibility]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: targetDate
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: date
+ *     responses:
+ *       200:
+ *         description: Batches for the given date
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 batches:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       400:
+ *         description: targetDate is required
+ */
 router.get('/auto-compatibility-batches-for-date', requireAuth, async (req, res) => {
   try {
     const { targetDate } = req.query;
