@@ -66,7 +66,16 @@ const swaggerDefinition = {
         { name: 'ASIN List Categories', description: 'Top-level categories for the ASIN product list organiser' },
         { name: 'ASIN List Ranges', description: 'Ranges (sub-groups) within ASIN list categories' },
         { name: 'ASIN List Products', description: 'Products within an ASIN list range' },
-        { name: 'Listing Templates', description: 'eBay listing templates with custom columns, automation, and pricing config' }
+        { name: 'Listing Templates', description: 'eBay listing templates with custom columns, automation, and pricing config' },
+        { name: 'eBay SKU Index', description: 'Local SKU index synced from eBay for fast active-listing lookups' },
+        { name: 'eBay Feed', description: 'eBay Bulk Data Exchange feed upload, task status, and result download' },
+        { name: 'eBay OAuth', description: 'eBay OAuth2 connect and callback flow' },
+        { name: 'eBay Orders', description: 'Fetch, sync, and query eBay orders' },
+        { name: 'eBay Financials', description: 'Ad fees, earnings, and order-total calculations for eBay orders' },
+        { name: 'eBay Returns', description: 'Return requests and INR (Item Not Received) cases from eBay Post-Order API' },
+        { name: 'eBay – Buyer Messages', description: 'Buyer messages/inquiries fetched via eBay Post-Order API' },
+        { name: 'eBay Listings', description: 'Active listing sync and management' },
+        { name: 'eBay Sellers', description: 'Seller-level eBay account and selling privileges' }
     ],
 
     // ─── Security ────────────────────────────────────────────────────────────────
@@ -621,6 +630,33 @@ const swaggerDefinition = {
                     createdBy:        { type: 'object', properties: { name: { type: 'string' }, email: { type: 'string' } } },
                     createdAt:        { type: 'string', format: 'date-time' },
                     updatedAt:        { type: 'string', format: 'date-time' }
+                }
+            },
+
+            // ── EbayOrder ─────────────────────────────────────────────────────
+            EbayOrder: {
+                type: 'object',
+                properties: {
+                    _id:                   { type: 'string', example: '665abc123def456789000067' },
+                    orderId:               { type: 'string' },
+                    legacyOrderId:         { type: 'string' },
+                    seller:                { type: 'string' },
+                    creationDate:          { type: 'string', format: 'date-time' },
+                    lastModifiedDate:      { type: 'string', format: 'date-time' },
+                    orderFulfillmentStatus:{ type: 'string' },
+                    orderPaymentStatus:    { type: 'string' },
+                    productName:           { type: 'string' },
+                    itemNumber:            { type: 'string' },
+                    quantity:              { type: 'integer' },
+                    subtotal:              { type: 'number' },
+                    salesTax:              { type: 'number' },
+                    shipping:              { type: 'number' },
+                    transactionFees:       { type: 'number' },
+                    adFee:                 { type: 'number' },
+                    adFeeGeneral:          { type: 'number' },
+                    orderEarnings:         { type: 'number' },
+                    trackingNumber:        { type: 'string', nullable: true },
+                    purchaseMarketplaceId: { type: 'string' }
                 }
             }
         }

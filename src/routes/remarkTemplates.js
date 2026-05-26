@@ -140,6 +140,8 @@ async function ensureDefaultTemplatesPresent() {
  */
 router.get('/', requireAuth, async (req, res) => {
   try {
+    await ensureDefaultTemplatesPresent();
+
     const templates = await RemarkTemplate.find({ isActive: true })
       .sort({ sortOrder: 1, createdAt: 1 })
       .lean();

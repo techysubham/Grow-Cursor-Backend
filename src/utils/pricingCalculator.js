@@ -5,7 +5,7 @@
  * 
  * Formula:
  * StartPrice = (
- *   (desiredProfit + (buyingPrice * spentRate)) / payoutRate + fixedFee
+ *   (desiredProfit + (buyingPrice * spentRate)) / payoutRate + 0.40 + fixedFee
  * ) / (
  *   1 - (1 + saleTax/100) * (ebayFee/100 + adsFee/100 + tdsFee/100)
  * )
@@ -14,6 +14,8 @@
  * - buyingPrice (USD) = cost + shipping + tax
  * - tax (USD) = cost * (taxRate/100)
  * - desiredProfit can be fixed or tiered based on product cost
+ * - 0.40 = eBay per-order fixed fee (USD); fixedFee = TCont fee (USD)
+ * - saleTax should be set to 10 for US eBay (buyer tax grossup)
  */
 
 /**
@@ -102,11 +104,12 @@ export function calculateStartPrice(pricingConfig, amazonCost) {
   // Step 6: Convert back to USD using PayoutRate
   const payoutUSD = profitComponent / payoutRate;
   
-  // Step 7: Add fixed fee (convert from INR to USD)
-  const withFixedFee = payoutUSD + (fixedFee / payoutRate);
+  // Step 7: Add fixed USD costs — eBay charges $0.40 per order + fixedFee (TCont in USD)
+  const withFixedFee = payoutUSD + 0.40 + fixedFee;
   
   // Step 8: Calculate fee multiplier
   // 1 - (1 + SaleTax%) * (eBayFee% + Ads% + TDS%)
+  // Set saleTax=10 in config for US eBay (fees are applied on sold × 1.1)
   const combinedFees = (ebayFee / 100) + (adsFee / 100) + (tdsFee / 100);
   const saleTaxMultiplier = 1 + (saleTax / 100);
   const feeMultiplier = 1 - (saleTaxMultiplier * combinedFees);
