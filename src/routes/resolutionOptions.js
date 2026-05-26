@@ -40,6 +40,8 @@ async function ensureDefaultOptions() {
  *         description: Internal server error
  */
 router.get('/', requireAuth, async (req, res) => {
+    try {
+        await ensureDefaultOptions();
         const options = await ResolutionOption.find().sort({ name: 1 });
         res.json(options);
     } catch (error) {
