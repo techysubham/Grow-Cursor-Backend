@@ -139,7 +139,6 @@ async function ensureDefaultTemplatesPresent() {
  *         description: Internal server error
  */
 router.get('/', requireAuth, async (req, res) => {
-
   try {
     await ensureDefaultTemplatesPresent();
 
