@@ -1196,6 +1196,7 @@ const EBAY_OAUTH_SCOPES = [
   'https://api.ebay.com/oauth/api_scope/sell.finances',
   'https://api.ebay.com/oauth/api_scope/sell.account',
   'https://api.ebay.com/oauth/api_scope/sell.inventory',
+  'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
   'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
 ].join(' ');
 
@@ -9211,7 +9212,6 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
         const quantitySold = parseInt(item.SellingStatus?.QuantitySold || '0', 10);
 
         if (watchCount >= maxWatchers) continue;
-        if (hitCount >= maxViews) continue;
         if (quantitySold > 0) continue;
 
         const timeLeftMs = endTime ? new Date(endTime).getTime() - now.getTime() : 0;
@@ -9233,6 +9233,22 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
         const rawPic = item.PictureDetails?.PictureURL;
         const mainImageUrl = Array.isArray(rawPic) ? rawPic[0] : (rawPic || '');
 
+        // Map item.Site to eBay marketplace ID for Analytics API
+        const SITE_TO_MARKETPLACE = {
+          'US':           'EBAY_US',
+          'eBayMotors':   'EBAY_MOTORS',
+          'Canada':       'EBAY_CA',
+          'CanadaFrench': 'EBAY_CA_FR',
+          'UK':           'EBAY_GB',
+          'Australia':    'EBAY_AU',
+          'Germany':      'EBAY_DE',
+          'France':       'EBAY_FR',
+          'Italy':        'EBAY_IT',
+          'Spain':        'EBAY_ES',
+          'Netherlands':  'EBAY_NL',
+        };
+        const marketplaceId = SITE_TO_MARKETPLACE[item.Site] || 'EBAY_US';
+
         filteredListings.push({
           itemId: item.ItemID,
           title: item.Title,
@@ -9240,6 +9256,7 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
           currentPrice,
           currentPriceUSD,
           currency,
+          marketplaceId,
           endTime,
           hoursLeft,
           minutesLeft,
@@ -9267,7 +9284,61 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
       page++;
     } while (page <= totalPages);
 
-    send({ type: 'done', count: filteredListings.length, listings: filteredListings });
+    // ── Enrich with real views from eBay Analytics API (HitCount is deprecated) ─────
+    if (filteredListings.length > 0 && !aborted) {
+      send({ type: 'progress', page: totalPages, totalPages, count: filteredListings.length, phase: 'analytics' });
+
+      const analyticsEnd   = new Date();
+      const analyticsStart = new Date(analyticsEnd.getTime() - 30 * 24 * 60 * 60 * 1000);
+      const fromStr = analyticsStart.toISOString().slice(0, 10).replace(/-/g, '');
+      const toStr   = analyticsEnd.toISOString().slice(0, 10).replace(/-/g, '');
+
+      // Group listing IDs by marketplace using item.Site-derived marketplaceId
+      const byMarketplace = {};
+      for (const l of filteredListings) {
+        (byMarketplace[l.marketplaceId] = byMarketplace[l.marketplaceId] || []).push(l.itemId);
+      }
+
+      const viewsMap = new Map();
+      const accessToken = await ensureValidToken(seller);
+      const ANALYTICS_BATCH = 200;
+
+      for (const [marketplaceId, ids] of Object.entries(byMarketplace)) {
+        if (aborted) break;
+        for (let i = 0; i < ids.length; i += ANALYTICS_BATCH) {
+          if (aborted) break;
+          const batch  = ids.slice(i, i + ANALYTICS_BATCH);
+          const filter = `marketplace_ids:{${marketplaceId}},date_range:[${fromStr}..${toStr}],listing_ids:{${batch.join('|')}}`;
+          try {
+            const analyticsRes = await axios.get(
+              'https://api.ebay.com/sell/analytics/v1/traffic_report',
+              {
+                params: { dimension: 'LISTING', metric: 'LISTING_VIEWS_TOTAL', filter },
+                headers: { Authorization: `Bearer ${accessToken}`, 'X-EBAY-C-MARKETPLACE-ID': marketplaceId },
+              }
+            );
+            for (const rec of (analyticsRes.data?.records || [])) {
+              const id    = rec.dimensionValues?.[0]?.value;
+              const views = rec.metricValues?.[0]?.value ?? 0;
+              if (id) viewsMap.set(String(id), views);
+            }
+          } catch (analyticsErr) {
+            console.warn(`[Expiring Listings] Analytics API error for ${marketplaceId}:`, analyticsErr.response?.data || analyticsErr.message);
+            // Non-fatal: listings in this batch keep hitCount=0 and pass the filter
+          }
+        }
+      }
+
+      // Update hitCount with real analytics value, then apply views filter
+      for (const l of filteredListings) {
+        l.hitCount = viewsMap.get(String(l.itemId)) ?? 0;
+      }
+      const finalListings = filteredListings.filter(l => l.hitCount < maxViews);
+
+      send({ type: 'done', count: finalListings.length, listings: finalListings });
+    } else {
+      send({ type: 'done', count: filteredListings.length, listings: filteredListings });
+    }
 
   } catch (err) {
     console.error('[Expiring Low Activity Listings] Error:', err.message);
