@@ -13,6 +13,20 @@ import AsinDirectory from '../models/AsinDirectory.js';
 
 const router = express.Router();
 
+function buildDirectorySourceData(doc, priceOverride = null) {
+  if (!doc) return null;
+
+  return {
+    title: doc.title || '',
+    brand: doc.brand || '',
+    price: priceOverride ?? doc.price ?? '',
+    description: doc.description || '',
+    images: doc.images || [],
+    color: doc.color || '',
+    compatibility: doc.compatibility || ''
+  };
+}
+
 /**
  * @swagger
  * /template-listings/counts:
@@ -890,27 +904,31 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           const existingListing = asinInCurrentTemplate.get(asin);
           const existingCustomFields = existingListing.customFields || {};
 
-          const asinCountDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
-          const futureSKU = generateSKUWithCount(asin, asinCountDoc?.listingCount || 0);
+          const asinDoc = await AsinDirectory.findOne({ asin }).lean();
+          const futureSKU = generateSKUWithCount(asin, asinDoc?.listingCount || 0);
 
           let sourceData = null;
           let pricingCalculation = null;
           let freshAmazonSourcePrice = null; // set only when Option B runs
+          let duplicateImages = Array.isArray(asinDoc?.images) ? asinDoc.images : [];
 
           // Option A: use stored Amazon price (no fetch needed)
           if (existingListing._amazonSourcePrice) {
             const storedPrice = existingListing._amazonSourcePrice;
             const amazonDataForCalc = { asin, price: storedPrice, title: '', brand: '', description: '', images: [], color: '', compatibility: '' };
-            sourceData = { title: '', brand: '', price: storedPrice, description: '', images: [], color: '', compatibility: '' };
+            sourceData = buildDirectorySourceData(asinDoc, storedPrice) || { title: '', brand: '', price: storedPrice, description: '', images: [], color: '', compatibility: '' };
             const configs = await applyFieldConfigs(amazonDataForCalc, template.asinAutomation.fieldConfigs, pricingConfig);
             pricingCalculation = configs.pricingCalculation;
             console.log(`[duplicate_updateable] Option A: using stored _amazonSourcePrice for ${asin}`);
-          } else {
-            // Option B: _amazonSourcePrice not stored yet — fetch live from Amazon
+          }
+
+          if (!existingListing._amazonSourcePrice || duplicateImages.length === 0) {
+            // Option B: _amazonSourcePrice not stored yet or directory images are unavailable — fetch live from Amazon
             try {
               console.log(`[duplicate_updateable] Option B: fetching live Amazon data for ${asin}`);
               const amazonData = await fetchAmazonData(asin, region);
               if (amazonData) {
+                duplicateImages = Array.isArray(amazonData.images) ? amazonData.images : duplicateImages;
                 sourceData = {
                   title: amazonData.title || '',
                   brand: amazonData.brand || '',
@@ -921,7 +939,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
                   compatibility: amazonData.compatibility || '',
                   productInfo: amazonData.productInfo || null
                 };
-                freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : null;
+                freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : freshAmazonSourcePrice;
                 const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
                 pricingCalculation = configs.pricingCalculation;
               }
@@ -1239,15 +1257,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
           let pricingCalculation = null;
 
           if (doc) {
-            sourceData = {
-              title: doc.title || '',
-              brand: doc.brand || '',
-              price: doc.price || '',
-              description: doc.description || '',
-              images: doc.images || [],
-              color: doc.color || '',
-              compatibility: doc.compatibility || ''
-            };
+            sourceData = buildDirectorySourceData(doc);
             
             const amazonData = {
               asin,
@@ -5998,4 +6008,3 @@ router.post('/cache-invalidate/:asin', requireAuth, async (req, res) => {
 });
 
 export default router;
-
