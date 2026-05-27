@@ -75,6 +75,10 @@ import imageCache from './lib/imageCache.js';
 
 const app = express();
 
+// Trust the first proxy hop (required on Render/Heroku/etc. for express-rate-limit
+// to correctly read the client IP from X-Forwarded-For)
+app.set('trust proxy', 1);
+
 app.use(helmet());
 // CORS: allowed origins are driven by CLIENT_ORIGIN env var (comma-separated) + localhost defaults
 const ALLOWED_ORIGINS = [
