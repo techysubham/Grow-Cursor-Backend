@@ -2410,38 +2410,7 @@ router.get('/orders', requireAuth, async (req, res) => {
     if (!seller.ebayTokens || !seller.ebayTokens.access_token) {
       return res.status(400).json({ error: 'Seller does not have a connected eBay account' });
     }
-    // Check token expiry (expires_in is in seconds, fetchedAt is Date)
-    const now = Date.now();
-    const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-    const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-    // Refresh if less than 2 minutes left
-    let accessToken = seller.ebayTokens.access_token;
-    if (fetchedAt && (now - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-      // Refresh token
-      try {
-        const refreshRes = await axios.post(
-          'https://api.ebay.com/identity/v1/oauth2/token',
-          qs.stringify({
-            grant_type: 'refresh_token',
-            refresh_token: seller.ebayTokens.refresh_token,
-            scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-          }),
-          {
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-            },
-          }
-        );
-        seller.ebayTokens.access_token = refreshRes.data.access_token;
-        seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-        seller.ebayTokens.fetchedAt = new Date();
-        await seller.save();
-        accessToken = refreshRes.data.access_token;
-      } catch (refreshErr) {
-        return res.status(401).json({ error: 'Failed to refresh eBay token', details: refreshErr.message });
-      }
-    }
+    const accessToken = await ensureValidToken(seller);
 
     // Get the last modified date from our database to fetch only new/updated orders
     const orderCount = await Order.countDocuments({ seller: seller._id });
@@ -5213,33 +5182,7 @@ router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), a
       try {
         console.log(`\n[${sellerName}] Checking for new orders...`);
 
-        // Token refresh
-        const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-        const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-        let accessToken = seller.ebayTokens.access_token;
-
-        if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-          console.log(`[${sellerName}] Refreshing token...`);
-          const refreshRes = await axios.post(
-            'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify({
-              grant_type: 'refresh_token',
-              refresh_token: seller.ebayTokens.refresh_token,
-              scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-            }),
-            {
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-              },
-            }
-          );
-          seller.ebayTokens.access_token = refreshRes.data.access_token;
-          seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-          seller.ebayTokens.fetchedAt = new Date(nowUTC);
-          await seller.save();
-          accessToken = refreshRes.data.access_token;
-        }
+        const accessToken = await ensureValidToken(seller);
 
         const orderCount = await Order.countDocuments({ seller: seller._id });
         const latestOrder = await Order.findOne({ seller: seller._id }).sort({ creationDate: -1 });
@@ -5495,33 +5438,7 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
           console.log(`[${sellerName}] Capped to 30-day limit`);
         }
 
-        // Token refresh
-        const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-        const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-        let accessToken = seller.ebayTokens.access_token;
-
-        if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-          console.log(`[${sellerName}] Refreshing token...`);
-          const refreshRes = await axios.post(
-            'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify({
-              grant_type: 'refresh_token',
-              refresh_token: seller.ebayTokens.refresh_token,
-              scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-            }),
-            {
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-              },
-            }
-          );
-          seller.ebayTokens.access_token = refreshRes.data.access_token;
-          seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-          seller.ebayTokens.fetchedAt = new Date(nowUTC);
-          await seller.save();
-          accessToken = refreshRes.data.access_token;
-        }
+        const accessToken = await ensureValidToken(seller);
 
         // ✅ STEP 2: Fetch orders from eBay with lastModifiedDate >= sinceDate
         const toDate = new Date(nowUTC);
@@ -5827,33 +5744,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
       try {
         console.log(`\n[${sellerName}] Starting resync...`);
 
-        // Token refresh
-        const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-        const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-        let accessToken = seller.ebayTokens.access_token;
-
-        if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-          console.log(`[${sellerName}] Refreshing token...`);
-          const refreshRes = await axios.post(
-            'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify({
-              grant_type: 'refresh_token',
-              refresh_token: seller.ebayTokens.refresh_token,
-              scope: EBAY_OAUTH_SCOPES,
-            }),
-            {
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-              },
-            }
-          );
-          seller.ebayTokens.access_token = refreshRes.data.access_token;
-          seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-          seller.ebayTokens.fetchedAt = new Date(nowUTC);
-          await seller.save();
-          accessToken = refreshRes.data.access_token;
-        }
+        const accessToken = await ensureValidToken(seller);
 
         // Fetch all orders created in last 10 days
         const currentTimeUTC = new Date(nowUTC);
@@ -6941,34 +6832,7 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
         const sellerName = seller.user?.username || 'Unknown Seller';
 
         try {
-          // Token refresh logic (Standard)
-          const nowUTC = Date.now();
-          const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-          const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-          let accessToken = seller.ebayTokens.access_token;
-
-          if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-            console.log(`[Fetch Returns] Refreshing token for seller ${sellerName}`);
-            const refreshRes = await axios.post(
-              'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
-              {
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-                },
-              }
-            );
-            accessToken = refreshRes.data.access_token;
-            seller.ebayTokens.access_token = accessToken;
-            seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-            seller.ebayTokens.fetchedAt = new Date(nowUTC);
-            await seller.save();
-          }
+          const accessToken = await ensureValidToken(seller);
 
           // Fetch return requests
           const returnUrl = 'https://api.ebay.com/post-order/v2/return/search';
@@ -7335,34 +7199,7 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
         const sellerName = seller.user?.username || 'Unknown Seller';
 
         try {
-          // Token refresh logic
-          const nowUTC = Date.now();
-          const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-          const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-          let accessToken = seller.ebayTokens.access_token;
-
-          if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-            console.log(`[Fetch INR Cases] Refreshing token for seller ${sellerName}`);
-            const refreshRes = await axios.post(
-              'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
-              {
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-                },
-              }
-            );
-            accessToken = refreshRes.data.access_token;
-            seller.ebayTokens.access_token = accessToken;
-            seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-            seller.ebayTokens.fetchedAt = new Date(nowUTC);
-            await seller.save();
-          }
+          const accessToken = await ensureValidToken(seller);
 
           // Fetch INR cases from Post-Order API
           const inquiryUrl = 'https://api.ebay.com/post-order/v2/inquiry/search';
@@ -7658,34 +7495,7 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
         const sellerName = seller.user?.username || 'Unknown Seller';
 
         try {
-          // Token refresh logic
-          const nowUTC = Date.now();
-          const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-          const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-          let accessToken = seller.ebayTokens.access_token;
-
-          if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-            console.log(`[Fetch Payment Disputes] Refreshing token for seller ${sellerName}`);
-            const refreshRes = await axios.post(
-              'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
-              {
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-                },
-              }
-            );
-            accessToken = refreshRes.data.access_token;
-            seller.ebayTokens.access_token = accessToken;
-            seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-            seller.ebayTokens.fetchedAt = new Date(nowUTC);
-            await seller.save();
-          }
+          const accessToken = await ensureValidToken(seller);
 
           // Fetch Payment Disputes from Fulfillment API
           // Uses Bearer token and the payment_dispute_summary endpoint
@@ -9160,34 +8970,7 @@ router.post('/fetch-messages', requireAuth, requirePageAccess('BuyerMessages'), 
         const sellerName = seller.user?.username || 'Unknown Seller';
 
         try {
-          // Token refresh logic
-          const nowUTC = Date.now();
-          const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-          const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-          let accessToken = seller.ebayTokens.access_token;
-
-          if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-            console.log(`[Fetch Messages] Refreshing token for seller ${sellerName}`);
-            const refreshRes = await axios.post(
-              'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
-              {
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-                },
-              }
-            );
-            accessToken = refreshRes.data.access_token;
-            seller.ebayTokens.access_token = accessToken;
-            seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-            seller.ebayTokens.fetchedAt = new Date(nowUTC);
-            await seller.save();
-          }
+          const accessToken = await ensureValidToken(seller);
 
           // Fetch inquiries
           const inquiryUrl = 'https://api.ebay.com/post-order/v2/inquiry/search';

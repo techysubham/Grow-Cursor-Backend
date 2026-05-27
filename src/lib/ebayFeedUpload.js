@@ -6,48 +6,12 @@
  * Returns the eBay taskId on success, throws on failure.
  */
 import axios from 'axios';
-import qs from 'qs';
 import FormData from 'form-data';
 import Seller from '../models/Seller.js';
 import FeedUpload from '../models/FeedUpload.js';
 import CsvStorage from '../models/CsvStorage.js';
 import SellerUploadLimit from '../models/SellerUploadLimit.js';
-
-const EBAY_OAUTH_SCOPES = 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.marketing https://api.ebay.com/oauth/api_scope/sell.analytics.readonly';
-
-async function ensureValidToken(seller) {
-    const now = Date.now();
-    const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-    const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-    const bufferTime = 2 * 60 * 1000;
-
-    if (fetchedAt && (now - fetchedAt < expiresInMs - bufferTime)) {
-        return seller.ebayTokens.access_token;
-    }
-
-    const refreshRes = await axios.post(
-        'https://api.ebay.com/identity/v1/oauth2/token',
-        qs.stringify({
-            grant_type: 'refresh_token',
-            refresh_token: seller.ebayTokens.refresh_token,
-            scope: EBAY_OAUTH_SCOPES
-        }),
-        {
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-            },
-            timeout: 10000
-        }
-    );
-
-    seller.ebayTokens.access_token = refreshRes.data.access_token;
-    seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-    seller.ebayTokens.fetchedAt = new Date();
-    await seller.save();
-
-    return refreshRes.data.access_token;
-}
+import { ensureValidToken } from '../routes/ebay.js';
 
 /**
  * Returns the start of the current IST day as a UTC Date.
