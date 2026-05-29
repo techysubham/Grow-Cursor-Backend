@@ -1,3 +1,4 @@
+import './instrument.js'; // Sentry — must be first import
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -72,6 +73,7 @@ import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
 import imageCache from './lib/imageCache.js';
+import * as Sentry from '@sentry/node';
 
 const app = express();
 
@@ -212,6 +214,11 @@ app.use('/api/affiliate-orders', affiliateOrdersRoutes);
 app.use('/api/listing-stats', listingStatsRoutes);
 app.use('/api/item-category-map', itemCategoryMapRoutes);
 app.use('/api/end-listing-logs', endListingLogsRoutes);
+
+// ── Sentry error handler ─────────────────────────────────────────────────────
+// Must be registered AFTER all routes but BEFORE the custom error handler.
+// Captures exceptions and forwards them to Sentry before we format the response.
+Sentry.setupExpressErrorHandler(app);
 
 // ── Global error handler ─────────────────────────────────────────────────────
 // Must be registered AFTER all routes. Catches any error passed via next(err)
