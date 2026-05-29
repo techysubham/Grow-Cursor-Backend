@@ -74,6 +74,7 @@ import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
 import imageCache from './lib/imageCache.js';
 import * as Sentry from '@sentry/node';
+import logger from './lib/logger.js';
 
 const app = express();
 
@@ -103,7 +104,13 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10mb' })); // Increased limit for bulk operations
 app.use(mongoSanitize()); // Sanitize user input to prevent NoSQL injection (strips $ and . from req.body/query/params)
-app.use(morgan('dev'));
+// Structured HTTP request logging — replaces morgan
+app.use(
+  morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev', {
+    stream: { write: (msg) => logger.http(msg.trim()) },
+    skip: (req) => req.path === '/health', // suppress noisy health-check logs
+  })
+);
 
 // Serve static uploads — browser-cacheable for 1 day (ETag enables conditional revalidation)
 app.use('/uploads', express.static(path.join(process.cwd(), 'public/uploads'), {
@@ -231,7 +238,7 @@ app.use((err, req, res, _next) => {
   const status = err.status || err.statusCode || 500;
   const message = err.message || 'Internal server error';
   if (status >= 500) {
-    console.error(`[${req.method}] ${req.path}`, err);
+    logger.error(`[${req.method}] ${req.path}`, { error: err.message, stack: err.stack });
   }
   return res.status(status).json({ error: message });
 });
@@ -250,7 +257,7 @@ connectToDatabase()
     try {
       await User.collection.createIndex({ email: 1 }, { unique: true, sparse: true });
     } catch (e) {
-      console.error('Failed to create sparse unique index on email:', e?.message || e);
+      logger.error('Failed to create sparse unique index on email:', { error: e?.message || e });
     }
 
     // Initialize scheduled jobs (e.g., daily timer auto-stop)
@@ -260,21 +267,21 @@ connectToDatabase()
     imageCache.startAutoCleanup();
 
     app.listen(port, () => {
-      console.log(`API listening on :${port}`);
+      logger.info(`API listening on :${port}`);
 
       // Resume any auto-compat batches that were left 'running' due to a previous server crash/restart
       resumeRunningAutoCompatibilityBatches()
         .then((resumedBatchCount) => {
           if (resumedBatchCount > 0) {
-            console.log(`[AutoCompat] Resumed ${resumedBatchCount} running batch(es) after server restart`);
+            logger.info(`[AutoCompat] Resumed ${resumedBatchCount} running batch(es) after server restart`);
           }
         })
         .catch((e) => {
-          console.error('[AutoCompat] Failed to resume running batches:', e.message);
+          logger.error('[AutoCompat] Failed to resume running batches:', { error: e.message });
         });
     });
   })
   .catch((err) => {
-    console.error('Failed to start server', err);
+    logger.error('Failed to start server', { error: err.message, stack: err.stack });
     process.exit(1);
   });
