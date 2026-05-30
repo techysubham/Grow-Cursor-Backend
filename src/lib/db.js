@@ -1,30 +1,37 @@
 import mongoose from 'mongoose';
 
+const DEFAULT_MAX_POOL_SIZE = 5;
+const DEFAULT_MIN_POOL_SIZE = 1;
+
+function readPoolSizeEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
 const CONNECTION_OPTIONS = {
   autoIndex: true,
-  maxPoolSize: 10,
-  minPoolSize: 2,
+  maxPoolSize: readPoolSizeEnv('MONGO_MAX_POOL_SIZE', DEFAULT_MAX_POOL_SIZE),
+  minPoolSize: readPoolSizeEnv('MONGO_MIN_POOL_SIZE', DEFAULT_MIN_POOL_SIZE),
   serverSelectionTimeoutMS: 5000,
   heartbeatFrequencyMS: 10000,
   socketTimeoutMS: 45000,
 };
 
-const MAX_RETRIES = 5;
-const RETRY_DELAY_MS = 3000;
-
-let retryCount = 0;
+let connectionPromise = null;
+let eventsRegistered = false;
 
 function registerConnectionEvents() {
+  if (eventsRegistered) return;
+  eventsRegistered = true;
+
   const conn = mongoose.connection;
 
   conn.on('connected', () => {
-    retryCount = 0;
     console.log('[DB] MongoDB connected');
   });
 
   conn.on('disconnected', () => {
-    console.warn('[DB] MongoDB disconnected — attempting reconnect...');
-    scheduleReconnect();
+    console.warn('[DB] MongoDB disconnected. The MongoDB driver will retry automatically.');
   });
 
   conn.on('error', (err) => {
@@ -32,29 +39,27 @@ function registerConnectionEvents() {
   });
 }
 
-function scheduleReconnect() {
-  if (retryCount >= MAX_RETRIES) {
-    console.error(`[DB] Max reconnect attempts (${MAX_RETRIES}) reached. Giving up.`);
-    return;
-  }
-  retryCount += 1;
-  const delay = RETRY_DELAY_MS * retryCount;
-  console.warn(`[DB] Reconnect attempt ${retryCount}/${MAX_RETRIES} in ${delay}ms...`);
-  setTimeout(async () => {
-    try {
-      await mongoose.connect(process.env.MONGODB_URI, CONNECTION_OPTIONS);
-    } catch (err) {
-      console.error('[DB] Reconnect failed:', err.message);
-    }
-  }, delay);
-}
-
 export async function connectToDatabase() {
   const uri = process.env.MONGODB_URI;
   if (!uri) throw new Error('MONGODB_URI is not set');
+
   registerConnectionEvents();
-  await mongoose.connect(uri, CONNECTION_OPTIONS);
+
+  if (mongoose.connection.readyState === 1) {
+    return mongoose.connection;
+  }
+
+  if (connectionPromise) {
+    await connectionPromise;
+    return mongoose.connection;
+  }
+
+  connectionPromise = mongoose.connect(uri, CONNECTION_OPTIONS)
+    .catch((err) => {
+      connectionPromise = null;
+      throw err;
+    });
+
+  await connectionPromise;
   return mongoose.connection;
 }
-
-
