@@ -1895,6 +1895,16 @@ const ORDER_REFRESH_MANUAL_FIELDS = new Set([
   '_id', '__v', 'createdAt', 'updatedAt'
 ]);
 
+const ORDER_REFRESH_CALCULATED_FIELDS = new Set([
+  'orderEarnings',
+  'tds',
+  'tid',
+  'net',
+  'pBalanceINR',
+  'ebayExchangeRate',
+  'profit'
+]);
+
 function getMarketplaceForFinancials(purchaseMarketplaceId) {
   if (purchaseMarketplaceId === 'EBAY_ENCA') return 'EBAY_CA';
   if (purchaseMarketplaceId === 'EBAY_AU') return 'EBAY_AU';
@@ -1907,24 +1917,55 @@ function normalizeOrderRefreshDate(date) {
   return Number.isNaN(time) ? null : Math.floor(time / 1000);
 }
 
+function normalizeOrderRefreshValue(value) {
+  if (value === undefined) return null;
+  if (value === null) return null;
+  if (value instanceof Date) return normalizeOrderRefreshDate(value);
+  if (value instanceof mongoose.Types.ObjectId) return value.toString();
+  if (value && typeof value.toObject === 'function') return normalizeOrderRefreshValue(value.toObject());
+  if (value && typeof value.toString === 'function' && ['ObjectID', 'ObjectId'].includes(value._bsontype)) {
+    return value.toString();
+  }
+  if (Array.isArray(value)) return value.map(normalizeOrderRefreshValue);
+  if (typeof value === 'object') {
+    return Object.keys(value)
+      .filter(key => key !== '_id')
+      .sort()
+      .reduce((acc, key) => {
+        acc[key] = normalizeOrderRefreshValue(value[key]);
+        return acc;
+      }, {});
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? parseFloat(value.toFixed(4)) : null;
+  }
+  return value;
+}
+
+function orderRefreshValuesEqual(oldValue, newValue, fieldName) {
+  const dateFields = ['creationDate', 'lastModifiedDate', 'dateSold', 'shipByDate', 'estimatedDelivery'];
+  if (dateFields.includes(fieldName)) {
+    return normalizeOrderRefreshDate(oldValue) === normalizeOrderRefreshDate(newValue);
+  }
+
+  const normalizedOld = normalizeOrderRefreshValue(oldValue);
+  const normalizedNew = normalizeOrderRefreshValue(newValue);
+  return JSON.stringify(normalizedOld) === JSON.stringify(normalizedNew);
+}
+
+function getOrderRefreshChangeDetail(oldValue, newValue, fieldName) {
+  return {
+    field: fieldName,
+    oldValue: normalizeOrderRefreshValue(oldValue),
+    newValue: normalizeOrderRefreshValue(newValue)
+  };
+}
+
 function hasOrderRefreshFieldChanged(oldValue, newValue, fieldName) {
   const systemFields = ['_id', '__v', 'seller', 'updatedAt', 'createdAt'];
   if (systemFields.includes(fieldName)) return false;
 
-  const dateFields = ['creationDate', 'lastModifiedDate', 'dateSold', 'shipByDate', 'estimatedDelivery'];
-  if (dateFields.includes(fieldName)) {
-    return normalizeOrderRefreshDate(oldValue) !== normalizeOrderRefreshDate(newValue);
-  }
-
-  if (oldValue === null || oldValue === undefined) {
-    return newValue !== null && newValue !== undefined;
-  }
-
-  if (typeof newValue === 'object' && newValue !== null) {
-    return JSON.stringify(oldValue) !== JSON.stringify(newValue);
-  }
-
-  return oldValue !== newValue;
+  return !orderRefreshValuesEqual(oldValue, newValue, fieldName);
 }
 
 function calculateStoredOrderTotal(orderLike = {}) {
@@ -1937,6 +1978,16 @@ function calculateStoredOrderTotal(orderLike = {}) {
 }
 
 async function applyOrderFinancialRefresh(order) {
+  const beforeFinancials = {
+    orderTotal: order.orderTotal,
+    orderEarnings: order.orderEarnings,
+    tds: order.tds,
+    tid: order.tid,
+    net: order.net,
+    pBalanceINR: order.pBalanceINR,
+    ebayExchangeRate: order.ebayExchangeRate,
+    profit: order.profit
+  };
   const paymentStatus = order.orderPaymentStatus;
   const marketplace = getMarketplaceForFinancials(order.purchaseMarketplaceId);
 
@@ -1947,7 +1998,7 @@ async function applyOrderFinancialRefresh(order) {
 
   if (paymentStatus === 'FULLY_REFUNDED' || paymentStatus === 'PARTIALLY_REFUNDED') {
     order.orderEarnings = 0;
-  } else if (paymentStatus === 'PAID' && Number(order.adFeeGeneral || 0) > 0) {
+  } else if (paymentStatus === 'PAID') {
     const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
     order.orderEarnings = parseFloat((totalDueSeller - Number(order.adFeeGeneral || 0)).toFixed(2));
   }
@@ -1967,40 +2018,72 @@ async function applyOrderFinancialRefresh(order) {
     order.ebayExchangeRate = financials.ebayExchangeRate;
     order.profit = financials.profit;
   }
+
+  return Object.keys(beforeFinancials).filter(field =>
+    !orderRefreshValuesEqual(beforeFinancials[field], order[field], field)
+  );
 }
 
-async function fetchMissingAdFeeAndRefreshFinancials(order, accessToken) {
-  if (order.adFeeGeneral && order.adFeeGeneral !== 0) {
-    await applyOrderFinancialRefresh(order);
-    return false;
+async function refreshAdFeeAndFinancials(order, accessToken, adFeeMap = null) {
+  const changedFields = [];
+  const changeDetails = [];
+  const adFeeResult = await fetchOrderAdFee(accessToken, order.orderId, adFeeMap);
+
+  if (adFeeResult.success) {
+    const freshAdFee = parseFloat((Number(adFeeResult.adFeeGeneral || 0)).toFixed(2));
+    const freshAdFeeUSD = parseFloat((freshAdFee * (order.conversionRate || 1)).toFixed(2));
+
+    if (!orderRefreshValuesEqual(order.adFeeGeneral, freshAdFee, 'adFeeGeneral')) {
+      changeDetails.push(getOrderRefreshChangeDetail(order.adFeeGeneral, freshAdFee, 'adFeeGeneral'));
+      order.adFeeGeneral = freshAdFee;
+      changedFields.push('adFeeGeneral');
+    }
+
+    if (!orderRefreshValuesEqual(order.adFeeGeneralUSD, freshAdFeeUSD, 'adFeeGeneralUSD')) {
+      changeDetails.push(getOrderRefreshChangeDetail(order.adFeeGeneralUSD, freshAdFeeUSD, 'adFeeGeneralUSD'));
+      order.adFeeGeneralUSD = freshAdFeeUSD;
+      changedFields.push('adFeeGeneralUSD');
+    }
   }
 
-  const adFeeResult = await fetchOrderAdFee(accessToken, order.orderId);
-  if (!adFeeResult.success || !(adFeeResult.adFeeGeneral > 0)) {
-    await applyOrderFinancialRefresh(order);
-    return false;
+  const financialChangedFields = await applyOrderFinancialRefresh(order);
+  for (const field of financialChangedFields) {
+    if (!changedFields.includes(field)) {
+      changedFields.push(field);
+      changeDetails.push({ field, oldValue: undefined, newValue: normalizeOrderRefreshValue(order[field]) });
+    }
   }
 
-  order.adFeeGeneral = adFeeResult.adFeeGeneral;
-  order.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (order.conversionRate || 1)).toFixed(2));
-  await applyOrderFinancialRefresh(order);
-  return true;
+  return {
+    success: adFeeResult.success,
+    error: adFeeResult.error,
+    changedFields,
+    changeDetails
+  };
 }
 
 async function applyFreshEbayOrderData(existingOrder, orderData) {
   const changedFields = [];
+  const changeDetails = [];
 
   for (const [key, value] of Object.entries(orderData)) {
     if (key === 'orderTotal' && !Number.isFinite(parseFloat(value))) continue;
-    if (ORDER_REFRESH_MANUAL_FIELDS.has(key) || key === 'seller') continue;
+    if (ORDER_REFRESH_MANUAL_FIELDS.has(key) || ORDER_REFRESH_CALCULATED_FIELDS.has(key) || key === 'seller') continue;
     if (hasOrderRefreshFieldChanged(existingOrder[key], value, key)) {
+      changeDetails.push(getOrderRefreshChangeDetail(existingOrder[key], value, key));
       existingOrder[key] = value;
       changedFields.push(key);
     }
   }
 
-  await applyOrderFinancialRefresh(existingOrder);
-  return changedFields;
+  const financialChangedFields = await applyOrderFinancialRefresh(existingOrder);
+  for (const field of financialChangedFields) {
+    if (!changedFields.includes(field)) {
+      changedFields.push(field);
+      changeDetails.push({ field, oldValue: undefined, newValue: normalizeOrderRefreshValue(existingOrder[field]) });
+    }
+  }
+  return { changedFields, changeDetails };
 }
 
 
@@ -6110,7 +6193,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
   }
 });
 
-// Refresh existing DB orders from eBay by UTC creation date range.
+// Refresh existing DB orders from eBay by Pacific Time creation date range.
 // This catches silent cancel/refund updates that may not move lastModifiedDate.
 router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
@@ -6121,16 +6204,16 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
       return res.status(400).json({ error: 'startDate and endDate are required in YYYY-MM-DD format' });
     }
 
-    const startUTC = new Date(`${startDate}T00:00:00.000Z`);
-    const endUTC = new Date(`${endDate}T23:59:59.999Z`);
+    const { start: startUTC } = getPTDayBoundsUTC(startDate);
+    const { end: endUTC } = getPTDayBoundsUTC(endDate);
 
     if (Number.isNaN(startUTC.getTime()) || Number.isNaN(endUTC.getTime()) || startUTC > endUTC) {
-      return res.status(400).json({ error: 'Invalid UTC date range' });
+      return res.status(400).json({ error: 'Invalid Pacific Time date range' });
     }
 
     const rangeDays = Math.floor((endUTC.getTime() - startUTC.getTime()) / 86400000) + 1;
     if (rangeDays > 90) {
-      return res.status(400).json({ error: 'Date range cannot exceed 90 UTC days' });
+      return res.status(400).json({ error: 'Date range cannot exceed 90 Pacific Time days' });
     }
 
     const sellerQuery = { 'ebayTokens.access_token': { $exists: true, $ne: null } };
@@ -6154,7 +6237,7 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
     }
 
     const filter = `creationdate:[${startUTC.toISOString()}..${endUTC.toISOString()}]`;
-    console.log(`\n========== UTC ORDER REFRESH ${filter} FOR ${sellers.length} SELLER(S) ==========`);
+    console.log(`\n========== PT ORDER REFRESH ${filter} FOR ${sellers.length} SELLER(S) ==========`);
 
     const refreshPromises = sellers.map(async (seller) => {
       const sellerName = seller.user?.username || seller.user?.email || seller._id.toString();
@@ -6162,8 +6245,16 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
       try {
         const accessToken = await ensureValidToken(seller);
         const ebayOrders = await fetchAllOrdersWithPagination(accessToken, filter, sellerName);
+        const adFeeFetchResult = await fetchAllAdFees(accessToken);
+        const adFeeMap = adFeeFetchResult.success ? adFeeFetchResult.adFeeMap : null;
+        if (!adFeeFetchResult.success) {
+          console.log(`  ⚠️ PT refresh ad fee map failed for ${sellerName}: ${adFeeFetchResult.error}`);
+        }
         const updatedOrders = [];
         const ignoredNewOrders = [];
+        const changedFieldCounts = {};
+        const changeSamples = [];
+        let existingMatchedOrders = 0;
 
         for (const ebayOrder of ebayOrders) {
           const existingOrder = await Order.findOne({
@@ -6176,35 +6267,40 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
             continue;
           }
 
+          existingMatchedOrders += 1;
+
           const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
-          const changedFields = await applyFreshEbayOrderData(existingOrder, orderData);
-          let adFeeChanged = false;
+          const { changedFields, changeDetails } = await applyFreshEbayOrderData(existingOrder, orderData);
 
           try {
-            adFeeChanged = await fetchMissingAdFeeAndRefreshFinancials(existingOrder, accessToken);
+            const adFeeRefresh = await refreshAdFeeAndFinancials(existingOrder, accessToken, adFeeMap);
+            for (const field of adFeeRefresh.changedFields) {
+              if (!changedFields.includes(field)) changedFields.push(field);
+            }
+            changeDetails.push(...adFeeRefresh.changeDetails);
+            if (!adFeeRefresh.success) {
+              console.log(`  ⚠️ PT refresh ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeRefresh.error}`);
+            }
           } catch (adFeeErr) {
-            console.log(`  ⚠️ UTC refresh ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
+            console.log(`  ⚠️ PT refresh ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
           }
 
-          if (adFeeChanged && !changedFields.includes('adFeeGeneral')) {
-            changedFields.push('adFeeGeneral');
-          }
-
-          if (
-            changedFields.length > 0 ||
-            existingOrder.isModified('orderEarnings') ||
-            existingOrder.isModified('tds') ||
-            existingOrder.isModified('tid') ||
-            existingOrder.isModified('net') ||
-            existingOrder.isModified('pBalanceINR') ||
-            existingOrder.isModified('profit')
-          ) {
+          if (changedFields.length > 0) {
+            for (const field of changedFields) {
+              changedFieldCounts[field] = (changedFieldCounts[field] || 0) + 1;
+            }
+            if (changeSamples.length < 10) {
+              changeSamples.push({
+                orderId: existingOrder.orderId,
+                details: changeDetails.slice(0, 5)
+              });
+            }
             await existingOrder.save();
             updatedOrders.push({
               orderId: existingOrder.orderId,
-              changedFields: changedFields.length > 0 ? changedFields : ['financials']
+              changedFields
             });
-            console.log(`  🔄 UTC REFRESHED: ${existingOrder.orderId} - ${updatedOrders[updatedOrders.length - 1].changedFields.join(', ')}`);
+            console.log(`  🔄 PT REFRESHED: ${existingOrder.orderId} - ${updatedOrders[updatedOrders.length - 1].changedFields.join(', ')}`);
           }
         }
 
@@ -6213,13 +6309,16 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
           sellerName,
           success: true,
           totalFetched: ebayOrders.length,
+          totalExistingMatched: existingMatchedOrders,
           updatedOrders,
           ignoredNewOrders,
+          changedFieldCounts,
+          changeSamples,
           totalUpdated: updatedOrders.length,
           totalIgnoredNew: ignoredNewOrders.length
         };
       } catch (sellerErr) {
-        console.error(`[${sellerName}] UTC refresh error:`, sellerErr.message);
+        console.error(`[${sellerName}] PT refresh error:`, sellerErr.message);
         return {
           sellerId: seller._id,
           sellerName,
@@ -6235,18 +6334,29 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
     );
 
     const totalFetched = pollResults.reduce((sum, r) => sum + (r.totalFetched || 0), 0);
+    const totalExistingMatched = pollResults.reduce((sum, r) => sum + (r.totalExistingMatched || 0), 0);
     const totalUpdated = pollResults.reduce((sum, r) => sum + (r.totalUpdated || 0), 0);
     const totalIgnoredNew = pollResults.reduce((sum, r) => sum + (r.totalIgnoredNew || 0), 0);
+    const changedFieldCounts = pollResults.reduce((acc, r) => {
+      for (const [field, count] of Object.entries(r.changedFieldCounts || {})) {
+        acc[field] = (acc[field] || 0) + count;
+      }
+      return acc;
+    }, {});
+    const changeSamples = pollResults.flatMap(r => r.changeSamples || []).slice(0, 10);
 
     res.json({
-      message: 'UTC order refresh complete',
+      message: 'Pacific Time order refresh complete',
       startDate,
       endDate,
       pollResults,
       totalPolled: sellers.length,
       totalFetched,
+      totalExistingMatched,
       totalUpdated,
-      totalIgnoredNew
+      totalIgnoredNew,
+      changedFieldCounts,
+      changeSamples
     });
   } catch (err) {
     console.error('Error in UTC order refresh:', err);
