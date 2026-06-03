@@ -15111,12 +15111,13 @@ router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadSta
       }
     }
 
-    // Aggregate by category
+    // Aggregate by category. Keep uploads that have not been assigned a
+    // category yet so the breakdown total still matches the successful count.
     const categoryRows = await FeedUpload.aggregate([
-      { $match: { ...matchStage, categoryId: { $exists: true, $ne: null } } },
+      { $match: matchStage },
       {
         $group: {
-          _id: '$categoryId',
+          _id: { $ifNull: ['$categoryId', null] },
           totalSuccess: { $sum: '$uploadSummary.successCount' },
           taskCount: { $sum: 1 }
         }
@@ -15133,13 +15134,16 @@ router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadSta
       { $sort: { totalSuccess: -1 } }
     ]);
 
-    // Aggregate by range
+    // Aggregate by range. Missing ranges are also kept as "Unassigned" so a
+    // selected seller/marketplace/date can still show a meaningful aggregate.
     const rangeRows = await FeedUpload.aggregate([
-      { $match: { ...matchStage, rangeId: { $exists: true, $ne: null } } },
+      { $match: matchStage },
       {
         $group: {
-          _id: '$rangeId',
-          categoryId: { $first: '$categoryId' },
+          _id: {
+            rangeId: { $ifNull: ['$rangeId', null] },
+            categoryId: { $ifNull: ['$categoryId', null] }
+          },
           totalSuccess: { $sum: '$uploadSummary.successCount' },
           taskCount: { $sum: 1 }
         }
@@ -15147,7 +15151,7 @@ router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadSta
       {
         $lookup: {
           from: 'asinlistranges',
-          localField: '_id',
+          localField: '_id.rangeId',
           foreignField: '_id',
           as: 'rangeDoc'
         }
@@ -15156,7 +15160,7 @@ router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadSta
       {
         $lookup: {
           from: 'asinlistcategories',
-          localField: 'categoryId',
+          localField: '_id.categoryId',
           foreignField: '_id',
           as: 'categoryDoc'
         }
@@ -15168,14 +15172,15 @@ router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadSta
     res.json({
       categories: categoryRows.map(r => ({
         categoryId: r._id,
-        name: r.categoryDoc?.name || 'Unknown',
+        name: r.categoryDoc?.name || 'Unassigned',
         totalSuccess: r.totalSuccess,
         taskCount: r.taskCount
       })),
       ranges: rangeRows.map(r => ({
-        rangeId: r._id,
-        name: r.rangeDoc?.name || 'Unknown',
-        categoryName: r.categoryDoc?.name || '',
+        rangeId: r._id.rangeId,
+        categoryId: r._id.categoryId,
+        name: r.rangeDoc?.name || 'Unassigned',
+        categoryName: r.categoryDoc?.name || 'Unassigned',
         totalSuccess: r.totalSuccess,
         taskCount: r.taskCount
       }))
