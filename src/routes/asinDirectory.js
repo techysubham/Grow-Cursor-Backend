@@ -3,6 +3,13 @@ import mongoose from 'mongoose';
 import AsinDirectory from '../models/AsinDirectory.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import { requireAuth, requireAuthSSE } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import {
+  bulkAddAsinsSchema,
+  csvImportAsinsSchema,
+  updateAsinSchema,
+  bulkDeleteAsinsSchema,
+} from '../schemas/index.js';
 import { fetchAmazonData } from '../utils/asinAutofill.js';
 import { parsePagination } from '../utils/paginate.js';
 
@@ -451,13 +458,9 @@ router.get('/bulk-manual-stream', requireAuthSSE, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-router.post('/bulk-manual', requireAuth, async (req, res) => {
+router.post('/bulk-manual', requireAuth, validate(bulkAddAsinsSchema), async (req, res) => {
   try {
     const { asins, region = 'US' } = req.body;
-
-    if (!asins || !Array.isArray(asins)) {
-      return res.status(400).json({ error: 'ASINs array is required' });
-    }
 
     const results = {
       added: 0,
@@ -569,13 +572,9 @@ router.post('/bulk-manual', requireAuth, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-router.post('/bulk-csv', requireAuth, async (req, res) => {
+router.post('/bulk-csv', requireAuth, validate(csvImportAsinsSchema), async (req, res) => {
   try {
     const { csvData, region = 'US' } = req.body;
-
-    if (!csvData) {
-      return res.status(400).json({ error: 'CSV data is required' });
-    }
 
     const results = {
       added: 0,
@@ -779,7 +778,7 @@ router.get('/export-csv', requireAuth, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-router.patch('/:id', requireAuth, async (req, res) => {
+router.patch('/:id', requireAuth, validate(updateAsinSchema), async (req, res) => {
   try {
     const { id } = req.params;
     const { price, description } = req.body;
@@ -861,13 +860,9 @@ router.delete('/:id', requireAuth, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-router.post('/bulk-delete', requireAuth, async (req, res) => {
+router.post('/bulk-delete', requireAuth, validate(bulkDeleteAsinsSchema), async (req, res) => {
   try {
     const { ids } = req.body;
-
-    if (!ids || !Array.isArray(ids)) {
-      return res.status(400).json({ error: 'IDs array is required' });
-    }
 
     const result = await AsinDirectory.deleteMany({ _id: { $in: ids } });
 

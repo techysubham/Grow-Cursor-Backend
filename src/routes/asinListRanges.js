@@ -4,6 +4,8 @@ import AsinListProduct from '../models/AsinListProduct.js';
 import AsinDirectory from '../models/AsinDirectory.js';
 import AsinListCategory from '../models/AsinListCategory.js';
 import { requireAuth } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createAsinListRangeSchema, renameAsinListRangeSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -98,17 +100,11 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Create a new range under a category
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, validate(createAsinListRangeSchema), async (req, res) => {
   try {
     const { name, categoryId } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Range name is required' });
-    }
-    if (!categoryId) {
-      return res.status(400).json({ error: 'categoryId is required' });
-    }
 
-    const range = await AsinListRange.create({ name: name.trim(), categoryId });
+    const range = await AsinListRange.create({ name, categoryId });
     res.status(201).json(range);
   } catch (error) {
     if (error.code === 11000) {
@@ -179,16 +175,13 @@ router.post('/', requireAuth, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-router.put('/:id', requireAuth, async (req, res) => {
+router.put('/:id', requireAuth, validate(renameAsinListRangeSchema), async (req, res) => {
   try {
     const { id } = req.params;
     const { name } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Range name is required' });
-    }
     const range = await AsinListRange.findByIdAndUpdate(
       id,
-      { name: name.trim() },
+      { name },
       { new: true, runValidators: true }
     );
     if (!range) return res.status(404).json({ error: 'Range not found' });

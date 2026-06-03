@@ -255,3 +255,97 @@ const remarkTemplateItemSchema = z.object({
 export const updateRemarkTemplatesSchema = z.object({
   templates: z.array(remarkTemplateItemSchema).min(1, 'templates must be a non-empty array'),
 });
+
+// ── Credit card names ─────────────────────────────────────────────────────────
+
+export const creditCardNameSchema = z.object({
+  name: z.string().trim().min(1, 'Card name is required'),
+});
+
+// ── Resolution options ────────────────────────────────────────────────────────
+
+export const resolutionOptionSchema = z.object({
+  name: z.string().trim().min(1, 'Resolution option name is required'),
+});
+
+// ── Seller upload limits ──────────────────────────────────────────────────────
+
+const UPLOAD_LIMIT_COUNTRIES = ['US', 'UK', 'AU', 'Canada'];
+
+export const sellerUploadLimitSchema = z.object({
+  sellerId: z.string().min(1, 'sellerId is required'),
+  country: z.enum(UPLOAD_LIMIT_COUNTRIES, {
+    errorMap: () => ({ message: 'country must be one of: US, UK, AU, Canada' }),
+  }),
+  limit: z.coerce.number().int().min(1, 'limit must be a positive integer'),
+});
+
+export const sellerUploadLimitCheckQuerySchema = z.object({
+  sellerId: z.string().min(1, 'sellerId is required'),
+  country: z.enum(UPLOAD_LIMIT_COUNTRIES, {
+    errorMap: () => ({ message: 'country must be one of: US, UK, AU, Canada' }),
+  }),
+});
+
+// ── ASIN list categories ──────────────────────────────────────────────────────
+
+export const createAsinListCategorySchema = z.object({
+  name: z.string().trim().min(1, 'Category name is required'),
+});
+
+// ── ASIN list ranges ──────────────────────────────────────────────────────────
+
+export const createAsinListRangeSchema = z.object({
+  name: z.string().trim().min(1, 'Range name is required'),
+  categoryId: z.string().min(1, 'categoryId is required'),
+});
+
+export const renameAsinListRangeSchema = z.object({
+  name: z.string().trim().min(1, 'Range name is required'),
+});
+
+// ── ASIN list products ────────────────────────────────────────────────────────
+
+export const createAsinListProductSchema = z.object({
+  name: z.string().trim().min(1, 'Product name is required'),
+  rangeId: z.string().min(1, 'rangeId is required'),
+  categoryId: z.string().min(1, 'categoryId is required'),
+});
+
+export const renameAsinListProductSchema = z.object({
+  name: z.string().trim().min(1, 'Product name is required'),
+});
+
+export const moveAsinsSchema = z.object({
+  asinIds: z.array(z.string()).min(1, 'asinIds must be a non-empty array'),
+  productId: z.string().min(1, 'productId is required'),
+});
+
+export const copyProductsToRangeSchema = z.object({
+  productIds: z.array(z.string()).min(1, 'productIds must be a non-empty array'),
+  targetRangeId: z.string().optional(),
+  targetRangeIds: z.array(z.string()).optional(),
+});
+
+// ── ASIN directory ────────────────────────────────────────────────────────────
+
+const ASIN_REGIONS = ['US', 'UK', 'AU', 'CA', 'DE', 'FR', 'IT', 'ES', 'MX', 'IN'];
+
+export const bulkAddAsinsSchema = z.object({
+  asins: z.array(z.string()).min(1, 'asins must be a non-empty array'),
+  region: z.string().optional().default('US'),
+});
+
+export const csvImportAsinsSchema = z.object({
+  csvData: z.string().min(1, 'csvData is required'),
+  region: z.string().optional().default('US'),
+});
+
+export const updateAsinSchema = z.object({
+  price: z.coerce.number().optional(),
+  description: z.string().optional(),
+});
+
+export const bulkDeleteAsinsSchema = z.object({
+  ids: z.array(z.string()).min(1, 'ids must be a non-empty array'),
+});
