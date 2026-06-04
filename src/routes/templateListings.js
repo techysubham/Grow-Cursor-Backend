@@ -27,6 +27,34 @@ function buildDirectorySourceData(doc, priceOverride = null) {
   };
 }
 
+function buildAmazonSourceData(amazonData) {
+  return {
+    title: amazonData.title,
+    brand: amazonData.brand,
+    price: amazonData.price,
+    description: amazonData.description,
+    images: amazonData.images,
+    color: amazonData.color,
+    compatibility: amazonData.compatibility,
+    productInfo: amazonData.productInfo || null
+  };
+}
+
+async function runWithConcurrency(items, concurrency, worker) {
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: limit }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      await worker(items[currentIndex], currentIndex);
+    }
+  });
+
+  await Promise.allSettled(workers);
+}
+
 /**
  * @swagger
  * /template-listings/counts:
@@ -816,11 +844,31 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no' // Disable nginx buffering
     });
+
+    let streamClosed = false;
+    const sendSse = (payload) => {
+      if (streamClosed) return;
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      if (typeof res.flush === 'function') res.flush();
+    };
+    const sendDone = () => {
+      if (streamClosed) return;
+      res.write('data: [DONE]\n\n');
+      if (typeof res.flush === 'function') res.flush();
+    };
+    const heartbeat = setInterval(() => {
+      sendSse({ type: 'ping', timestamp: Date.now() });
+    }, 15000);
+    req.on('close', () => {
+      streamClosed = true;
+      clearInterval(heartbeat);
+    });
     
     console.log(`📡 [SSE Stream] Starting for ${asins.length} ASINs...`);
     
     // Send initial event
-    res.write(`data: ${JSON.stringify({ type: 'started', total: asins.length })}\n\n`);
+    const streamConcurrency = parseInt(process.env.BULK_PREVIEW_CONCURRENCY, 10) || 15;
+    sendSse({ type: 'started', total: asins.length, concurrency: Math.min(streamConcurrency, asins.length) });
     
     // Validate seller and template
     const [seller, template] = await Promise.all([
@@ -829,8 +877,9 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
     ]);
     
     if (!seller || !template) {
-      res.write(`data: ${JSON.stringify({ type: 'error', error: 'Seller or template not found' })}\n\n`);
-      res.write('data: [DONE]\n\n');
+      sendSse({ type: 'error', error: 'Seller or template not found' });
+      sendDone();
+      clearInterval(heartbeat);
       return res.end();
     }
     
@@ -887,11 +936,18 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
       }])
     );
     
-    // Process ASINs in parallel and stream results as they complete
+    // Process ASINs with controlled concurrency and stream results as they complete.
     let completed = 0;
     
-    const processPromises = asins.map(async (asin) => {
+    await runWithConcurrency(asins, streamConcurrency, async (asin) => {
       try {
+        sendSse({
+          type: 'item_started',
+          asin,
+          id: `preview-${asin}`,
+          progressStage: 'fetching'
+        });
+
         // If ASIN exists in another template, note warning but continue with generation
         const crossTemplateWarning1 = asinInOtherTemplates.has(asin)
           ? `This ASIN also exists in template "${otherTemplateNameMap1.get(asinInOtherTemplates.get(asin)?.toString()) || 'another template'}"`
@@ -917,6 +973,13 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             const storedPrice = existingListing._amazonSourcePrice;
             const amazonDataForCalc = { asin, price: storedPrice, title: '', brand: '', description: '', images: [], color: '', compatibility: '' };
             sourceData = buildDirectorySourceData(asinDoc, storedPrice) || { title: '', brand: '', price: storedPrice, description: '', images: [], color: '', compatibility: '' };
+            sendSse({
+              type: 'amazon_loaded',
+              asin,
+              id: `preview-${asin}`,
+              sourceData,
+              progressStage: 'generating'
+            });
             const configs = await applyFieldConfigs(amazonDataForCalc, template.asinAutomation.fieldConfigs, pricingConfig);
             pricingCalculation = configs.pricingCalculation;
             console.log(`[duplicate_updateable] Option A: using stored _amazonSourcePrice for ${asin}`);
@@ -929,16 +992,14 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
               const amazonData = await fetchAmazonData(asin, region);
               if (amazonData) {
                 duplicateImages = Array.isArray(amazonData.images) ? amazonData.images : duplicateImages;
-                sourceData = {
-                  title: amazonData.title || '',
-                  brand: amazonData.brand || '',
-                  price: amazonData.price || '',
-                  description: amazonData.description || '',
-                  images: amazonData.images || [],
-                  color: amazonData.color || '',
-                  compatibility: amazonData.compatibility || '',
-                  productInfo: amazonData.productInfo || null
-                };
+                sourceData = buildAmazonSourceData(amazonData);
+                sendSse({
+                  type: 'amazon_loaded',
+                  asin,
+                  id: `preview-${asin}`,
+                  sourceData,
+                  progressStage: 'generating'
+                });
                 freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : freshAmazonSourcePrice;
                 const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
                 pricingCalculation = configs.pricingCalculation;
@@ -976,6 +1037,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
               // Pass fresh Option B price through so the save endpoint can persist it
               ...(freshAmazonSourcePrice ? { _amazonSourcePrice: freshAmazonSourcePrice } : {})
             },
+            progressStage: 'complete',
             warnings: [
               `This ASIN already exists in this template.`,
               existingListing.duplicateCount > 0
@@ -985,7 +1047,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             errors: []
           };
 
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+          sendSse({ type: 'item', item, progress: ++completed, total: asins.length });
           return;
         }
 
@@ -1001,15 +1063,24 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             asin,
             sku,
             status: 'blocked',
+            progressStage: 'complete',
             blockedReason: 'sku_conflict',
             errors: [`SKU ${sku} already exists`]
           };
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+          sendSse({ type: 'item', item, progress: ++completed, total: asins.length });
           return;
         }
         
         // Fetch and process ASIN (new listing case)
         const amazonData = await fetchAmazonData(asin, region);
+        const sourceData = buildAmazonSourceData(amazonData);
+        sendSse({
+          type: 'amazon_loaded',
+          asin,
+          id: `preview-${asin}`,
+          sourceData,
+          progressStage: 'generating'
+        });
         const { coreFields, customFields, pricingCalculation } = 
           await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
         
@@ -1050,16 +1121,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           id: `preview-${asin}`,
           asin,
           sku: finalSKU,
-          sourceData: {
-            title: amazonData.title,
-            brand: amazonData.brand,
-            price: amazonData.price,
-            description: amazonData.description,
-            images: amazonData.images,
-            color: amazonData.color,
-            compatibility: amazonData.compatibility,
-            productInfo: amazonData.productInfo || null
-          },
+          sourceData,
           generatedListing: {
             ...mergedCoreFields,
             customLabel: finalSKU,
@@ -1070,11 +1132,12 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           pricingCalculation,
           warnings,
           errors: validationErrors,
+          progressStage: 'complete',
           status: validationErrors.length > 0 ? 'error' : (warnings.length > 0 ? 'warning' : 'success')
         };
 
         // Stream the completed item
-        res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+        sendSse({ type: 'item', item, progress: ++completed, total: asins.length });
 
       } catch (error) {
         console.error(`❌ Error processing ASIN ${asin}:`, error);
@@ -1083,20 +1146,19 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           asin,
           sku: generateSKUFromASIN(asin),
           status: 'error',
+          progressStage: 'complete',
           errors: [error.message]
         };
-        res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+        sendSse({ type: 'item', item, progress: ++completed, total: asins.length });
       }
     });
 
-    // Wait for all to complete
-    await Promise.allSettled(processPromises);
-
     // Send completion event
-    res.write(`data: ${JSON.stringify({ type: 'complete', total: completed })}\n\n`);
-    res.write('data: [DONE]\n\n');
+    sendSse({ type: 'complete', total: completed });
+    sendDone();
 
     console.log(`📡 [SSE Stream] Completed: ${completed}/${asins.length} ASINs`);
+    clearInterval(heartbeat);
     res.end();
 
   } catch (error) {
