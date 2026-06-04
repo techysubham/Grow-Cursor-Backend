@@ -1201,8 +1201,8 @@ router.get('/feed/tasks', requireAuth, async (req, res) => {
     const filter = { seller: sellerId };
     if (dateFrom || dateTo) {
       filter.creationDate = {};
-      if (dateFrom) filter.creationDate.$gte = new Date(dateFrom);
-      if (dateTo) filter.creationDate.$lte = new Date(dateTo);
+      if (dateFrom) filter.creationDate.$gte = getPTDayBoundsUTC(dateFrom).start;
+      if (dateTo) filter.creationDate.$lte = getPTDayBoundsUTC(dateTo).end;
     }
     if (country) filter.country = country;
     if (status) filter.status = status;
@@ -14928,15 +14928,10 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
     if (startDate || endDate) {
       matchStage.creationDate = {};
       if (startDate) {
-        // Convert IST date to UTC: subtract 5 hours 30 minutes (19800000 ms)
-        // Parse as UTC to avoid local timezone interpretation
-        const start = new Date(startDate + 'T00:00:00Z');
-        matchStage.creationDate.$gte = new Date(start.getTime() - (5.5 * 60 * 60 * 1000));
+        matchStage.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
       }
       if (endDate) {
-        // Convert IST date to UTC: subtract 5 hours 30 minutes from end of day
-        const end = new Date(endDate + 'T23:59:59.999Z');
-        matchStage.creationDate.$lte = new Date(end.getTime() - (5.5 * 60 * 60 * 1000));
+        matchStage.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
       }
     }
 
@@ -14971,7 +14966,7 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
         $group: {
           _id: {
             sellerName: '$userDoc.username',
-            date: { $dateToString: { format: '%Y-%m-%d', date: '$creationDate', timezone: 'Asia/Kolkata' } },
+            date: { $dateToString: { format: '%Y-%m-%d', date: '$creationDate', timezone: 'America/Los_Angeles' } },
             country: '$normalizedCountry',
             categoryId: { $ifNull: ['$categoryId', null] },
             rangeId: { $ifNull: ['$rangeId', null] }
@@ -15102,12 +15097,10 @@ router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadSta
     if (startDate || endDate) {
       matchStage.creationDate = {};
       if (startDate) {
-        const start = new Date(startDate + 'T00:00:00Z');
-        matchStage.creationDate.$gte = new Date(start.getTime() - (5.5 * 60 * 60 * 1000));
+        matchStage.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
       }
       if (endDate) {
-        const end = new Date(endDate + 'T23:59:59.999Z');
-        matchStage.creationDate.$lte = new Date(end.getTime() - (5.5 * 60 * 60 * 1000));
+        matchStage.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
       }
     }
 
