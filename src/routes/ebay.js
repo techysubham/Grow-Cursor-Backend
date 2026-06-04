@@ -14900,6 +14900,132 @@ export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDa
  *               items:
  *                 type: object
  */
+router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('DailyListingComparison'), async (req, res) => {
+  try {
+    const date = req.query.date || new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(new Date());
+    const { start, end } = getPTDayBoundsUTC(date);
+
+    const [feedRows, endRows] = await Promise.all([
+      FeedUpload.aggregate([
+        {
+          $match: {
+            status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
+            'uploadSummary.successCount': { $gt: 0 },
+            creationDate: { $gte: start, $lte: end }
+          }
+        },
+        {
+          $group: {
+            _id: '$seller',
+            successfulListings: { $sum: '$uploadSummary.successCount' }
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'sellerDoc'
+          }
+        },
+        { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'sellerDoc.user',
+            foreignField: '_id',
+            as: 'userDoc'
+          }
+        },
+        { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            sellerId: '$_id',
+            sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
+            successfulListings: 1
+          }
+        }
+      ]),
+      EndListingLog.aggregate([
+        { $match: { endedAt: { $gte: start, $lte: end } } },
+        {
+          $group: {
+            _id: '$seller',
+            endedListings: { $sum: 1 }
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'sellerDoc'
+          }
+        },
+        { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'sellerDoc.user',
+            foreignField: '_id',
+            as: 'userDoc'
+          }
+        },
+        { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            sellerId: '$_id',
+            sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
+            endedListings: 1
+          }
+        }
+      ])
+    ]);
+
+    const bySeller = new Map();
+    for (const row of feedRows) {
+      const key = String(row.sellerId || row.sellerName);
+      bySeller.set(key, {
+        sellerId: row.sellerId,
+        sellerName: row.sellerName,
+        successfulListings: row.successfulListings || 0,
+        endedListings: 0
+      });
+    }
+
+    for (const row of endRows) {
+      const key = String(row.sellerId || row.sellerName);
+      const existing = bySeller.get(key) || {
+        sellerId: row.sellerId,
+        sellerName: row.sellerName,
+        successfulListings: 0,
+        endedListings: 0
+      };
+      existing.endedListings += row.endedListings || 0;
+      bySeller.set(key, existing);
+    }
+
+    const result = Array.from(bySeller.values())
+      .map(row => ({
+        ...row,
+        netListings: (row.successfulListings || 0) - (row.endedListings || 0)
+      }))
+      .sort((a, b) => b.successfulListings - a.successfulListings || b.endedListings - a.endedListings);
+
+    res.json(result);
+  } catch (err) {
+    console.error('[Daily Listing Comparison] Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch daily listing comparison' });
+  }
+});
+
 router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId, country, categoryId, rangeId } = req.query;
