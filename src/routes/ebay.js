@@ -14924,14 +14924,17 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
         },
         {
           $group: {
-            _id: '$seller',
+            _id: {
+              seller: '$seller',
+              country: { $ifNull: ['$country', 'US'] }
+            },
             successfulListings: { $sum: '$uploadSummary.successCount' }
           }
         },
         {
           $lookup: {
             from: 'sellers',
-            localField: '_id',
+            localField: '_id.seller',
             foreignField: '_id',
             as: 'sellerDoc'
           }
@@ -14949,8 +14952,9 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
         {
           $project: {
             _id: 0,
-            sellerId: '$_id',
+            sellerId: '$_id.seller',
             sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
+            country: '$_id.country',
             successfulListings: 1
           }
         }
@@ -14995,12 +14999,23 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
     const bySeller = new Map();
     for (const row of feedRows) {
       const key = String(row.sellerId || row.sellerName);
-      bySeller.set(key, {
+      const existing = bySeller.get(key) || {
         sellerId: row.sellerId,
         sellerName: row.sellerName,
-        successfulListings: row.successfulListings || 0,
-        endedListings: 0
-      });
+        successfulListings: 0,
+        endedListings: 0,
+        marketplaces: []
+      };
+      const country = row.country || 'US';
+      const successfulListings = row.successfulListings || 0;
+      existing.successfulListings += successfulListings;
+      const existingMarketplace = existing.marketplaces.find(m => m.country === country);
+      if (existingMarketplace) {
+        existingMarketplace.successfulListings += successfulListings;
+      } else {
+        existing.marketplaces.push({ country, successfulListings });
+      }
+      bySeller.set(key, existing);
     }
 
     for (const row of endRows) {
@@ -15009,7 +15024,8 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
         sellerId: row.sellerId,
         sellerName: row.sellerName,
         successfulListings: 0,
-        endedListings: 0
+        endedListings: 0,
+        marketplaces: []
       };
       existing.endedListings += row.endedListings || 0;
       bySeller.set(key, existing);
