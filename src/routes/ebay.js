@@ -14902,13 +14902,16 @@ export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDa
  */
 router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('DailyListingComparison'), async (req, res) => {
   try {
-    const date = req.query.date || new Intl.DateTimeFormat('en-CA', {
+    const defaultDate = new Intl.DateTimeFormat('en-CA', {
       timeZone: 'America/Los_Angeles',
       year: 'numeric',
       month: '2-digit',
       day: '2-digit'
     }).format(new Date());
-    const { start, end } = getPTDayBoundsUTC(date);
+    const startDate = req.query.startDate || req.query.date || defaultDate;
+    const endDate = req.query.endDate || req.query.date || startDate;
+    const { start } = getPTDayBoundsUTC(startDate);
+    const { end } = getPTDayBoundsUTC(endDate);
 
     const [feedRows, endRows] = await Promise.all([
       FeedUpload.aggregate([
