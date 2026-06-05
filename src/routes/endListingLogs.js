@@ -4,6 +4,24 @@ import { requireAuth } from '../middleware/auth.js';
 import EndListingLog from '../models/EndListingLog.js';
 
 const router = express.Router();
+const PT_TIMEZONE = 'America/Los_Angeles';
+
+function getPTDayBoundsUTC(dateStr) {
+  function findMidnightUTC(ds) {
+    const pdt = new Date(`${ds}T07:00:00.000Z`);
+    const ptStr = new Intl.DateTimeFormat('en-CA', { timeZone: PT_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(pdt);
+    const ptHour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: PT_TIMEZONE, hour: 'numeric', hour12: false, hourCycle: 'h23' }).format(pdt), 10);
+    if (ptStr === ds && ptHour === 0) return pdt;
+    return new Date(`${ds}T08:00:00.000Z`);
+  }
+
+  const start = findMidnightUTC(dateStr);
+  const tmp = new Date(`${dateStr}T12:00:00.000Z`);
+  tmp.setUTCDate(tmp.getUTCDate() + 1);
+  const nextDateStr = tmp.toISOString().split('T')[0];
+  const end = new Date(findMidnightUTC(nextDateStr).getTime() - 1);
+  return { start, end };
+}
 
 /**
  * GET /end-listing-logs/stats
@@ -12,8 +30,8 @@ const router = express.Router();
  *
  * Query params:
  *   sellerId   - optional, filter to one seller
- *   startDate  - optional, YYYY-MM-DD (IST)
- *   endDate    - optional, YYYY-MM-DD (IST)
+ *   startDate  - optional, YYYY-MM-DD (Pacific time)
+ *   endDate    - optional, YYYY-MM-DD (Pacific time)
  */
 router.get('/stats', requireAuth, async (req, res) => {
   try {
@@ -31,10 +49,10 @@ router.get('/stats', requireAuth, async (req, res) => {
     if (startDate || endDate) {
       matchCriteria.endedAt = {};
       if (startDate) {
-        matchCriteria.endedAt.$gte = new Date(startDate + 'T00:00:00.000+05:30');
+        matchCriteria.endedAt.$gte = getPTDayBoundsUTC(startDate).start;
       }
       if (endDate) {
-        matchCriteria.endedAt.$lte = new Date(endDate + 'T23:59:59.999+05:30');
+        matchCriteria.endedAt.$lte = getPTDayBoundsUTC(endDate).end;
       }
     }
 

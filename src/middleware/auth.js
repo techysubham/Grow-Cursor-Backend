@@ -40,6 +40,7 @@ export const PAGE_DEFAULT_ROLES = {
   'AsinLists': ['superadmin', 'productadmin'],
   'FeedUpload': ['superadmin', 'listingadmin', 'lister'],
   'FeedUploadStats': ['superadmin', 'listingadmin'],
+  'DailyListingComparison': ['superadmin', 'listingadmin'],
   'SellerUploadLimits': ['superadmin', 'listingadmin'],
   'CsvStorage': ['superadmin', 'listingadmin', 'lister'],
   'ProductResearch': ['superadmin', 'productadmin'],

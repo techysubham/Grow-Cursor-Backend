@@ -1201,8 +1201,8 @@ router.get('/feed/tasks', requireAuth, async (req, res) => {
     const filter = { seller: sellerId };
     if (dateFrom || dateTo) {
       filter.creationDate = {};
-      if (dateFrom) filter.creationDate.$gte = new Date(dateFrom);
-      if (dateTo) filter.creationDate.$lte = new Date(dateTo);
+      if (dateFrom) filter.creationDate.$gte = getPTDayBoundsUTC(dateFrom).start;
+      if (dateTo) filter.creationDate.$lte = getPTDayBoundsUTC(dateTo).end;
     }
     if (country) filter.country = country;
     if (status) filter.status = status;
@@ -14900,6 +14900,151 @@ export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDa
  *               items:
  *                 type: object
  */
+router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('DailyListingComparison'), async (req, res) => {
+  try {
+    const defaultDate = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(new Date());
+    const startDate = req.query.startDate || req.query.date || defaultDate;
+    const endDate = req.query.endDate || req.query.date || startDate;
+    const { start } = getPTDayBoundsUTC(startDate);
+    const { end } = getPTDayBoundsUTC(endDate);
+
+    const [feedRows, endRows] = await Promise.all([
+      FeedUpload.aggregate([
+        {
+          $match: {
+            status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
+            'uploadSummary.successCount': { $gt: 0 },
+            creationDate: { $gte: start, $lte: end }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              seller: '$seller',
+              country: { $ifNull: ['$country', 'US'] }
+            },
+            successfulListings: { $sum: '$uploadSummary.successCount' }
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: '_id.seller',
+            foreignField: '_id',
+            as: 'sellerDoc'
+          }
+        },
+        { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'sellerDoc.user',
+            foreignField: '_id',
+            as: 'userDoc'
+          }
+        },
+        { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            sellerId: '$_id.seller',
+            sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
+            country: '$_id.country',
+            successfulListings: 1
+          }
+        }
+      ]),
+      EndListingLog.aggregate([
+        { $match: { endedAt: { $gte: start, $lte: end } } },
+        {
+          $group: {
+            _id: '$seller',
+            endedListings: { $sum: 1 }
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'sellerDoc'
+          }
+        },
+        { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'sellerDoc.user',
+            foreignField: '_id',
+            as: 'userDoc'
+          }
+        },
+        { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            sellerId: '$_id',
+            sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
+            endedListings: 1
+          }
+        }
+      ])
+    ]);
+
+    const bySeller = new Map();
+    for (const row of feedRows) {
+      const key = String(row.sellerId || row.sellerName);
+      const existing = bySeller.get(key) || {
+        sellerId: row.sellerId,
+        sellerName: row.sellerName,
+        successfulListings: 0,
+        endedListings: 0,
+        marketplaces: []
+      };
+      const country = row.country || 'US';
+      const successfulListings = row.successfulListings || 0;
+      existing.successfulListings += successfulListings;
+      const existingMarketplace = existing.marketplaces.find(m => m.country === country);
+      if (existingMarketplace) {
+        existingMarketplace.successfulListings += successfulListings;
+      } else {
+        existing.marketplaces.push({ country, successfulListings });
+      }
+      bySeller.set(key, existing);
+    }
+
+    for (const row of endRows) {
+      const key = String(row.sellerId || row.sellerName);
+      const existing = bySeller.get(key) || {
+        sellerId: row.sellerId,
+        sellerName: row.sellerName,
+        successfulListings: 0,
+        endedListings: 0,
+        marketplaces: []
+      };
+      existing.endedListings += row.endedListings || 0;
+      bySeller.set(key, existing);
+    }
+
+    const result = Array.from(bySeller.values())
+      .map(row => ({
+        ...row,
+        netListings: (row.successfulListings || 0) - (row.endedListings || 0)
+      }))
+      .sort((a, b) => b.successfulListings - a.successfulListings || b.endedListings - a.endedListings);
+
+    res.json(result);
+  } catch (err) {
+    console.error('[Daily Listing Comparison] Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch daily listing comparison' });
+  }
+});
+
 router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId, country, categoryId, rangeId } = req.query;
@@ -14928,15 +15073,10 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
     if (startDate || endDate) {
       matchStage.creationDate = {};
       if (startDate) {
-        // Convert IST date to UTC: subtract 5 hours 30 minutes (19800000 ms)
-        // Parse as UTC to avoid local timezone interpretation
-        const start = new Date(startDate + 'T00:00:00Z');
-        matchStage.creationDate.$gte = new Date(start.getTime() - (5.5 * 60 * 60 * 1000));
+        matchStage.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
       }
       if (endDate) {
-        // Convert IST date to UTC: subtract 5 hours 30 minutes from end of day
-        const end = new Date(endDate + 'T23:59:59.999Z');
-        matchStage.creationDate.$lte = new Date(end.getTime() - (5.5 * 60 * 60 * 1000));
+        matchStage.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
       }
     }
 
@@ -14971,7 +15111,7 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
         $group: {
           _id: {
             sellerName: '$userDoc.username',
-            date: { $dateToString: { format: '%Y-%m-%d', date: '$creationDate', timezone: 'Asia/Kolkata' } },
+            date: { $dateToString: { format: '%Y-%m-%d', date: '$creationDate', timezone: 'America/Los_Angeles' } },
             country: '$normalizedCountry',
             categoryId: { $ifNull: ['$categoryId', null] },
             rangeId: { $ifNull: ['$rangeId', null] }
@@ -15102,12 +15242,10 @@ router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadSta
     if (startDate || endDate) {
       matchStage.creationDate = {};
       if (startDate) {
-        const start = new Date(startDate + 'T00:00:00Z');
-        matchStage.creationDate.$gte = new Date(start.getTime() - (5.5 * 60 * 60 * 1000));
+        matchStage.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
       }
       if (endDate) {
-        const end = new Date(endDate + 'T23:59:59.999Z');
-        matchStage.creationDate.$lte = new Date(end.getTime() - (5.5 * 60 * 60 * 1000));
+        matchStage.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
       }
     }
 
