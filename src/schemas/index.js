@@ -349,3 +349,53 @@ export const updateAsinSchema = z.object({
 export const bulkDeleteAsinsSchema = z.object({
   ids: z.array(z.string()).min(1, 'ids must be a non-empty array'),
 });
+
+// ── Attendance ────────────────────────────────────────────────────────────────
+
+export const editAttendanceHoursSchema = z.object({
+  totalWorkTime: z.coerce
+    .number()
+    .min(0, 'totalWorkTime must be a non-negative number (milliseconds)'),
+});
+
+// ── Employee profiles ─────────────────────────────────────────────────────────
+
+// All fields optional — mirrors the pickProfile() whitelist already in the route.
+// Zod ensures correct types before pickProfile() filters further.
+const employeeProfileFields = {
+  name: z.string().optional(),
+  phoneNumber: z.string().optional(),
+  dateOfBirth: z.string().optional(),
+  bloodGroup: z.string().optional(),
+  dateOfJoining: z.string().optional(),
+  gender: z.string().optional(),
+  address: z.string().optional(),
+  email: z.union([z.string().email('Invalid email format'), z.literal('')]).optional(),
+  bankAccountNumber: z.string().optional(),
+  bankIFSC: z.string().optional(),
+  bankName: z.string().optional(),
+  aadharNumber: z.string().optional(),
+  panNumber: z.string().optional(),
+  profilePicUrl: z.string().optional(),
+  aadharImageUrl: z.string().optional(),
+  panImageUrl: z.string().optional(),
+  myTaskList: z.any().optional(),
+  primaryTask: z.string().optional(),
+  secondaryTask: z.string().optional(),
+};
+
+export const updateMyProfileSchema = z.object(employeeProfileFields);
+
+// Admin PUT also reads workingMode, workingHours, role, department from req.body
+export const adminUpdateProfileSchema = z.object({
+  ...employeeProfileFields,
+  workingMode: z.string().optional(),
+  workingHours: z.union([z.string(), z.number()]).optional(),
+  role: z.string().optional(),
+  department: z.string().optional(),
+});
+
+export const adminProfileFieldsSchema = z.object({
+  workingMode: z.string().optional(),
+  workingHours: z.union([z.string(), z.number()]).optional(),
+});

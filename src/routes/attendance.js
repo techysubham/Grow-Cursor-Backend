@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Attendance from '../models/Attendance.js';
 import User from '../models/User.js';
+import { validate } from '../utils/validate.js';
+import { editAttendanceHoursSchema } from '../schemas/index.js';
 
 const router = Router();
 
@@ -468,15 +470,10 @@ router.post('/admin/force-stop/:attendanceId', requireAuth, requirePageAccess('A
  *       403: { description: Forbidden }
  *       404: { description: Attendance record not found }
  */
-router.put('/admin/edit-hours/:attendanceId', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
+router.put('/admin/edit-hours/:attendanceId', requireAuth, requirePageAccess('Attendance'), validate(editAttendanceHoursSchema), async (req, res) => {
     try {
         const { attendanceId } = req.params;
         const { totalWorkTime } = req.body;
-
-        // Validate input
-        if (typeof totalWorkTime !== 'number' || totalWorkTime < 0) {
-            return res.status(400).json({ error: 'Invalid totalWorkTime value. Must be a non-negative number in milliseconds.' });
-        }
 
         const attendance = await Attendance.findById(attendanceId).populate('user', 'username email');
 

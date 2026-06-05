@@ -3,6 +3,12 @@ import { requireAuth, requireAuthFile } from '../middleware/auth.js';
 import EmployeeProfile from '../models/EmployeeProfile.js';
 import User from '../models/User.js';
 import multer from 'multer';
+import { validate } from '../utils/validate.js';
+import {
+  updateMyProfileSchema,
+  adminUpdateProfileSchema,
+  adminProfileFieldsSchema,
+} from '../schemas/index.js';
 
 const router = Router();
 
@@ -100,7 +106,7 @@ router.get('/me', requireAuth, async (req, res) => {
  *       200: { description: Updated profile }
  *       401: { description: Unauthorized }
  */
-router.put('/me', requireAuth, async (req, res) => {
+router.put('/me', requireAuth, validate(updateMyProfileSchema), async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id || req.user.id;
     const data = pickProfile(req.body || {});
@@ -184,7 +190,7 @@ router.get('/', requireAuth, async (req, res) => {
  *       403: { description: Forbidden }
  *       404: { description: Profile not found }
  */
-router.put('/:id', requireAuth, async (req, res) => {
+router.put('/:id', requireAuth, validate(adminUpdateProfileSchema), async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Forbidden' });
@@ -250,7 +256,7 @@ router.put('/:id', requireAuth, async (req, res) => {
  *       403: { description: Forbidden }
  *       404: { description: Profile not found }
  */
-router.put('/:id/admin-fields', requireAuth, async (req, res) => {
+router.put('/:id/admin-fields', requireAuth, validate(adminProfileFieldsSchema), async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Forbidden' });
