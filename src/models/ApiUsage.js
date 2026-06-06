@@ -4,7 +4,7 @@ const apiUsageSchema = new mongoose.Schema({
   service: {
     type: String,
     required: true,
-    enum: ['ScraperAPI', 'PAAPI', 'Gemini'],
+    enum: ['ScraperAPI', 'PAAPI', 'Gemini', 'OpenAI'],
     index: true
   },
   asin: {
@@ -28,6 +28,34 @@ const apiUsageSchema = new mongoose.Schema({
   errorMessage: String,
   responseTime: Number, // milliseconds
   extractedFields: [String], // ['title', 'price', 'brand', 'description', 'images']
+
+  // AI usage metadata. Optional so existing ScraperAPI/PAAPI records stay unchanged.
+  model: String,
+  promptTokens: Number,
+  completionTokens: Number,
+  totalTokens: Number,
+  fieldName: {
+    type: String,
+    index: true
+  },
+  fieldType: String,
+  templateId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ListingTemplate',
+    index: true
+  },
+  sellerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Seller',
+    index: true
+  },
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    index: true
+  },
+  promptChars: Number,
+  completionChars: Number,
   
   // Pre-calculated for aggregation
   year: {
@@ -50,6 +78,9 @@ const apiUsageSchema = new mongoose.Schema({
 apiUsageSchema.index({ service: 1, year: 1, month: 1 });
 apiUsageSchema.index({ service: 1, success: 1, timestamp: -1 });
 apiUsageSchema.index({ asin: 1, timestamp: -1 });
+apiUsageSchema.index({ service: 1, fieldName: 1, year: 1, month: 1 });
+apiUsageSchema.index({ service: 1, templateId: 1, fieldName: 1, year: 1, month: 1 });
+apiUsageSchema.index({ service: 1, userId: 1, sellerId: 1, templateId: 1, year: 1, month: 1 });
 
 const ApiUsage = mongoose.model('ApiUsage', apiUsageSchema);
 

@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import { requireAuth, requireAuthSSE } from '../middleware/auth.js';
 import TemplateListing from '../models/TemplateListing.js';
 import ListingTemplate from '../models/ListingTemplate.js';
@@ -10,6 +11,7 @@ import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
 import { getAsinCacheStats, clearAsinCache, invalidateAsinCache } from '../utils/asinCache.js';
 import AsinDirectory from '../models/AsinDirectory.js';
+import ApiUsage from '../models/ApiUsage.js';
 
 const router = express.Router();
 
@@ -980,7 +982,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
               sourceData,
               progressStage: 'generating'
             });
-            const configs = await applyFieldConfigs(amazonDataForCalc, template.asinAutomation.fieldConfigs, pricingConfig);
+            const configs = await applyFieldConfigs(amazonDataForCalc, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
             pricingCalculation = configs.pricingCalculation;
             console.log(`[duplicate_updateable] Option A: using stored _amazonSourcePrice for ${asin}`);
           }
@@ -1001,7 +1003,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
                   progressStage: 'generating'
                 });
                 freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : freshAmazonSourcePrice;
-                const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+                const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
                 pricingCalculation = configs.pricingCalculation;
               }
             } catch (fetchErr) {
@@ -1082,7 +1084,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           progressStage: 'generating'
         });
         const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
         
         const mergedCoreFields = {
           ...(template.coreFieldDefaults || {}),
@@ -1330,7 +1332,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
               size: doc.size || ''
             };
             
-            const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+            const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
             pricingCalculation = configs.pricingCalculation;
           }
 
@@ -1410,7 +1412,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
 
         res.write(`data: ${JSON.stringify({ type: 'progress', id: `preview-${asin}`, stage: 'generating' })}\n\n`);
         const { coreFields, customFields, pricingCalculation } =
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
 
         const mergedCoreFields = {
           ...(template.coreFieldDefaults || {}),
@@ -2173,7 +2175,8 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
     const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
       amazonData,
       template.asinAutomation.fieldConfigs,
-      pricingConfig  // Use seller-specific or template default pricing config
+      pricingConfig,  // Use seller-specific or template default pricing config
+      { templateId, sellerId, userId: req.user?.userId }
     );
     
     // 4. Return auto-filled data (separated by type)
@@ -2450,7 +2453,8 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
           const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
             amazonData,
             template.asinAutomation.fieldConfigs,
-            pricingConfig  // Use seller-specific or template default pricing config
+            pricingConfig,  // Use seller-specific or template default pricing config
+            { templateId, sellerId, userId: req.user?.userId }
           );
           
           return {
@@ -3185,7 +3189,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         
         // Apply field configurations
         const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
         
         // Apply template core field defaults as base layer (autofilled fields override these)
         const mergedCoreFields = {
@@ -5697,6 +5701,224 @@ router.post('/bulk-deactivate', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Error deactivating listings:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
+  try {
+    const {
+      startDate,
+      endDate,
+      userId,
+      sellerId,
+      templateId,
+      limit = 500
+    } = req.query;
+
+    const match = { service: 'OpenAI' };
+
+    if (startDate || endDate) {
+      match.timestamp = {};
+      if (startDate) {
+        const start = new Date(startDate);
+        start.setHours(0, 0, 0, 0);
+        match.timestamp.$gte = start;
+      }
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        match.timestamp.$lte = end;
+      }
+    }
+
+    if (userId && userId !== 'all' && mongoose.Types.ObjectId.isValid(userId)) {
+      match.userId = new mongoose.Types.ObjectId(userId);
+    }
+    if (sellerId && sellerId !== 'all' && mongoose.Types.ObjectId.isValid(sellerId)) {
+      match.sellerId = new mongoose.Types.ObjectId(sellerId);
+    }
+    if (templateId && templateId !== 'all' && mongoose.Types.ObjectId.isValid(templateId)) {
+      match.templateId = new mongoose.Types.ObjectId(templateId);
+    }
+
+    const maxRows = Math.min(parseInt(limit, 10) || 500, 2000);
+
+    const [rows, fieldBreakdown, totalsAgg] = await Promise.all([
+      ApiUsage.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: {
+              userId: '$userId',
+              sellerId: '$sellerId',
+              templateId: '$templateId'
+            },
+            aiCalls: { $sum: 1 },
+            successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
+            failedCalls: { $sum: { $cond: ['$success', 0, 1] } },
+            successfulAsins: {
+              $addToSet: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  '$asin',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+            avgResponseTime: { $avg: '$responseTime' },
+            firstUsedAt: { $min: '$timestamp' },
+            lastUsedAt: { $max: '$timestamp' }
+          }
+        },
+        { $sort: { totalTokens: -1, aiCalls: -1 } },
+        { $limit: maxRows },
+        {
+          $lookup: {
+            from: 'users',
+            localField: '_id.userId',
+            foreignField: '_id',
+            as: 'user'
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: '_id.sellerId',
+            foreignField: '_id',
+            as: 'seller'
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'seller.user',
+            foreignField: '_id',
+            as: 'sellerUser'
+          }
+        },
+        {
+          $lookup: {
+            from: 'listingtemplates',
+            localField: '_id.templateId',
+            foreignField: '_id',
+            as: 'template'
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            userId: '$_id.userId',
+            sellerId: '$_id.sellerId',
+            templateId: '$_id.templateId',
+            username: { $ifNull: [{ $arrayElemAt: ['$user.username', 0] }, 'Unknown user'] },
+            userEmail: { $arrayElemAt: ['$user.email', 0] },
+            userRole: { $arrayElemAt: ['$user.role', 0] },
+            sellerName: { $ifNull: [{ $arrayElemAt: ['$sellerUser.username', 0] }, 'Unknown seller'] },
+            sellerEmail: { $arrayElemAt: ['$sellerUser.email', 0] },
+            templateName: { $ifNull: [{ $arrayElemAt: ['$template.name', 0] }, 'Unknown template'] },
+            aiCalls: 1,
+            successfulCalls: 1,
+            failedCalls: 1,
+            successfulAsinCount: { $size: '$successfulAsins' },
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1,
+            avgResponseTime: { $round: ['$avgResponseTime', 1] },
+            firstUsedAt: 1,
+            lastUsedAt: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: '$fieldName',
+            aiCalls: { $sum: 1 },
+            successfulAsins: {
+              $addToSet: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  '$asin',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } }
+          }
+        },
+        { $sort: { totalTokens: -1 } },
+        {
+          $project: {
+            _id: 0,
+            fieldName: { $ifNull: ['$_id', 'unknown'] },
+            aiCalls: 1,
+            successfulAsinCount: { $size: '$successfulAsins' },
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: null,
+            aiCalls: { $sum: 1 },
+            successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
+            failedCalls: { $sum: { $cond: ['$success', 0, 1] } },
+            successfulAsins: {
+              $addToSet: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  '$asin',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            aiCalls: 1,
+            successfulCalls: 1,
+            failedCalls: 1,
+            successfulAsinCount: { $size: '$successfulAsins' },
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1
+          }
+        }
+      ])
+    ]);
+
+    res.json({
+      success: true,
+      rows,
+      fieldBreakdown,
+      totals: totalsAgg[0] || {
+        aiCalls: 0,
+        successfulCalls: 0,
+        failedCalls: 0,
+        successfulAsinCount: 0,
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0
+      }
+    });
+  } catch (error) {
+    console.error('[OpenAI Usage Summary] Error:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch OpenAI usage summary' });
   }
 });
 
