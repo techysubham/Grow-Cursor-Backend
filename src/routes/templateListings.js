@@ -1010,30 +1010,14 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
 
           let sourceData = null;
           let pricingCalculation = null;
-          let freshAmazonSourcePrice = null; // set only when Option B runs
+          let freshAmazonSourcePrice = null;
           let duplicateImages = Array.isArray(asinDoc?.images) ? asinDoc.images : [];
+          const needsLiveAmazonData = true;
 
-          // Option A: use stored Amazon price (no fetch needed)
-          if (existingListing._amazonSourcePrice) {
-            const storedPrice = existingListing._amazonSourcePrice;
-            const amazonDataForCalc = { asin, price: storedPrice, title: '', brand: '', description: '', images: [], color: '', compatibility: '' };
-            sourceData = buildDirectorySourceData(asinDoc, storedPrice) || { title: '', brand: '', price: storedPrice, description: '', images: [], color: '', compatibility: '' };
-            sendSse({
-              type: 'amazon_loaded',
-              asin,
-              id: `preview-${asin}`,
-              sourceData,
-              progressStage: 'generating'
-            });
-            const configs = await applyFieldConfigs(amazonDataForCalc, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
-            pricingCalculation = configs.pricingCalculation;
-            console.log(`[duplicate_updateable] Option A: using stored _amazonSourcePrice for ${asin}`);
-          }
-
-          if (!existingListing._amazonSourcePrice || duplicateImages.length === 0) {
-            // Option B: _amazonSourcePrice not stored yet or directory images are unavailable — fetch live from Amazon
+          if (needsLiveAmazonData) {
+            // Always refresh duplicate ASIN previews so price/source data stays current.
             try {
-              console.log(`[duplicate_updateable] Option B: fetching live Amazon data for ${asin}`);
+              console.log(`[duplicate_updateable] Fetching fresh Amazon data for ${asin}`);
               const amazonData = await fetchAmazonData(asin, region);
               if (amazonData) {
                 duplicateImages = Array.isArray(amazonData.images) ? amazonData.images : duplicateImages;
@@ -1079,7 +1063,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
               customFields: existingCustomFields,
               _asinReference: asin,
               _existingListingId: existingListing._id,
-              // Pass fresh Option B price through so the save endpoint can persist it
+              // Pass the refreshed Amazon price through so the save endpoint can persist it.
               ...(freshAmazonSourcePrice ? { _amazonSourcePrice: freshAmazonSourcePrice } : {})
             },
             progressStage: 'complete',
@@ -5760,6 +5744,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
     } = req.query;
 
     const match = { service: 'OpenAI' };
+    const optionMatch = { service: 'OpenAI' };
 
     if (startDate || endDate) {
       match.timestamp = {};
@@ -5767,11 +5752,15 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
         const start = new Date(startDate);
         start.setHours(0, 0, 0, 0);
         match.timestamp.$gte = start;
+        optionMatch.timestamp = optionMatch.timestamp || {};
+        optionMatch.timestamp.$gte = start;
       }
       if (endDate) {
         const end = new Date(endDate);
         end.setHours(23, 59, 59, 999);
         match.timestamp.$lte = end;
+        optionMatch.timestamp = optionMatch.timestamp || {};
+        optionMatch.timestamp.$lte = end;
       }
     }
 
@@ -5790,7 +5779,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
 
     const maxRows = Math.min(parseInt(limit, 10) || 500, 2000);
 
-    const [rows, fieldBreakdown, totalsAgg] = await Promise.all([
+    const [rows, fieldBreakdown, fieldAsinBreakdown, asinCallBreakdown, ipBreakdown, totalsAgg, filterOptionsAgg] = await Promise.all([
       ApiUsage.aggregate([
         { $match: match },
         {
@@ -5831,7 +5820,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             lastUsedAt: { $max: '$timestamp' }
           }
         },
-        { $sort: { totalTokens: -1, aiCalls: -1 } },
+        { $sort: { lastUsedAt: -1, totalTokens: -1, aiCalls: -1 } },
         { $limit: maxRows },
         {
           $lookup: {
@@ -5896,8 +5885,19 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
       ApiUsage.aggregate([
         { $match: match },
         {
+          $addFields: {
+            normalizedFieldName: {
+              $cond: [
+                { $or: [{ $eq: ['$fieldName', null] }, { $eq: ['$fieldName', ''] }] },
+                'Unknown field',
+                '$fieldName'
+              ]
+            }
+          }
+        },
+        {
           $group: {
-            _id: '$fieldName',
+            _id: '$normalizedFieldName',
             aiCalls: { $sum: 1 },
             successfulAsins: {
               $addToSet: {
@@ -5929,11 +5929,221 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
       ApiUsage.aggregate([
         { $match: match },
         {
+          $addFields: {
+            normalizedFieldName: {
+              $cond: [
+                { $or: [{ $eq: ['$fieldName', null] }, { $eq: ['$fieldName', ''] }] },
+                'Unknown field',
+                '$fieldName'
+              ]
+            },
+            normalizedAsin: {
+              $cond: [
+                { $or: [{ $eq: ['$asin', null] }, { $eq: ['$asin', ''] }] },
+                'Unknown ASIN',
+                '$asin'
+              ]
+            }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              fieldName: '$normalizedFieldName',
+              asin: '$normalizedAsin'
+            },
+            aiCalls: { $sum: 1 },
+            successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
+            failedCalls: { $sum: { $cond: ['$success', 0, 1] } },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+            firstUsedAt: { $min: '$timestamp' },
+            lastUsedAt: { $max: '$timestamp' }
+          }
+        },
+        { $match: { aiCalls: { $gt: 1 } } },
+        { $sort: { aiCalls: -1, totalTokens: -1 } },
+        { $limit: 500 },
+        {
+          $project: {
+            _id: 0,
+            fieldName: '$_id.fieldName',
+            asin: '$_id.asin',
+            aiCalls: 1,
+            successfulCalls: 1,
+            failedCalls: 1,
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1,
+            firstUsedAt: 1,
+            lastUsedAt: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: {
+              sellerId: '$sellerId',
+              templateId: '$templateId',
+              asin: '$asin'
+            },
+            aiCalls: { $sum: 1 },
+            successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
+            failedCalls: { $sum: { $cond: ['$success', 0, 1] } },
+            fields: {
+              $addToSet: {
+                $cond: [
+                  { $and: [{ $ne: ['$fieldName', null] }, { $ne: ['$fieldName', ''] }] },
+                  '$fieldName',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+            firstUsedAt: { $min: '$timestamp' },
+            lastUsedAt: { $max: '$timestamp' }
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: '_id.sellerId',
+            foreignField: '_id',
+            as: 'seller'
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'seller.user',
+            foreignField: '_id',
+            as: 'sellerUser'
+          }
+        },
+        {
+          $lookup: {
+            from: 'listingtemplates',
+            localField: '_id.templateId',
+            foreignField: '_id',
+            as: 'template'
+          }
+        },
+        { $sort: { aiCalls: -1, totalTokens: -1 } },
+        { $limit: 1000 },
+        {
+          $project: {
+            _id: 0,
+            sellerId: '$_id.sellerId',
+            templateId: '$_id.templateId',
+            asin: { $ifNull: ['$_id.asin', 'Unknown ASIN'] },
+            sellerName: { $ifNull: [{ $arrayElemAt: ['$sellerUser.username', 0] }, 'Unknown seller'] },
+            templateName: { $ifNull: [{ $arrayElemAt: ['$template.name', 0] }, 'Unknown template'] },
+            aiCalls: 1,
+            successfulCalls: 1,
+            failedCalls: 1,
+            fields: 1,
+            fieldCount: { $size: '$fields' },
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1,
+            firstUsedAt: 1,
+            lastUsedAt: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        {
+          $match: {
+            ...match,
+            ipAddress: match.ipAddress || { $nin: [null, ''] },
+            ipSource: { $nin: [null, ''] }
+          }
+        },
+        {
+          $group: {
+            _id: '$ipAddress',
+            users: {
+              $addToSet: {
+                $cond: [{ $ne: ['$userId', null] }, '$userId', '$$REMOVE']
+              }
+            },
+            sellers: {
+              $addToSet: {
+                $cond: [{ $ne: ['$sellerId', null] }, '$sellerId', '$$REMOVE']
+              }
+            },
+            templates: {
+              $addToSet: {
+                $cond: [{ $ne: ['$templateId', null] }, '$templateId', '$$REMOVE']
+              }
+            },
+            aiCalls: { $sum: 1 },
+            successfulAsins: {
+              $addToSet: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  '$asin',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+            firstUsedAt: { $min: '$timestamp' },
+            lastUsedAt: { $max: '$timestamp' },
+            ipSources: {
+              $addToSet: {
+                $cond: [
+                  { $and: [{ $ne: ['$ipSource', null] }, { $ne: ['$ipSource', ''] }] },
+                  '$ipSource',
+                  '$$REMOVE'
+                ]
+              }
+            }
+          }
+        },
+        { $sort: { lastUsedAt: -1, totalTokens: -1, aiCalls: -1 } },
+        {
+          $project: {
+            _id: 0,
+            ipAddress: { $ifNull: ['$_id', 'Unknown IP'] },
+            userCount: { $size: '$users' },
+            sellerCount: { $size: '$sellers' },
+            templateCount: { $size: '$templates' },
+            successfulAsinCount: { $size: '$successfulAsins' },
+            aiCalls: 1,
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1,
+            firstUsedAt: 1,
+            lastUsedAt: 1,
+            ipSources: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        { $match: match },
+        {
           $group: {
             _id: null,
             aiCalls: { $sum: 1 },
             successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
             failedCalls: { $sum: { $cond: ['$success', 0, 1] } },
+            uniqueIps: {
+              $addToSet: {
+                $cond: [
+                  { $and: [{ $ne: ['$ipAddress', null] }, { $ne: ['$ipAddress', ''] }, { $ne: ['$ipSource', null] }, { $ne: ['$ipSource', ''] }] },
+                  '$ipAddress',
+                  '$$REMOVE'
+                ]
+              }
+            },
             successfulAsins: {
               $addToSet: {
                 $cond: [
@@ -5954,23 +6164,145 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             aiCalls: 1,
             successfulCalls: 1,
             failedCalls: 1,
+            uniqueIpCount: { $size: '$uniqueIps' },
             successfulAsinCount: { $size: '$successfulAsins' },
             totalTokens: 1,
             promptTokens: 1,
             completionTokens: 1
           }
         }
+      ]),
+      ApiUsage.aggregate([
+        { $match: optionMatch },
+        {
+          $facet: {
+            users: [
+              { $match: { userId: { $ne: null } } },
+              { $group: { _id: '$userId', count: { $sum: 1 }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
+              {
+                $project: {
+                  _id: 0,
+                  id: { $toString: '$_id' },
+                  label: { $ifNull: [{ $arrayElemAt: ['$user.username', 0] }, 'Unknown user'] },
+                  secondary: { $ifNull: [{ $arrayElemAt: ['$user.email', 0] }, { $arrayElemAt: ['$user.role', 0] }] },
+                  count: 1,
+                  lastUsedAt: 1
+                }
+              }
+            ],
+            sellers: [
+              { $match: { sellerId: { $ne: null } } },
+              { $group: { _id: '$sellerId', count: { $sum: 1 }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              { $lookup: { from: 'sellers', localField: '_id', foreignField: '_id', as: 'seller' } },
+              { $lookup: { from: 'users', localField: 'seller.user', foreignField: '_id', as: 'sellerUser' } },
+              {
+                $project: {
+                  _id: 0,
+                  id: { $toString: '$_id' },
+                  label: { $ifNull: [{ $arrayElemAt: ['$sellerUser.username', 0] }, 'Unknown seller'] },
+                  secondary: { $arrayElemAt: ['$sellerUser.email', 0] },
+                  count: 1,
+                  lastUsedAt: 1
+                }
+              }
+            ],
+            templates: [
+              { $match: { templateId: { $ne: null } } },
+              { $group: { _id: '$templateId', count: { $sum: 1 }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              { $lookup: { from: 'listingtemplates', localField: '_id', foreignField: '_id', as: 'template' } },
+              {
+                $project: {
+                  _id: 0,
+                  id: { $toString: '$_id' },
+                  label: { $ifNull: [{ $arrayElemAt: ['$template.name', 0] }, 'Unknown template'] },
+                  count: 1,
+                  lastUsedAt: 1
+                }
+              }
+            ],
+            ips: [
+              { $match: { ipAddress: { $nin: [null, ''] }, ipSource: { $nin: [null, ''] } } },
+              { $group: { _id: '$ipAddress', count: { $sum: 1 }, userIds: { $addToSet: '$userId' }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              {
+                $project: {
+                  _id: 0,
+                  id: '$_id',
+                  label: '$_id',
+                  count: 1,
+                  userCount: { $size: '$userIds' },
+                  lastUsedAt: 1
+                }
+              }
+            ]
+          }
+        }
       ])
     ]);
 
+    const filterOptions = filterOptionsAgg[0] || { users: [], sellers: [], templates: [], ips: [] };
+    const expectedAiFieldCountByPair = new Map();
+    const pairInputs = [
+      ...rows.map((row) => ({ sellerId: row.sellerId, templateId: row.templateId })),
+      ...asinCallBreakdown.map((row) => ({ sellerId: row.sellerId, templateId: row.templateId }))
+    ];
+
+    await Promise.all(pairInputs.map(async ({ sellerId: pairSellerId, templateId: pairTemplateId }) => {
+      if (!pairSellerId || !pairTemplateId) return;
+      const key = `${pairSellerId}-${pairTemplateId}`;
+      if (expectedAiFieldCountByPair.has(key)) return;
+      expectedAiFieldCountByPair.set(key, 0);
+      try {
+        const effectiveTemplate = await getEffectiveTemplate(pairTemplateId, pairSellerId);
+        const expectedAiFields = (effectiveTemplate.asinAutomation?.fieldConfigs || [])
+          .filter((config) => config.enabled && config.source === 'ai')
+          .map((config) => config.ebayField);
+        expectedAiFieldCountByPair.set(key, expectedAiFields.length);
+      } catch (err) {
+        console.warn('[OpenAI Usage Summary] Failed to resolve expected AI fields:', err.message);
+      }
+    }));
+
+    const rowsWithExpected = rows.map((row) => {
+      const expectedAiFieldCount = expectedAiFieldCountByPair.get(`${row.sellerId}-${row.templateId}`) || 0;
+      return {
+        ...row,
+        expectedAiFieldCount,
+        expectedAiCalls: expectedAiFieldCount * (row.successfulAsinCount || 0),
+        overExpectedCalls: Math.max(0, (row.aiCalls || 0) - (expectedAiFieldCount * (row.successfulAsinCount || 0)))
+      };
+    });
+
+    const asinCallBreakdownWithExpected = asinCallBreakdown.map((row) => {
+      const expectedAiFieldCount = expectedAiFieldCountByPair.get(`${row.sellerId}-${row.templateId}`) || 0;
+      return {
+        ...row,
+        expectedAiFieldCount,
+        overExpectedCalls: Math.max(0, (row.aiCalls || 0) - expectedAiFieldCount)
+      };
+    }).filter((row) => row.overExpectedCalls > 0);
+
     res.json({
       success: true,
-      rows,
+      rows: rowsWithExpected,
       fieldBreakdown,
+      fieldAsinBreakdown,
+      asinCallBreakdown: asinCallBreakdownWithExpected,
+      ipBreakdown,
+      filterOptions,
       totals: totalsAgg[0] || {
         aiCalls: 0,
         successfulCalls: 0,
         failedCalls: 0,
+        uniqueIpCount: 0,
         successfulAsinCount: 0,
         totalTokens: 0,
         promptTokens: 0,
