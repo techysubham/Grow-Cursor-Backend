@@ -82,9 +82,10 @@ export async function fetchAmazonData(asin, region = 'US') {
  * @param {Object} amazonData - Fetched Amazon product data
  * @param {Array} fieldConfigs - Field configuration array from template
  * @param {Object} pricingConfig - Optional pricing configuration for startPrice calculation
+ * @param {Object} trackingContext - Optional usage metadata such as templateId and sellerId
  * @returns {Object} { coreFields, customFields, pricingCalculation }
  */
-export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig = null) {
+export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig = null, trackingContext = {}) {
   const coreFields = {};
   const customFields = {};
   let pricingCalculation = null;
@@ -181,7 +182,15 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
         // Use higher token limit for description field to avoid truncation
         const maxTokens = config.ebayField === 'description' ? 2000 : 150;
 
-        let generatedValue = await generateWithGemini(processedPrompt, { maxTokens });
+        let generatedValue = await generateWithGemini(processedPrompt, {
+          maxTokens,
+          asin: amazonData.asin,
+          fieldName: config.ebayField,
+          fieldType: config.fieldType,
+          templateId: trackingContext.templateId,
+          sellerId: trackingContext.sellerId,
+          userId: trackingContext.userId
+        });
 
         // Auto-truncate based on field type:
         // - Title: 80 characters
