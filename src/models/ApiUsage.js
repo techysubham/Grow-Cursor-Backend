@@ -54,6 +54,12 @@ const apiUsageSchema = new mongoose.Schema({
     ref: 'User',
     index: true
   },
+  ipAddress: {
+    type: String,
+    index: true
+  },
+  forwardedFor: String,
+  userAgent: String,
   promptChars: Number,
   completionChars: Number,
   

@@ -15,6 +15,17 @@ import ApiUsage from '../models/ApiUsage.js';
 
 const router = express.Router();
 
+function buildAiUsageContext(req, templateId, sellerId) {
+  return {
+    templateId,
+    sellerId,
+    userId: req.user?.userId,
+    ipAddress: req.ip,
+    forwardedFor: req.headers['x-forwarded-for'] || '',
+    userAgent: req.get('user-agent') || ''
+  };
+}
+
 function buildDirectorySourceData(doc, priceOverride = null) {
   if (!doc) return null;
 
@@ -982,7 +993,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
               sourceData,
               progressStage: 'generating'
             });
-            const configs = await applyFieldConfigs(amazonDataForCalc, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
+            const configs = await applyFieldConfigs(amazonDataForCalc, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
             pricingCalculation = configs.pricingCalculation;
             console.log(`[duplicate_updateable] Option A: using stored _amazonSourcePrice for ${asin}`);
           }
@@ -1003,7 +1014,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
                   progressStage: 'generating'
                 });
                 freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : freshAmazonSourcePrice;
-                const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
+                const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
                 pricingCalculation = configs.pricingCalculation;
               }
             } catch (fetchErr) {
@@ -1084,7 +1095,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           progressStage: 'generating'
         });
         const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
         
         const mergedCoreFields = {
           ...(template.coreFieldDefaults || {}),
@@ -1332,7 +1343,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
               size: doc.size || ''
             };
             
-            const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
+            const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
             pricingCalculation = configs.pricingCalculation;
           }
 
@@ -1412,7 +1423,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
 
         res.write(`data: ${JSON.stringify({ type: 'progress', id: `preview-${asin}`, stage: 'generating' })}\n\n`);
         const { coreFields, customFields, pricingCalculation } =
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
 
         const mergedCoreFields = {
           ...(template.coreFieldDefaults || {}),
@@ -2176,7 +2187,7 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
       amazonData,
       template.asinAutomation.fieldConfigs,
       pricingConfig,  // Use seller-specific or template default pricing config
-      { templateId, sellerId, userId: req.user?.userId }
+      buildAiUsageContext(req, templateId, sellerId)
     );
     
     // 4. Return auto-filled data (separated by type)
@@ -2454,7 +2465,7 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
             amazonData,
             template.asinAutomation.fieldConfigs,
             pricingConfig,  // Use seller-specific or template default pricing config
-            { templateId, sellerId, userId: req.user?.userId }
+            buildAiUsageContext(req, templateId, sellerId)
           );
           
           return {
@@ -3189,7 +3200,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         
         // Apply field configurations
         const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, { templateId, sellerId, userId: req.user?.userId });
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
         
         // Apply template core field defaults as base layer (autofilled fields override these)
         const mergedCoreFields = {
@@ -5712,6 +5723,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
       userId,
       sellerId,
       templateId,
+      ipAddress,
       limit = 500
     } = req.query;
 
@@ -5740,6 +5752,9 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
     if (templateId && templateId !== 'all' && mongoose.Types.ObjectId.isValid(templateId)) {
       match.templateId = new mongoose.Types.ObjectId(templateId);
     }
+    if (ipAddress && ipAddress !== 'all') {
+      match.ipAddress = ipAddress;
+    }
 
     const maxRows = Math.min(parseInt(limit, 10) || 500, 2000);
 
@@ -5751,7 +5766,8 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             _id: {
               userId: '$userId',
               sellerId: '$sellerId',
-              templateId: '$templateId'
+              templateId: '$templateId',
+              ipAddress: '$ipAddress'
             },
             aiCalls: { $sum: 1 },
             successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
@@ -5769,6 +5785,15 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
             completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
             avgResponseTime: { $avg: '$responseTime' },
+            userAgents: {
+              $addToSet: {
+                $cond: [
+                  { $and: [{ $ne: ['$userAgent', null] }, { $ne: ['$userAgent', ''] }] },
+                  '$userAgent',
+                  '$$REMOVE'
+                ]
+              }
+            },
             firstUsedAt: { $min: '$timestamp' },
             lastUsedAt: { $max: '$timestamp' }
           }
@@ -5813,6 +5838,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             userId: '$_id.userId',
             sellerId: '$_id.sellerId',
             templateId: '$_id.templateId',
+            ipAddress: { $ifNull: ['$_id.ipAddress', 'Unknown IP'] },
             username: { $ifNull: [{ $arrayElemAt: ['$user.username', 0] }, 'Unknown user'] },
             userEmail: { $arrayElemAt: ['$user.email', 0] },
             userRole: { $arrayElemAt: ['$user.role', 0] },
@@ -5827,6 +5853,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             promptTokens: 1,
             completionTokens: 1,
             avgResponseTime: { $round: ['$avgResponseTime', 1] },
+            userAgents: 1,
             firstUsedAt: 1,
             lastUsedAt: 1
           }

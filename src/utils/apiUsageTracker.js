@@ -28,6 +28,9 @@ export async function trackApiUsage({
   templateId,
   sellerId,
   userId,
+  ipAddress,
+  forwardedFor,
+  userAgent,
   promptChars,
   completionChars
 }) {
@@ -57,6 +60,9 @@ export async function trackApiUsage({
       templateId,
       sellerId,
       userId,
+      ipAddress,
+      forwardedFor,
+      userAgent,
       promptChars,
       completionChars,
       year: now.getFullYear(),
