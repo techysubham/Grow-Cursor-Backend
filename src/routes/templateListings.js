@@ -5736,6 +5736,8 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
     const {
       startDate,
       endDate,
+      startDateTime,
+      endDateTime,
       userId,
       sellerId,
       templateId,
@@ -5746,7 +5748,20 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
     const match = { service: 'OpenAI' };
     const optionMatch = { service: 'OpenAI' };
 
-    if (startDate || endDate) {
+    if (startDateTime || endDateTime) {
+      match.timestamp = {};
+      optionMatch.timestamp = optionMatch.timestamp || {};
+      if (startDateTime) {
+        const start = new Date(startDateTime);
+        match.timestamp.$gte = start;
+        optionMatch.timestamp.$gte = start;
+      }
+      if (endDateTime) {
+        const end = new Date(endDateTime);
+        match.timestamp.$lte = end;
+        optionMatch.timestamp.$lte = end;
+      }
+    } else if (startDate || endDate) {
       match.timestamp = {};
       if (startDate) {
         const start = new Date(startDate);
