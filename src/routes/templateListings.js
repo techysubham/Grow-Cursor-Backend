@@ -15,12 +15,44 @@ import ApiUsage from '../models/ApiUsage.js';
 
 const router = express.Router();
 
+function firstHeaderValue(value) {
+  if (Array.isArray(value)) return value[0] || '';
+  return value || '';
+}
+
+function getClientIpInfo(req) {
+  const cfConnectingIp = firstHeaderValue(req.headers['cf-connecting-ip']).trim();
+  if (cfConnectingIp) {
+    return { ipAddress: cfConnectingIp, ipSource: 'cf-connecting-ip' };
+  }
+
+  const trueClientIp = firstHeaderValue(req.headers['true-client-ip']).trim();
+  if (trueClientIp) {
+    return { ipAddress: trueClientIp, ipSource: 'true-client-ip' };
+  }
+
+  const xRealIp = firstHeaderValue(req.headers['x-real-ip']).trim();
+  if (xRealIp) {
+    return { ipAddress: xRealIp, ipSource: 'x-real-ip' };
+  }
+
+  const forwardedFor = firstHeaderValue(req.headers['x-forwarded-for']);
+  const firstForwardedIp = forwardedFor.split(',').map(ip => ip.trim()).find(Boolean);
+  if (firstForwardedIp) {
+    return { ipAddress: firstForwardedIp, ipSource: 'x-forwarded-for' };
+  }
+
+  return { ipAddress: req.ip, ipSource: 'req.ip' };
+}
+
 function buildAiUsageContext(req, templateId, sellerId) {
+  const ipInfo = getClientIpInfo(req);
   return {
     templateId,
     sellerId,
     userId: req.user?.userId,
-    ipAddress: req.ip,
+    ipAddress: ipInfo.ipAddress,
+    ipSource: ipInfo.ipSource,
     forwardedFor: req.headers['x-forwarded-for'] || '',
     userAgent: req.get('user-agent') || ''
   };
@@ -5767,7 +5799,8 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
               userId: '$userId',
               sellerId: '$sellerId',
               templateId: '$templateId',
-              ipAddress: '$ipAddress'
+              ipAddress: '$ipAddress',
+              ipSource: '$ipSource'
             },
             aiCalls: { $sum: 1 },
             successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
@@ -5839,6 +5872,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             sellerId: '$_id.sellerId',
             templateId: '$_id.templateId',
             ipAddress: { $ifNull: ['$_id.ipAddress', 'Unknown IP'] },
+            ipSource: { $ifNull: ['$_id.ipSource', 'unknown'] },
             username: { $ifNull: [{ $arrayElemAt: ['$user.username', 0] }, 'Unknown user'] },
             userEmail: { $arrayElemAt: ['$user.email', 0] },
             userRole: { $arrayElemAt: ['$user.role', 0] },
