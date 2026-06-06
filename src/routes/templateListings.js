@@ -5760,6 +5760,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
     } = req.query;
 
     const match = { service: 'OpenAI' };
+    const optionMatch = { service: 'OpenAI' };
 
     if (startDate || endDate) {
       match.timestamp = {};
@@ -5767,11 +5768,15 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
         const start = new Date(startDate);
         start.setHours(0, 0, 0, 0);
         match.timestamp.$gte = start;
+        optionMatch.timestamp = optionMatch.timestamp || {};
+        optionMatch.timestamp.$gte = start;
       }
       if (endDate) {
         const end = new Date(endDate);
         end.setHours(23, 59, 59, 999);
         match.timestamp.$lte = end;
+        optionMatch.timestamp = optionMatch.timestamp || {};
+        optionMatch.timestamp.$lte = end;
       }
     }
 
@@ -5790,7 +5795,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
 
     const maxRows = Math.min(parseInt(limit, 10) || 500, 2000);
 
-    const [rows, fieldBreakdown, totalsAgg] = await Promise.all([
+    const [rows, fieldBreakdown, ipBreakdown, totalsAgg, filterOptionsAgg] = await Promise.all([
       ApiUsage.aggregate([
         { $match: match },
         {
@@ -5896,8 +5901,19 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
       ApiUsage.aggregate([
         { $match: match },
         {
+          $addFields: {
+            normalizedFieldName: {
+              $cond: [
+                { $or: [{ $eq: ['$fieldName', null] }, { $eq: ['$fieldName', ''] }] },
+                'Unknown field',
+                '$fieldName'
+              ]
+            }
+          }
+        },
+        {
           $group: {
-            _id: '$fieldName',
+            _id: '$normalizedFieldName',
             aiCalls: { $sum: 1 },
             successfulAsins: {
               $addToSet: {
@@ -5927,6 +5943,77 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
         }
       ]),
       ApiUsage.aggregate([
+        {
+          $match: {
+            ...match,
+            ipAddress: match.ipAddress || { $nin: [null, ''] },
+            ipSource: { $nin: [null, ''] }
+          }
+        },
+        {
+          $group: {
+            _id: '$ipAddress',
+            users: {
+              $addToSet: {
+                $cond: [{ $ne: ['$userId', null] }, '$userId', '$$REMOVE']
+              }
+            },
+            sellers: {
+              $addToSet: {
+                $cond: [{ $ne: ['$sellerId', null] }, '$sellerId', '$$REMOVE']
+              }
+            },
+            templates: {
+              $addToSet: {
+                $cond: [{ $ne: ['$templateId', null] }, '$templateId', '$$REMOVE']
+              }
+            },
+            aiCalls: { $sum: 1 },
+            successfulAsins: {
+              $addToSet: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  '$asin',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+            firstUsedAt: { $min: '$timestamp' },
+            lastUsedAt: { $max: '$timestamp' },
+            ipSources: {
+              $addToSet: {
+                $cond: [
+                  { $and: [{ $ne: ['$ipSource', null] }, { $ne: ['$ipSource', ''] }] },
+                  '$ipSource',
+                  '$$REMOVE'
+                ]
+              }
+            }
+          }
+        },
+        { $sort: { totalTokens: -1, aiCalls: -1 } },
+        {
+          $project: {
+            _id: 0,
+            ipAddress: { $ifNull: ['$_id', 'Unknown IP'] },
+            userCount: { $size: '$users' },
+            sellerCount: { $size: '$sellers' },
+            templateCount: { $size: '$templates' },
+            successfulAsinCount: { $size: '$successfulAsins' },
+            aiCalls: 1,
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1,
+            firstUsedAt: 1,
+            lastUsedAt: 1,
+            ipSources: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
         { $match: match },
         {
           $group: {
@@ -5934,6 +6021,15 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             aiCalls: { $sum: 1 },
             successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
             failedCalls: { $sum: { $cond: ['$success', 0, 1] } },
+            uniqueIps: {
+              $addToSet: {
+                $cond: [
+                  { $and: [{ $ne: ['$ipAddress', null] }, { $ne: ['$ipAddress', ''] }, { $ne: ['$ipSource', null] }, { $ne: ['$ipSource', ''] }] },
+                  '$ipAddress',
+                  '$$REMOVE'
+                ]
+              }
+            },
             successfulAsins: {
               $addToSet: {
                 $cond: [
@@ -5954,23 +6050,103 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             aiCalls: 1,
             successfulCalls: 1,
             failedCalls: 1,
+            uniqueIpCount: { $size: '$uniqueIps' },
             successfulAsinCount: { $size: '$successfulAsins' },
             totalTokens: 1,
             promptTokens: 1,
             completionTokens: 1
           }
         }
+      ]),
+      ApiUsage.aggregate([
+        { $match: optionMatch },
+        {
+          $facet: {
+            users: [
+              { $match: { userId: { $ne: null } } },
+              { $group: { _id: '$userId', count: { $sum: 1 }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
+              {
+                $project: {
+                  _id: 0,
+                  id: { $toString: '$_id' },
+                  label: { $ifNull: [{ $arrayElemAt: ['$user.username', 0] }, 'Unknown user'] },
+                  secondary: { $ifNull: [{ $arrayElemAt: ['$user.email', 0] }, { $arrayElemAt: ['$user.role', 0] }] },
+                  count: 1,
+                  lastUsedAt: 1
+                }
+              }
+            ],
+            sellers: [
+              { $match: { sellerId: { $ne: null } } },
+              { $group: { _id: '$sellerId', count: { $sum: 1 }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              { $lookup: { from: 'sellers', localField: '_id', foreignField: '_id', as: 'seller' } },
+              { $lookup: { from: 'users', localField: 'seller.user', foreignField: '_id', as: 'sellerUser' } },
+              {
+                $project: {
+                  _id: 0,
+                  id: { $toString: '$_id' },
+                  label: { $ifNull: [{ $arrayElemAt: ['$sellerUser.username', 0] }, 'Unknown seller'] },
+                  secondary: { $arrayElemAt: ['$sellerUser.email', 0] },
+                  count: 1,
+                  lastUsedAt: 1
+                }
+              }
+            ],
+            templates: [
+              { $match: { templateId: { $ne: null } } },
+              { $group: { _id: '$templateId', count: { $sum: 1 }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              { $lookup: { from: 'listingtemplates', localField: '_id', foreignField: '_id', as: 'template' } },
+              {
+                $project: {
+                  _id: 0,
+                  id: { $toString: '$_id' },
+                  label: { $ifNull: [{ $arrayElemAt: ['$template.name', 0] }, 'Unknown template'] },
+                  count: 1,
+                  lastUsedAt: 1
+                }
+              }
+            ],
+            ips: [
+              { $match: { ipAddress: { $nin: [null, ''] }, ipSource: { $nin: [null, ''] } } },
+              { $group: { _id: '$ipAddress', count: { $sum: 1 }, userIds: { $addToSet: '$userId' }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              {
+                $project: {
+                  _id: 0,
+                  id: '$_id',
+                  label: '$_id',
+                  count: 1,
+                  userCount: { $size: '$userIds' },
+                  lastUsedAt: 1
+                }
+              }
+            ]
+          }
+        }
       ])
     ]);
+
+    const filterOptions = filterOptionsAgg[0] || { users: [], sellers: [], templates: [], ips: [] };
 
     res.json({
       success: true,
       rows,
       fieldBreakdown,
+      ipBreakdown,
+      filterOptions,
       totals: totalsAgg[0] || {
         aiCalls: 0,
         successfulCalls: 0,
         failedCalls: 0,
+        uniqueIpCount: 0,
         successfulAsinCount: 0,
         totalTokens: 0,
         promptTokens: 0,
