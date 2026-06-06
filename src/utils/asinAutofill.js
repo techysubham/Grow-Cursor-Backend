@@ -189,7 +189,10 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
           fieldType: config.fieldType,
           templateId: trackingContext.templateId,
           sellerId: trackingContext.sellerId,
-          userId: trackingContext.userId
+          userId: trackingContext.userId,
+          ipAddress: trackingContext.ipAddress,
+          forwardedFor: trackingContext.forwardedFor,
+          userAgent: trackingContext.userAgent
         });
 
         // Auto-truncate based on field type:

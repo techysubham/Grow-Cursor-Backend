@@ -35,6 +35,9 @@ export async function generateWithGemini(prompt, options = {}) {
       templateId,
       sellerId,
       userId,
+      ipAddress,
+      forwardedFor,
+      userAgent,
       model = 'gpt-4o-mini'
     } = options;
 
@@ -75,6 +78,9 @@ export async function generateWithGemini(prompt, options = {}) {
         templateId,
         sellerId,
         userId,
+        ipAddress,
+        forwardedFor,
+        userAgent,
         promptChars: prompt.length,
         completionChars: content.length
       }).catch(err => console.error('[OpenAI Usage Tracker] Failed to track:', err.message));
@@ -96,6 +102,9 @@ export async function generateWithGemini(prompt, options = {}) {
         templateId,
         sellerId,
         userId,
+        ipAddress,
+        forwardedFor,
+        userAgent,
         promptChars: prompt.length
       }).catch(err => console.error('[OpenAI Usage Tracker] Failed to track error:', err.message));
       throw new Error('Failed to generate content with OpenAI');
