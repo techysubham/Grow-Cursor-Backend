@@ -36,6 +36,7 @@ export async function generateWithGemini(prompt, options = {}) {
       sellerId,
       userId,
       ipAddress,
+      ipSource,
       forwardedFor,
       userAgent,
       model = 'gpt-4o-mini'
@@ -79,6 +80,7 @@ export async function generateWithGemini(prompt, options = {}) {
         sellerId,
         userId,
         ipAddress,
+        ipSource,
         forwardedFor,
         userAgent,
         promptChars: prompt.length,
@@ -103,6 +105,7 @@ export async function generateWithGemini(prompt, options = {}) {
         sellerId,
         userId,
         ipAddress,
+        ipSource,
         forwardedFor,
         userAgent,
         promptChars: prompt.length

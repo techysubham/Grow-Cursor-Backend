@@ -191,6 +191,7 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
           sellerId: trackingContext.sellerId,
           userId: trackingContext.userId,
           ipAddress: trackingContext.ipAddress,
+          ipSource: trackingContext.ipSource,
           forwardedFor: trackingContext.forwardedFor,
           userAgent: trackingContext.userAgent
         });
