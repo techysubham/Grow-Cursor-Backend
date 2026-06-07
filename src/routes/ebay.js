@@ -14798,7 +14798,7 @@ router.get('/selling/summary', requireAuth, async (req, res) => {
  */
 router.post('/end-item', requireAuth, async (req, res) => {
   try {
-    const { sellerId, itemId, endingReason = 'NotAvailable', source } = req.body;
+    const { sellerId, itemId, endingReason = 'NotAvailable', source, country, marketplaceId } = req.body;
 
     if (!sellerId || !itemId) {
       return res.status(400).json({ error: 'Missing sellerId or itemId' });
@@ -14850,7 +14850,13 @@ router.post('/end-item', requireAuth, async (req, res) => {
     // Log successful end-listing action if a valid source is provided
     if (source && ['duplicate_sku', 'expiry_listing'].includes(source)) {
       try {
-        await EndListingLog.create({ seller: sellerId, itemId, source });
+        await EndListingLog.create({
+          seller: sellerId,
+          itemId,
+          source,
+          country: typeof country === 'string' && country.trim() ? country.trim() : null,
+          marketplaceId: typeof marketplaceId === 'string' && marketplaceId.trim() ? marketplaceId.trim() : null,
+        });
       } catch (logErr) {
         console.error('[End Item] Failed to write EndListingLog:', logErr.message);
       }
@@ -14988,14 +14994,17 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
         { $match: { endedAt: { $gte: start, $lte: end } } },
         {
           $group: {
-            _id: '$seller',
+            _id: {
+              seller: '$seller',
+              country: { $ifNull: ['$country', 'Unknown'] }
+            },
             endedListings: { $sum: 1 }
           }
         },
         {
           $lookup: {
             from: 'sellers',
-            localField: '_id',
+            localField: '_id.seller',
             foreignField: '_id',
             as: 'sellerDoc'
           }
@@ -15013,8 +15022,9 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
         {
           $project: {
             _id: 0,
-            sellerId: '$_id',
+            sellerId: '$_id.seller',
             sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
+            country: '$_id.country',
             endedListings: 1
           }
         }
@@ -15038,7 +15048,7 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
       if (existingMarketplace) {
         existingMarketplace.successfulListings += successfulListings;
       } else {
-        existing.marketplaces.push({ country, successfulListings });
+        existing.marketplaces.push({ country, successfulListings, endedListings: 0 });
       }
       bySeller.set(key, existing);
     }
@@ -15052,13 +15062,25 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
         endedListings: 0,
         marketplaces: []
       };
-      existing.endedListings += row.endedListings || 0;
+      const country = row.country || 'Unknown';
+      const endedListings = row.endedListings || 0;
+      existing.endedListings += endedListings;
+      const existingMarketplace = existing.marketplaces.find(m => m.country === country);
+      if (existingMarketplace) {
+        existingMarketplace.endedListings = (existingMarketplace.endedListings || 0) + endedListings;
+      } else {
+        existing.marketplaces.push({ country, successfulListings: 0, endedListings });
+      }
       bySeller.set(key, existing);
     }
 
     const result = Array.from(bySeller.values())
       .map(row => ({
         ...row,
+        marketplaces: (row.marketplaces || []).map(marketplace => ({
+          ...marketplace,
+          netListings: (marketplace.successfulListings || 0) - (marketplace.endedListings || 0)
+        })),
         netListings: (row.successfulListings || 0) - (row.endedListings || 0)
       }))
       .sort((a, b) => b.successfulListings - a.successfulListings || b.endedListings - a.endedListings);

@@ -25,7 +25,8 @@ function getPTDayBoundsUTC(dateStr) {
 
 /**
  * GET /end-listing-logs/stats
- * Returns per-seller end-listing counts grouped by source (duplicate_sku / expiry_listing),
+ * Returns per-seller end-listing counts grouped by source (duplicate_sku / expiry_listing)
+ * and country,
  * optionally filtered by sellerId and date range.
  *
  * Query params:
@@ -60,7 +61,11 @@ router.get('/stats', requireAuth, async (req, res) => {
       { $match: matchCriteria },
       {
         $group: {
-          _id: { seller: '$seller', source: '$source' },
+          _id: {
+            seller: '$seller',
+            source: '$source',
+            country: { $ifNull: ['$country', 'Unknown'] },
+          },
           count: { $sum: 1 },
         },
       },
@@ -69,7 +74,7 @@ router.get('/stats', requireAuth, async (req, res) => {
         $group: {
           _id: '$_id.seller',
           sources: {
-            $push: { source: '$_id.source', count: '$count' },
+            $push: { source: '$_id.source', country: '$_id.country', count: '$count' },
           },
         },
       },
@@ -104,14 +109,39 @@ router.get('/stats', requireAuth, async (req, res) => {
 
     // Flatten sources array into named fields
     const result = rows.map(row => {
-      const duplicateSkuCount = row.sources.find(s => s.source === 'duplicate_sku')?.count || 0;
-      const expiryListingCount = row.sources.find(s => s.source === 'expiry_listing')?.count || 0;
+      const duplicateSkuCount = row.sources
+        .filter(s => s.source === 'duplicate_sku')
+        .reduce((sum, s) => sum + (s.count || 0), 0);
+      const expiryListingCount = row.sources
+        .filter(s => s.source === 'expiry_listing')
+        .reduce((sum, s) => sum + (s.count || 0), 0);
+      const countryMap = new Map();
+
+      for (const sourceRow of row.sources) {
+        const country = sourceRow.country || 'Unknown';
+        const existing = countryMap.get(country) || {
+          country,
+          duplicateSkuCount: 0,
+          expiryListingCount: 0,
+          total: 0,
+        };
+        if (sourceRow.source === 'duplicate_sku') {
+          existing.duplicateSkuCount += sourceRow.count || 0;
+        } else if (sourceRow.source === 'expiry_listing') {
+          existing.expiryListingCount += sourceRow.count || 0;
+        }
+        existing.total += sourceRow.count || 0;
+        countryMap.set(country, existing);
+      }
+
       return {
         sellerId: row.sellerId,
         sellerName: row.sellerName || 'Unknown',
         duplicateSkuCount,
         expiryListingCount,
         total: duplicateSkuCount + expiryListingCount,
+        countryBreakdown: Array.from(countryMap.values())
+          .sort((a, b) => b.total - a.total || a.country.localeCompare(b.country)),
       };
     });
 
