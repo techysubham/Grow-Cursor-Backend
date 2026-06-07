@@ -134,16 +134,13 @@ router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
   // Compatibility admins and creating compatibility editors default to Compatibility
   if (role === 'compatibilityadmin' || newUserRole === 'compatibilityeditor') finalDepartment = 'Compatibility';
 
-  // Set isStrictTimer to false for superadmin, true for all others
-  const isStrictTimer = newUserRole !== 'superadmin';
-
   const user = await User.create({
     email,
     username,
     passwordHash,
     role: newUserRole,
     department: finalDepartment,
-    isStrictTimer
+    isStrictTimer: false
   });
 
   // Create an EmployeeProfile for the new user so they appear on admin pages immediately

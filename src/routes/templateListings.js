@@ -5731,11 +5731,49 @@ router.post('/bulk-deactivate', requireAuth, async (req, res) => {
   }
 });
 
+const IST_OFFSET_MINUTES = 330;
+
+const parseIstDateBoundary = (dateValue, isEndOfDay = false) => {
+  const match = String(dateValue || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return new Date(dateValue);
+
+  const [, year, month, day] = match.map(Number);
+  const utcTime = Date.UTC(
+    year,
+    month - 1,
+    day,
+    isEndOfDay ? 23 : 0,
+    isEndOfDay ? 59 : 0,
+    isEndOfDay ? 59 : 0,
+    isEndOfDay ? 999 : 0
+  );
+  return new Date(utcTime - IST_OFFSET_MINUTES * 60 * 1000);
+};
+
+const parseIstDateTime = (dateTimeValue) => {
+  const match = String(dateTimeValue || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return new Date(dateTimeValue);
+
+  const [, year, month, day, hour, minute, second = '0'] = match;
+  const utcTime = Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+    0
+  );
+  return new Date(utcTime - IST_OFFSET_MINUTES * 60 * 1000);
+};
+
 router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
   try {
     const {
       startDate,
       endDate,
+      startDateTime,
+      endDateTime,
       userId,
       sellerId,
       templateId,
@@ -5746,18 +5784,29 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
     const match = { service: 'OpenAI' };
     const optionMatch = { service: 'OpenAI' };
 
-    if (startDate || endDate) {
+    if (startDateTime || endDateTime) {
+      match.timestamp = {};
+      optionMatch.timestamp = optionMatch.timestamp || {};
+      if (startDateTime) {
+        const start = parseIstDateTime(startDateTime);
+        match.timestamp.$gte = start;
+        optionMatch.timestamp.$gte = start;
+      }
+      if (endDateTime) {
+        const end = parseIstDateTime(endDateTime);
+        match.timestamp.$lte = end;
+        optionMatch.timestamp.$lte = end;
+      }
+    } else if (startDate || endDate) {
       match.timestamp = {};
       if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
+        const start = parseIstDateBoundary(startDate);
         match.timestamp.$gte = start;
         optionMatch.timestamp = optionMatch.timestamp || {};
         optionMatch.timestamp.$gte = start;
       }
       if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
+        const end = parseIstDateBoundary(endDate, true);
         match.timestamp.$lte = end;
         optionMatch.timestamp = optionMatch.timestamp || {};
         optionMatch.timestamp.$lte = end;
