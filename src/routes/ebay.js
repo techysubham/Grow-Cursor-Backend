@@ -11312,8 +11312,10 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
     const endTimeFrom = now.toISOString();
     const endTimeTo = cutoff.toISOString();
 
-    const maxWatchers = Math.max(0, parseInt(req.query.maxWatchers ?? '5', 10) || 5);
-    const maxViews    = Math.max(0, parseInt(req.query.maxViews    ?? '5', 10) || 5);
+    const maxWatchersParam = parseInt(req.query.maxWatchers ?? '5', 10);
+    const maxViewsParam = parseInt(req.query.maxViews ?? '5', 10);
+    const maxWatchers = Number.isFinite(maxWatchersParam) ? Math.max(0, maxWatchersParam) : 5;
+    const maxViews = Number.isFinite(maxViewsParam) ? Math.max(0, maxViewsParam) : 5;
 
     let page = 1;
     let totalPages = 1;
@@ -11385,7 +11387,7 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
         const hitCount = parseInt(item.HitCount || '0', 10);
         const quantitySold = parseInt(item.SellingStatus?.QuantitySold || '0', 10);
 
-        if (watchCount >= maxWatchers) continue;
+        if (watchCount > maxWatchers) continue;
         if (quantitySold > 0) continue;
 
         const timeLeftMs = endTime ? new Date(endTime).getTime() - now.getTime() : 0;
@@ -11474,8 +11476,12 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
       }
 
       const viewsMap = new Map();
+      const unavailableViewIds = new Set();
       const accessToken = await ensureValidToken(seller);
       const ANALYTICS_BATCH = 200;
+      const EXPIRING_LISTINGS_ANALYTICS_REQUEST_DELAY_MS = 2500;
+      let analyticsRequestCount = 0;
+      let analyticsViewsUnavailable = false;
 
       for (const [marketplaceId, ids] of Object.entries(byMarketplace)) {
         if (aborted) break;
@@ -11484,6 +11490,10 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
           const batch  = ids.slice(i, i + ANALYTICS_BATCH);
           const filter = `marketplace_ids:{${marketplaceId}},date_range:[${fromStr}..${toStr}],listing_ids:{${batch.join('|')}}`;
           try {
+            if (analyticsRequestCount > 0) {
+              await new Promise(resolve => setTimeout(resolve, EXPIRING_LISTINGS_ANALYTICS_REQUEST_DELAY_MS));
+            }
+            analyticsRequestCount++;
             const analyticsRes = await axios.get(
               'https://api.ebay.com/sell/analytics/v1/traffic_report',
               {
@@ -11491,6 +11501,7 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
                 headers: { Authorization: `Bearer ${accessToken}`, 'X-EBAY-C-MARKETPLACE-ID': marketplaceId },
               }
             );
+            for (const id of batch) viewsMap.set(String(id), 0);
             for (const rec of (analyticsRes.data?.records || [])) {
               const id    = rec.dimensionValues?.[0]?.value;
               const views = rec.metricValues?.[0]?.value ?? 0;
@@ -11498,16 +11509,30 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
             }
           } catch (analyticsErr) {
             console.warn(`[Expiring Listings] Analytics API error for ${marketplaceId}:`, analyticsErr.response?.data || analyticsErr.message);
-            // Non-fatal: listings in this batch keep hitCount=0 and pass the filter
+            analyticsViewsUnavailable = true;
+            for (const id of batch) unavailableViewIds.add(String(id));
           }
         }
       }
 
-      // Update hitCount with real analytics value, then apply views filter
-      for (const l of filteredListings) {
-        l.hitCount = viewsMap.get(String(l.itemId)) ?? 0;
+      if (analyticsViewsUnavailable) {
+        send({
+          type: 'warning',
+          warning: 'eBay Analytics rate limit was reached; listings with unknown views were excluded. Try again after the quota resets.'
+        });
       }
-      const finalListings = filteredListings.filter(l => l.hitCount < maxViews);
+
+      // Update hitCount with real analytics value, then apply views filter.
+      // Listings whose Analytics request failed are excluded instead of falling back to Trading API HitCount.
+      for (const l of filteredListings) {
+        l.viewsUnavailable = unavailableViewIds.has(String(l.itemId));
+        l.hitCount = viewsMap.get(String(l.itemId)) ?? null;
+      }
+      const finalListings = filteredListings.filter(l =>
+        !l.viewsUnavailable &&
+        l.hitCount !== null &&
+        l.hitCount <= maxViews
+      );
 
       send({ type: 'done', count: finalListings.length, listings: finalListings });
     } else {
@@ -14773,7 +14798,7 @@ router.get('/selling/summary', requireAuth, async (req, res) => {
  */
 router.post('/end-item', requireAuth, async (req, res) => {
   try {
-    const { sellerId, itemId, endingReason = 'NotAvailable', source } = req.body;
+    const { sellerId, itemId, endingReason = 'NotAvailable', source, country, marketplaceId } = req.body;
 
     if (!sellerId || !itemId) {
       return res.status(400).json({ error: 'Missing sellerId or itemId' });
@@ -14825,7 +14850,13 @@ router.post('/end-item', requireAuth, async (req, res) => {
     // Log successful end-listing action if a valid source is provided
     if (source && ['duplicate_sku', 'expiry_listing'].includes(source)) {
       try {
-        await EndListingLog.create({ seller: sellerId, itemId, source });
+        await EndListingLog.create({
+          seller: sellerId,
+          itemId,
+          source,
+          country: typeof country === 'string' && country.trim() ? country.trim() : null,
+          marketplaceId: typeof marketplaceId === 'string' && marketplaceId.trim() ? marketplaceId.trim() : null,
+        });
       } catch (logErr) {
         console.error('[End Item] Failed to write EndListingLog:', logErr.message);
       }
@@ -14963,14 +14994,17 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
         { $match: { endedAt: { $gte: start, $lte: end } } },
         {
           $group: {
-            _id: '$seller',
+            _id: {
+              seller: '$seller',
+              country: { $ifNull: ['$country', 'Unknown'] }
+            },
             endedListings: { $sum: 1 }
           }
         },
         {
           $lookup: {
             from: 'sellers',
-            localField: '_id',
+            localField: '_id.seller',
             foreignField: '_id',
             as: 'sellerDoc'
           }
@@ -14988,8 +15022,9 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
         {
           $project: {
             _id: 0,
-            sellerId: '$_id',
+            sellerId: '$_id.seller',
             sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
+            country: '$_id.country',
             endedListings: 1
           }
         }
@@ -15013,7 +15048,7 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
       if (existingMarketplace) {
         existingMarketplace.successfulListings += successfulListings;
       } else {
-        existing.marketplaces.push({ country, successfulListings });
+        existing.marketplaces.push({ country, successfulListings, endedListings: 0 });
       }
       bySeller.set(key, existing);
     }
@@ -15027,13 +15062,25 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
         endedListings: 0,
         marketplaces: []
       };
-      existing.endedListings += row.endedListings || 0;
+      const country = row.country || 'Unknown';
+      const endedListings = row.endedListings || 0;
+      existing.endedListings += endedListings;
+      const existingMarketplace = existing.marketplaces.find(m => m.country === country);
+      if (existingMarketplace) {
+        existingMarketplace.endedListings = (existingMarketplace.endedListings || 0) + endedListings;
+      } else {
+        existing.marketplaces.push({ country, successfulListings: 0, endedListings });
+      }
       bySeller.set(key, existing);
     }
 
     const result = Array.from(bySeller.values())
       .map(row => ({
         ...row,
+        marketplaces: (row.marketplaces || []).map(marketplace => ({
+          ...marketplace,
+          netListings: (marketplace.successfulListings || 0) - (marketplace.endedListings || 0)
+        })),
         netListings: (row.successfulListings || 0) - (row.endedListings || 0)
       }))
       .sort((a, b) => b.successfulListings - a.successfulListings || b.endedListings - a.endedListings);

@@ -3,6 +3,8 @@ import mongoose from 'mongoose';
 const EndListingLogSchema = new mongoose.Schema({
   seller: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', required: true },
   itemId: { type: String, required: true },
+  country: { type: String, default: null },
+  marketplaceId: { type: String, default: null },
   source: {
     type: String,
     enum: ['duplicate_sku', 'expiry_listing'],
@@ -12,6 +14,7 @@ const EndListingLogSchema = new mongoose.Schema({
 }, { timestamps: false });
 
 EndListingLogSchema.index({ seller: 1, endedAt: -1 });
+EndListingLogSchema.index({ seller: 1, country: 1, endedAt: -1 });
 EndListingLogSchema.index({ endedAt: -1 });
 
 export default mongoose.model('EndListingLog', EndListingLogSchema);
