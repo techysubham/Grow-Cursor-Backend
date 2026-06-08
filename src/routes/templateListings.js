@@ -6,6 +6,7 @@ import ListingTemplate from '../models/ListingTemplate.js';
 import Seller from '../models/Seller.js';
 import SellerPricingConfig from '../models/SellerPricingConfig.js';
 import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
+import { calculateStartPrice } from '../utils/pricingCalculator.js';
 import { generateSKUFromASIN, generateSKUWithCount } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
@@ -132,6 +133,52 @@ function buildAmazonSourceData(amazonData) {
     compatibility: amazonData.compatibility,
     productInfo: amazonData.productInfo || null
   };
+}
+
+function calculatePricingOnly(asin, amazonPrice, pricingConfig) {
+  if (!pricingConfig?.enabled) return null;
+
+  if (!amazonPrice || String(amazonPrice).trim() === '') {
+    console.warn(`[ASIN: ${asin}] ⚠️ duplicate pricing: Amazon price not available — cannot calculate startPrice`);
+    return {
+      enabled: true,
+      error: 'Amazon price not available'
+    };
+  }
+
+  try {
+    const amazonCost = parseFloat(String(amazonPrice).replace(/[^0-9.]/g, ''));
+
+    if (!isNaN(amazonCost) && amazonCost > 0) {
+      const result = calculateStartPrice(pricingConfig, amazonCost);
+      const pricingCalculation = {
+        enabled: true,
+        amazonCost: amazonPrice,
+        calculatedStartPrice: result.price.toFixed(2),
+        breakdown: result.breakdown
+      };
+
+      if (result.breakdown.profitTier?.enabled) {
+        console.log(`[ASIN: ${asin}] 💰 duplicate pricing: ${amazonPrice} → $${result.price.toFixed(2)} (tier: ${result.breakdown.profitTier.costRange}, +₹${result.breakdown.profitTier.profit})`);
+      } else {
+        console.log(`[ASIN: ${asin}] 💰 duplicate pricing: ${amazonPrice} → $${result.price.toFixed(2)}`);
+      }
+
+      return pricingCalculation;
+    }
+
+    console.warn(`[ASIN: ${asin}] ⚠️ duplicate pricing: invalid price "${amazonPrice}" (parsed: ${amazonCost})`);
+    return {
+      enabled: true,
+      error: `Invalid price value: ${amazonPrice}`
+    };
+  } catch (error) {
+    console.error(`[ASIN: ${asin}] ❌ duplicate pricing error: ${error.message}`);
+    return {
+      enabled: true,
+      error: error.message
+    };
+  }
 }
 
 async function runWithConcurrency(items, concurrency, worker, shouldContinue = () => true) {
@@ -1061,8 +1108,6 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           const futureSKU = generateSKUWithCount(asin, asinDoc?.listingCount || 0);
 
           let sourceData = null;
-          let generatedCoreFields = {};
-          let generatedCustomFields = {};
           let pricingCalculation = null;
           let freshAmazonSourcePrice = null;
           let duplicateImages = Array.isArray(asinDoc?.images) ? asinDoc.images : [];
@@ -1084,20 +1129,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
                   progressStage: 'generating'
                 });
                 freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : freshAmazonSourcePrice;
-                const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId, aiRunContext));
-                generatedCoreFields = {
-                  ...(template.coreFieldDefaults || {}),
-                  ...configs.coreFields
-                };
-                generatedCustomFields = configs.customFields || {};
-                if (template?.customColumns && template.customColumns.length > 0) {
-                  template.customColumns.forEach(col => {
-                    if (col.defaultValue && !generatedCustomFields[col.name]) {
-                      generatedCustomFields[col.name] = col.defaultValue;
-                    }
-                  });
-                }
-                pricingCalculation = configs.pricingCalculation;
+                pricingCalculation = calculatePricingOnly(asin, amazonData.price, pricingConfig);
               }
             } catch (fetchErr) {
               // Non-fatal: chip won't render but the rest of the modal works fine
@@ -1116,18 +1148,17 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             sourceData,
             pricingCalculation,
             generatedListing: {
-              ...generatedCoreFields,
-              title: generatedCoreFields.title ?? existingListing.title,
-              description: generatedCoreFields.description ?? existingListing.description,
-              startPrice: generatedCoreFields.startPrice ?? freshStartPrice,
-              quantity: generatedCoreFields.quantity ?? existingListing.quantity,
-              itemPhotoUrl: generatedCoreFields.itemPhotoUrl ?? existingListing.itemPhotoUrl ?? '',
-              conditionId: generatedCoreFields.conditionId ?? existingListing.conditionId ?? '',
-              format: generatedCoreFields.format ?? existingListing.format ?? '',
-              duration: generatedCoreFields.duration ?? existingListing.duration ?? '',
-              location: generatedCoreFields.location ?? existingListing.location ?? '',
+              title: existingListing.title,
+              description: existingListing.description,
+              startPrice: freshStartPrice,
+              quantity: existingListing.quantity,
+              itemPhotoUrl: existingListing.itemPhotoUrl || '',
+              conditionId: existingListing.conditionId || '',
+              format: existingListing.format || '',
+              duration: existingListing.duration || '',
+              location: existingListing.location || '',
               customLabel: futureSKU,
-              customFields: Object.keys(generatedCustomFields).length > 0 ? generatedCustomFields : existingCustomFields,
+              customFields: existingCustomFields,
               _asinReference: asin,
               _aiRunId: aiRunContext.aiRunId,
               _existingListingId: existingListing._id,
@@ -1415,27 +1446,12 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
           const futureSKU = generateSKUWithCount(asin, doc?.listingCount || 0);
 
           let sourceData = null;
-          let generatedCoreFields = {};
-          let generatedCustomFields = {};
           let pricingCalculation = null;
 
           try {
             const amazonData = await fetchAmazonData(asin, region, { forceRefresh: true });
             sourceData = buildAmazonSourceData(amazonData);
-            const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId, aiRunContext));
-            generatedCoreFields = {
-              ...(template.coreFieldDefaults || {}),
-              ...configs.coreFields
-            };
-            generatedCustomFields = configs.customFields || {};
-            if (template?.customColumns && template.customColumns.length > 0) {
-              template.customColumns.forEach(col => {
-                if (col.defaultValue && !generatedCustomFields[col.name]) {
-                  generatedCustomFields[col.name] = col.defaultValue;
-                }
-              });
-            }
-            pricingCalculation = configs.pricingCalculation;
+            pricingCalculation = calculatePricingOnly(asin, amazonData.price, pricingConfig);
           } catch (fetchErr) {
             console.warn(`[directory duplicate_updateable] Fresh ScraperAPI fetch failed for ${asin}:`, fetchErr.message);
           }
@@ -1449,18 +1465,17 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             sourceData,
             pricingCalculation,
             generatedListing: {
-              ...generatedCoreFields,
-              title: generatedCoreFields.title ?? existingListing.title,
-              description: generatedCoreFields.description ?? existingListing.description,
-              startPrice: generatedCoreFields.startPrice ?? freshStartPrice,
-              quantity: generatedCoreFields.quantity ?? existingListing.quantity,
-              itemPhotoUrl: generatedCoreFields.itemPhotoUrl ?? existingListing.itemPhotoUrl ?? '',
-              conditionId: generatedCoreFields.conditionId ?? existingListing.conditionId ?? '',
-              format: generatedCoreFields.format ?? existingListing.format ?? '',
-              duration: generatedCoreFields.duration ?? existingListing.duration ?? '',
-              location: generatedCoreFields.location ?? existingListing.location ?? '',
+              title: existingListing.title,
+              description: existingListing.description,
+              startPrice: freshStartPrice,
+              quantity: existingListing.quantity,
+              itemPhotoUrl: existingListing.itemPhotoUrl || '',
+              conditionId: existingListing.conditionId || '',
+              format: existingListing.format || '',
+              duration: existingListing.duration || '',
+              location: existingListing.location || '',
               customLabel: futureSKU,
-              customFields: Object.keys(generatedCustomFields).length > 0 ? generatedCustomFields : existingListing.customFields || {},
+              customFields: existingListing.customFields || {},
               _asinReference: asin,
               _aiRunId: aiRunContext.aiRunId,
               _existingListingId: existingListing._id
@@ -2506,43 +2521,24 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
           const generatedSKU = generateSKUFromASIN(asin);
 
           const amazonData = await fetchAmazonData(asin, region, { forceRefresh: true });
-          const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
-            amazonData,
-            template.asinAutomation.fieldConfigs,
-            pricingConfig,
-            buildAiUsageContext(req, templateId, sellerId, aiRunContext)
-          );
-
-          const mergedCoreFields = {
-            ...(template.coreFieldDefaults || {}),
-            ...coreFields
-          };
-
-          if (template?.customColumns && template.customColumns.length > 0) {
-            template.customColumns.forEach(col => {
-              if (col.defaultValue && !customFields[col.name]) {
-                customFields[col.name] = col.defaultValue;
-              }
-            });
-          }
+          const pricingCalculation = calculatePricingOnly(asin, amazonData.price, pricingConfig);
 
           return {
             asin,
             status: 'duplicate_updateable',
             autoFilledData: {
               coreFields: {
-                ...mergedCoreFields,
-                title: mergedCoreFields.title ?? existingListing.title,
-                description: mergedCoreFields.description ?? existingListing.description,
-                startPrice: mergedCoreFields.startPrice ?? existingListing.startPrice,
-                quantity: mergedCoreFields.quantity ?? existingListing.quantity,
-                itemPhotoUrl: mergedCoreFields.itemPhotoUrl ?? existingListing.itemPhotoUrl ?? '',
-                conditionId: mergedCoreFields.conditionId ?? existingListing.conditionId ?? '',
-                format: mergedCoreFields.format ?? existingListing.format ?? '',
-                duration: mergedCoreFields.duration ?? existingListing.duration ?? '',
-                location: mergedCoreFields.location ?? existingListing.location ?? ''
+                title: existingListing.title,
+                description: existingListing.description,
+                startPrice: pricingCalculation?.calculatedStartPrice ?? existingListing.startPrice,
+                quantity: existingListing.quantity,
+                itemPhotoUrl: existingListing.itemPhotoUrl || '',
+                conditionId: existingListing.conditionId || '',
+                format: existingListing.format || '',
+                duration: existingListing.duration || '',
+                location: existingListing.location || ''
               },
-              customFields
+              customFields: existingListing.customFields || {}
             },
             amazonSource: {
               title: amazonData.title,
@@ -5913,33 +5909,40 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
 
     const match = { service: 'OpenAI' };
     const optionMatch = { service: 'OpenAI' };
+    let listingRunDateRange = null;
 
     if (startDateTime || endDateTime) {
       match.timestamp = {};
       optionMatch.timestamp = optionMatch.timestamp || {};
+      listingRunDateRange = {};
       if (startDateTime) {
         const start = parseIstDateTime(startDateTime);
         match.timestamp.$gte = start;
         optionMatch.timestamp.$gte = start;
+        listingRunDateRange.$gte = start;
       }
       if (endDateTime) {
         const end = parseIstDateTime(endDateTime);
         match.timestamp.$lte = end;
         optionMatch.timestamp.$lte = end;
+        listingRunDateRange.$lte = end;
       }
     } else if (startDate || endDate) {
       match.timestamp = {};
+      listingRunDateRange = {};
       if (startDate) {
         const start = parseIstDateBoundary(startDate);
         match.timestamp.$gte = start;
         optionMatch.timestamp = optionMatch.timestamp || {};
         optionMatch.timestamp.$gte = start;
+        listingRunDateRange.$gte = start;
       }
       if (endDate) {
         const end = parseIstDateBoundary(endDate, true);
         match.timestamp.$lte = end;
         optionMatch.timestamp = optionMatch.timestamp || {};
         optionMatch.timestamp.$lte = end;
+        listingRunDateRange.$lte = end;
       }
     }
 
@@ -6462,9 +6465,111 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
     ]);
 
     const filterOptions = filterOptionsAgg[0] || { users: [], sellers: [], templates: [], ips: [] };
+    const rowsWithUsage = rows;
+    let zeroCallRunRows = [];
+
+    if (!ipAddress || ipAddress === 'all') {
+      const runIdsWithUsage = rowsWithUsage
+        .map(row => row.aiRunId)
+        .filter(runId => runId && runId !== 'legacy-usage');
+      const listingRunMatch = {};
+
+      if (runIdsWithUsage.length > 0) {
+        listingRunMatch.aiRunId = { $nin: runIdsWithUsage };
+      }
+      if (listingRunDateRange) {
+        listingRunMatch.lastSavedFromReviewAt = listingRunDateRange;
+      }
+      if (userId && userId !== 'all' && mongoose.Types.ObjectId.isValid(userId)) {
+        listingRunMatch.userId = new mongoose.Types.ObjectId(userId);
+      }
+      if (sellerId && sellerId !== 'all' && mongoose.Types.ObjectId.isValid(sellerId)) {
+        listingRunMatch.sellerId = new mongoose.Types.ObjectId(sellerId);
+      }
+      if (templateId && templateId !== 'all' && mongoose.Types.ObjectId.isValid(templateId)) {
+        listingRunMatch.templateId = new mongoose.Types.ObjectId(templateId);
+      }
+
+      zeroCallRunRows = await AiListingRun.aggregate([
+        { $match: listingRunMatch },
+        { $sort: { lastSavedFromReviewAt: -1, updatedAt: -1 } },
+        { $limit: maxRows },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'userId',
+            foreignField: '_id',
+            as: 'user'
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: 'sellerId',
+            foreignField: '_id',
+            as: 'seller'
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'seller.user',
+            foreignField: '_id',
+            as: 'sellerUser'
+          }
+        },
+        {
+          $lookup: {
+            from: 'listingtemplates',
+            localField: 'templateId',
+            foreignField: '_id',
+            as: 'template'
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            userId: 1,
+            sellerId: 1,
+            templateId: 1,
+            aiRunId: 1,
+            aiRunStartedAt: { $ifNull: ['$createdAt', '$lastSavedFromReviewAt'] },
+            ipAddress: 'No OpenAI calls',
+            ipSource: 'duplicate-skip',
+            username: { $ifNull: [{ $arrayElemAt: ['$user.username', 0] }, 'Unknown user'] },
+            userEmail: { $arrayElemAt: ['$user.email', 0] },
+            userRole: { $arrayElemAt: ['$user.role', 0] },
+            sellerName: { $ifNull: [{ $arrayElemAt: ['$sellerUser.username', 0] }, 'Unknown seller'] },
+            sellerEmail: { $arrayElemAt: ['$sellerUser.email', 0] },
+            templateName: { $ifNull: [{ $arrayElemAt: ['$template.name', 0] }, 'Unknown template'] },
+            aiCalls: { $literal: 0 },
+            successfulCalls: { $literal: 0 },
+            failedCalls: { $literal: 0 },
+            savedFromReviewCount: { $ifNull: ['$savedFromReviewCount', 0] },
+            reviewSaveAttempts: { $ifNull: ['$reviewSaveAttempts', 0] },
+            lastSavedFromReviewAt: 1,
+            successfulAsinCount: { $literal: 0 },
+            successfulAsinRunCount: { $literal: 0 },
+            successfulAsinRuns: { $literal: [] },
+            totalTokens: { $literal: 0 },
+            promptTokens: { $literal: 0 },
+            completionTokens: { $literal: 0 },
+            avgResponseTime: { $literal: null },
+            userAgents: { $literal: [] },
+            firstUsedAt: '$lastSavedFromReviewAt',
+            lastUsedAt: '$lastSavedFromReviewAt'
+          }
+        }
+      ]);
+    }
+
+    const combinedRows = [...rowsWithUsage, ...zeroCallRunRows]
+      .sort((a, b) => new Date(b.lastUsedAt || b.lastSavedFromReviewAt || 0) - new Date(a.lastUsedAt || a.lastSavedFromReviewAt || 0))
+      .slice(0, maxRows);
+
     const expectedAiFieldCountByPair = new Map();
     const pairInputs = [
-      ...rows.map((row) => ({ sellerId: row.sellerId, templateId: row.templateId })),
+      ...combinedRows.map((row) => ({ sellerId: row.sellerId, templateId: row.templateId })),
       ...asinCallBreakdown.map((row) => ({ sellerId: row.sellerId, templateId: row.templateId }))
     ];
 
@@ -6501,7 +6606,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
       }
     });
 
-    const rowsWithExpected = rows.map((row) => {
+    const rowsWithExpected = combinedRows.map((row) => {
       const expectedAiFieldCount = expectedAiFieldCountByPair.get(`${row.sellerId}-${row.templateId}`) || 0;
       const savedCount = savedCountsMap.get(row.aiRunId) || 0;
       return {
