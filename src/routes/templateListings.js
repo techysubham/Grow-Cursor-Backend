@@ -85,14 +85,15 @@ function buildAmazonSourceData(amazonData) {
   };
 }
 
-async function runWithConcurrency(items, concurrency, worker) {
+async function runWithConcurrency(items, concurrency, worker, shouldContinue = () => true) {
   const limit = Math.max(1, Math.min(concurrency, items.length));
   let nextIndex = 0;
 
   const workers = Array.from({ length: limit }, async () => {
-    while (nextIndex < items.length) {
+    while (nextIndex < items.length && shouldContinue()) {
       const currentIndex = nextIndex;
       nextIndex += 1;
+      if (!shouldContinue()) break;
       await worker(items[currentIndex], currentIndex);
     }
   });
@@ -985,6 +986,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
     let completed = 0;
     
     await runWithConcurrency(asins, streamConcurrency, async (asin) => {
+      if (streamClosed) return;
       try {
         sendSse({
           type: 'item_started',
@@ -1030,7 +1032,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
                   progressStage: 'generating'
                 });
                 freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : freshAmazonSourcePrice;
-                const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
+                const configs = await applyFieldConfigs(amazonData, [], pricingConfig, buildAiUsageContext(req, templateId, sellerId));
                 pricingCalculation = configs.pricingCalculation;
               }
             } catch (fetchErr) {
@@ -1180,7 +1182,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
         };
         sendSse({ type: 'item', item, progress: ++completed, total: asins.length });
       }
-    });
+    }, () => !streamClosed);
 
     // Send completion event
     sendSse({ type: 'complete', total: completed });
@@ -1359,7 +1361,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
               size: doc.size || ''
             };
             
-            const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
+            const configs = await applyFieldConfigs(amazonData, [], pricingConfig, buildAiUsageContext(req, templateId, sellerId));
             pricingCalculation = configs.pricingCalculation;
           }
 
@@ -5852,6 +5854,19 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
                 ]
               }
             },
+            successfulAsinRuns: {
+              $push: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  {
+                    asin: '$asin',
+                    fieldName: '$fieldName',
+                    timestamp: '$timestamp'
+                  },
+                  '$$REMOVE'
+                ]
+              }
+            },
             totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
             promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
             completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
@@ -5921,6 +5936,8 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             successfulCalls: 1,
             failedCalls: 1,
             successfulAsinCount: { $size: '$successfulAsins' },
+            successfulAsinRunCount: { $size: '$successfulAsinRuns' },
+            successfulAsinRuns: 1,
             totalTokens: 1,
             promptTokens: 1,
             completionTokens: 1,
