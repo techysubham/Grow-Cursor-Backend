@@ -10,18 +10,23 @@ import { getCachedAsinData, setCachedAsinData } from './asinCache.js';
  * Uses ScraperAPI for ALL product data (Title, Brand, Description, Images, Price)
  * Replaces PAAPI entirely
  */
-export async function fetchAmazonData(asin, region = 'US') {
+export async function fetchAmazonData(asin, region = 'US', options = {}) {
   const startTime = Date.now();
+  const { forceRefresh = false } = options;
   
   try {
     console.log(`[fetchAmazonData] 🔍 Fetching product data for ASIN: ${asin} (${region})`);
     
     // Check cache first
-    const cached = getCachedAsinData(asin, region);
-    if (cached) {
-      const cacheTime = Date.now() - startTime;
-      console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} (${region}, ${cacheTime}ms)`);
-      return cached;
+    if (!forceRefresh) {
+      const cached = getCachedAsinData(asin, region);
+      if (cached) {
+        const cacheTime = Date.now() - startTime;
+        console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} (${region}, ${cacheTime}ms)`);
+        return cached;
+      }
+    } else {
+      console.log(`[fetchAmazonData] 🔄 Force refresh enabled for ${asin} (${region})`);
     }
     
     // Single ScraperAPI call for ALL data
@@ -187,6 +192,8 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
           asin: amazonData.asin,
           fieldName: config.ebayField,
           fieldType: config.fieldType,
+          aiRunId: trackingContext.aiRunId,
+          aiRunStartedAt: trackingContext.aiRunStartedAt,
           templateId: trackingContext.templateId,
           sellerId: trackingContext.sellerId,
           userId: trackingContext.userId,

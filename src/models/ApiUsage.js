@@ -39,6 +39,14 @@ const apiUsageSchema = new mongoose.Schema({
     index: true
   },
   fieldType: String,
+  aiRunId: {
+    type: String,
+    index: true
+  },
+  aiRunStartedAt: {
+    type: Date,
+    index: true
+  },
   templateId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'ListingTemplate',
@@ -88,6 +96,7 @@ apiUsageSchema.index({ asin: 1, timestamp: -1 });
 apiUsageSchema.index({ service: 1, fieldName: 1, year: 1, month: 1 });
 apiUsageSchema.index({ service: 1, templateId: 1, fieldName: 1, year: 1, month: 1 });
 apiUsageSchema.index({ service: 1, userId: 1, sellerId: 1, templateId: 1, year: 1, month: 1 });
+apiUsageSchema.index({ service: 1, aiRunId: 1, timestamp: -1 });
 
 const ApiUsage = mongoose.model('ApiUsage', apiUsageSchema);
 
