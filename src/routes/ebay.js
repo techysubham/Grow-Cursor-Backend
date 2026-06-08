@@ -15077,6 +15077,11 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
     const result = Array.from(bySeller.values())
       .map(row => ({
         ...row,
+        usSuccessfulListings: (row.marketplaces || []).reduce((sum, marketplace) => (
+          marketplace.country === 'US'
+            ? sum + (marketplace.successfulListings || 0)
+            : sum
+        ), 0),
         marketplaces: (row.marketplaces || []).map(marketplace => ({
           ...marketplace,
           netListings: (marketplace.successfulListings || 0) - (marketplace.endedListings || 0)
