@@ -6608,7 +6608,10 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
 
     const rowsWithExpected = combinedRows.map((row) => {
       const expectedAiFieldCount = expectedAiFieldCountByPair.get(`${row.sellerId}-${row.templateId}`) || 0;
-      const savedCount = savedCountsMap.get(row.aiRunId) || 0;
+      const savedCount = Math.max(
+        Number(savedCountsMap.get(row.aiRunId) || 0),
+        Number(row.savedFromReviewCount || 0)
+      );
       return {
         ...row,
         expectedAiFieldCount,
