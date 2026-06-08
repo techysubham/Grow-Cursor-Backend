@@ -45,12 +45,22 @@ function getClientIpInfo(req) {
   return { ipAddress: req.ip, ipSource: 'req.ip' };
 }
 
-function buildAiUsageContext(req, templateId, sellerId) {
+function createAiRunContext(prefix = 'listing') {
+  const startedAt = new Date();
+  return {
+    aiRunId: `${prefix}-${startedAt.getTime()}-${new mongoose.Types.ObjectId().toString()}`,
+    aiRunStartedAt: startedAt
+  };
+}
+
+function buildAiUsageContext(req, templateId, sellerId, runContext = {}) {
   const ipInfo = getClientIpInfo(req);
   return {
     templateId,
     sellerId,
     userId: req.user?.userId,
+    aiRunId: runContext.aiRunId,
+    aiRunStartedAt: runContext.aiRunStartedAt,
     ipAddress: ipInfo.ipAddress,
     ipSource: ipInfo.ipSource,
     forwardedFor: req.headers['x-forwarded-for'] || '',
@@ -935,6 +945,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
     if (sellerConfig) {
       pricingConfig = sellerConfig.pricingConfig;
     }
+    const aiRunContext = createAiRunContext('bulk-preview-stream');
     
     // Check for existing ASINs and SKUs (same as bulk-preview)
     const existingAsinListings = await TemplateListing.find({
@@ -1011,6 +1022,8 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           const futureSKU = generateSKUWithCount(asin, asinDoc?.listingCount || 0);
 
           let sourceData = null;
+          let generatedCoreFields = {};
+          let generatedCustomFields = {};
           let pricingCalculation = null;
           let freshAmazonSourcePrice = null;
           let duplicateImages = Array.isArray(asinDoc?.images) ? asinDoc.images : [];
@@ -1020,7 +1033,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             // Always refresh duplicate ASIN previews so price/source data stays current.
             try {
               console.log(`[duplicate_updateable] Fetching fresh Amazon data for ${asin}`);
-              const amazonData = await fetchAmazonData(asin, region);
+              const amazonData = await fetchAmazonData(asin, region, { forceRefresh: true });
               if (amazonData) {
                 duplicateImages = Array.isArray(amazonData.images) ? amazonData.images : duplicateImages;
                 sourceData = buildAmazonSourceData(amazonData);
@@ -1032,7 +1045,19 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
                   progressStage: 'generating'
                 });
                 freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : freshAmazonSourcePrice;
-                const configs = await applyFieldConfigs(amazonData, [], pricingConfig, buildAiUsageContext(req, templateId, sellerId));
+                const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId, aiRunContext));
+                generatedCoreFields = {
+                  ...(template.coreFieldDefaults || {}),
+                  ...configs.coreFields
+                };
+                generatedCustomFields = configs.customFields || {};
+                if (template?.customColumns && template.customColumns.length > 0) {
+                  template.customColumns.forEach(col => {
+                    if (col.defaultValue && !generatedCustomFields[col.name]) {
+                      generatedCustomFields[col.name] = col.defaultValue;
+                    }
+                  });
+                }
                 pricingCalculation = configs.pricingCalculation;
               }
             } catch (fetchErr) {
@@ -1052,17 +1077,18 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             sourceData,
             pricingCalculation,
             generatedListing: {
-              title: existingListing.title,
-              description: existingListing.description,
-              startPrice: freshStartPrice,
-              quantity: existingListing.quantity,
-              itemPhotoUrl: existingListing.itemPhotoUrl || '',
-              conditionId: existingListing.conditionId || '',
-              format: existingListing.format || '',
-              duration: existingListing.duration || '',
-              location: existingListing.location || '',
+              ...generatedCoreFields,
+              title: generatedCoreFields.title ?? existingListing.title,
+              description: generatedCoreFields.description ?? existingListing.description,
+              startPrice: generatedCoreFields.startPrice ?? freshStartPrice,
+              quantity: generatedCoreFields.quantity ?? existingListing.quantity,
+              itemPhotoUrl: generatedCoreFields.itemPhotoUrl ?? existingListing.itemPhotoUrl ?? '',
+              conditionId: generatedCoreFields.conditionId ?? existingListing.conditionId ?? '',
+              format: generatedCoreFields.format ?? existingListing.format ?? '',
+              duration: generatedCoreFields.duration ?? existingListing.duration ?? '',
+              location: generatedCoreFields.location ?? existingListing.location ?? '',
               customLabel: futureSKU,
-              customFields: existingCustomFields,
+              customFields: Object.keys(generatedCustomFields).length > 0 ? generatedCustomFields : existingCustomFields,
               _asinReference: asin,
               _existingListingId: existingListing._id,
               // Pass the refreshed Amazon price through so the save endpoint can persist it.
@@ -1113,7 +1139,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           progressStage: 'generating'
         });
         const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId, aiRunContext));
         
         const mergedCoreFields = {
           ...(template.coreFieldDefaults || {}),
@@ -1329,6 +1355,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
       existingBySKU.map(listing => [listing.customLabel, { id: listing._id, asin: listing._asinReference }])
     );
 
+    const aiRunContext = createAiRunContext('bulk-preview-directory-stream');
     let completed = 0;
 
     const processPromises = asins.map(async (asin) => {
@@ -1342,27 +1369,34 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
         if (asinInCurrentTemplate.has(asin)) {
           const existingListing = asinInCurrentTemplate.get(asin);
           
-          // Look up ASIN in the directory to attach sourceData and compute pricingCalculation
-          const doc = await AsinDirectory.findOne({ asin }).lean();
+          // Use directory only for listing count metadata; duplicate source details come fresh from ScraperAPI.
+          const doc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
           const futureSKU = generateSKUWithCount(asin, doc?.listingCount || 0);
 
           let sourceData = null;
+          let generatedCoreFields = {};
+          let generatedCustomFields = {};
           let pricingCalculation = null;
 
-          if (doc) {
-            sourceData = buildDirectorySourceData(doc);
-            
-            const amazonData = {
-              asin,
-              ...sourceData,
-              model: doc.model || '',
-              material: doc.material || '',
-              specialFeatures: doc.specialFeatures || '',
-              size: doc.size || ''
+          try {
+            const amazonData = await fetchAmazonData(asin, region, { forceRefresh: true });
+            sourceData = buildAmazonSourceData(amazonData);
+            const configs = await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId, aiRunContext));
+            generatedCoreFields = {
+              ...(template.coreFieldDefaults || {}),
+              ...configs.coreFields
             };
-            
-            const configs = await applyFieldConfigs(amazonData, [], pricingConfig, buildAiUsageContext(req, templateId, sellerId));
+            generatedCustomFields = configs.customFields || {};
+            if (template?.customColumns && template.customColumns.length > 0) {
+              template.customColumns.forEach(col => {
+                if (col.defaultValue && !generatedCustomFields[col.name]) {
+                  generatedCustomFields[col.name] = col.defaultValue;
+                }
+              });
+            }
             pricingCalculation = configs.pricingCalculation;
+          } catch (fetchErr) {
+            console.warn(`[directory duplicate_updateable] Fresh ScraperAPI fetch failed for ${asin}:`, fetchErr.message);
           }
 
           const freshStartPrice = pricingCalculation?.calculatedStartPrice ?? existingListing.startPrice;
@@ -1374,17 +1408,18 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             sourceData,
             pricingCalculation,
             generatedListing: {
-              title: existingListing.title,
-              description: existingListing.description,
-              startPrice: freshStartPrice,
-              quantity: existingListing.quantity,
-              itemPhotoUrl: existingListing.itemPhotoUrl || '',
-              conditionId: existingListing.conditionId || '',
-              format: existingListing.format || '',
-              duration: existingListing.duration || '',
-              location: existingListing.location || '',
+              ...generatedCoreFields,
+              title: generatedCoreFields.title ?? existingListing.title,
+              description: generatedCoreFields.description ?? existingListing.description,
+              startPrice: generatedCoreFields.startPrice ?? freshStartPrice,
+              quantity: generatedCoreFields.quantity ?? existingListing.quantity,
+              itemPhotoUrl: generatedCoreFields.itemPhotoUrl ?? existingListing.itemPhotoUrl ?? '',
+              conditionId: generatedCoreFields.conditionId ?? existingListing.conditionId ?? '',
+              format: generatedCoreFields.format ?? existingListing.format ?? '',
+              duration: generatedCoreFields.duration ?? existingListing.duration ?? '',
+              location: generatedCoreFields.location ?? existingListing.location ?? '',
               customLabel: futureSKU,
-              customFields: existingListing.customFields || {},
+              customFields: Object.keys(generatedCustomFields).length > 0 ? generatedCustomFields : existingListing.customFields || {},
               _asinReference: asin,
               _existingListingId: existingListing._id
             },
@@ -1441,7 +1476,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
 
         res.write(`data: ${JSON.stringify({ type: 'progress', id: `preview-${asin}`, stage: 'generating' })}\n\n`);
         const { coreFields, customFields, pricingCalculation } =
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId, aiRunContext));
 
         const mergedCoreFields = {
           ...(template.coreFieldDefaults || {}),
@@ -2201,11 +2236,12 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
     
     // 3. Apply field configurations (AI + direct mappings)
     console.log(`Processing ${template.asinAutomation.fieldConfigs.length} field configs`);
+    const aiRunContext = createAiRunContext('autofill-single');
     const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
       amazonData,
       template.asinAutomation.fieldConfigs,
       pricingConfig,  // Use seller-specific or template default pricing config
-      buildAiUsageContext(req, templateId, sellerId)
+      buildAiUsageContext(req, templateId, sellerId, aiRunContext)
     );
     
     // 4. Return auto-filled data (separated by type)
@@ -2403,6 +2439,8 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
     
     console.log(`🚀 Processing ${batches.length} batches in parallel (${batchSize} ASINs per batch)...`);
     
+    const aiRunContext = createAiRunContext('bulk-autofill');
+
     // Process all batches in parallel
     const batchPromises = batches.map(async (batch, batchIndex) => {
       const batchNum = batchIndex + 1;
@@ -2423,30 +2461,53 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
         if (existingInCurrentTemplate.has(asin)) {
           const existingListing = existingInCurrentTemplate.get(asin);
           const generatedSKU = generateSKUFromASIN(asin);
-          
-          // Get existing customFields (already an object from .lean())
-          const existingCustomFields = existingListing.customFields || {};
-          
-          // Return existing listing data for editing (no re-fetch)
+
+          const amazonData = await fetchAmazonData(asin, region, { forceRefresh: true });
+          const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
+            amazonData,
+            template.asinAutomation.fieldConfigs,
+            pricingConfig,
+            buildAiUsageContext(req, templateId, sellerId, aiRunContext)
+          );
+
+          const mergedCoreFields = {
+            ...(template.coreFieldDefaults || {}),
+            ...coreFields
+          };
+
+          if (template?.customColumns && template.customColumns.length > 0) {
+            template.customColumns.forEach(col => {
+              if (col.defaultValue && !customFields[col.name]) {
+                customFields[col.name] = col.defaultValue;
+              }
+            });
+          }
+
           return {
             asin,
             status: 'duplicate_updateable',
-            
-            // Return existing data for editing
             autoFilledData: {
               coreFields: {
-                title: existingListing.title,
-                description: existingListing.description,
-                startPrice: existingListing.startPrice,
-                quantity: existingListing.quantity,
-                itemPhotoUrl: existingListing.itemPhotoUrl || '',
-                conditionId: existingListing.conditionId || '',
-                format: existingListing.format || '',
-                duration: existingListing.duration || '',
-                location: existingListing.location || ''
+                ...mergedCoreFields,
+                title: mergedCoreFields.title ?? existingListing.title,
+                description: mergedCoreFields.description ?? existingListing.description,
+                startPrice: mergedCoreFields.startPrice ?? existingListing.startPrice,
+                quantity: mergedCoreFields.quantity ?? existingListing.quantity,
+                itemPhotoUrl: mergedCoreFields.itemPhotoUrl ?? existingListing.itemPhotoUrl ?? '',
+                conditionId: mergedCoreFields.conditionId ?? existingListing.conditionId ?? '',
+                format: mergedCoreFields.format ?? existingListing.format ?? '',
+                duration: mergedCoreFields.duration ?? existingListing.duration ?? '',
+                location: mergedCoreFields.location ?? existingListing.location ?? ''
               },
-              customFields: existingCustomFields
+              customFields
             },
+            amazonSource: {
+              title: amazonData.title,
+              brand: amazonData.brand,
+              price: amazonData.price,
+              imageCount: Array.isArray(amazonData.images) ? amazonData.images.length : 0
+            },
+            pricingCalculation: pricingCalculation || null,
             sku: existingListing.customLabel || generatedSKU,
             _existingListingId: existingListing._id, // Track which listing to update
             warnings: [
@@ -2483,7 +2544,7 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
             amazonData,
             template.asinAutomation.fieldConfigs,
             pricingConfig,  // Use seller-specific or template default pricing config
-            buildAiUsageContext(req, templateId, sellerId)
+            buildAiUsageContext(req, templateId, sellerId, aiRunContext)
           );
           
           return {
@@ -3173,6 +3234,8 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
     
     console.log(`🚀 Processing ${asins.length} ASINs in parallel...`);
     
+    const aiRunContext = createAiRunContext('bulk-preview');
+
     // Process ALL ASINs in parallel using Promise.allSettled
     const asinPromises = asins.map(async (asin) => {
       try {
@@ -3218,7 +3281,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         
         // Apply field configurations
         const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId));
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId, aiRunContext));
         
         // Apply template core field defaults as base layer (autofilled fields override these)
         const mergedCoreFields = {
@@ -5840,7 +5903,8 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
               sellerId: '$sellerId',
               templateId: '$templateId',
               ipAddress: '$ipAddress',
-              ipSource: '$ipSource'
+              ipSource: '$ipSource',
+              aiRunId: '$aiRunId'
             },
             aiCalls: { $sum: 1 },
             successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
@@ -5881,6 +5945,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
               }
             },
             firstUsedAt: { $min: '$timestamp' },
+            aiRunStartedAt: { $min: { $ifNull: ['$aiRunStartedAt', '$timestamp'] } },
             lastUsedAt: { $max: '$timestamp' }
           }
         },
@@ -5924,6 +5989,8 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             userId: '$_id.userId',
             sellerId: '$_id.sellerId',
             templateId: '$_id.templateId',
+            aiRunId: { $ifNull: ['$_id.aiRunId', 'legacy-usage'] },
+            aiRunStartedAt: 1,
             ipAddress: { $ifNull: ['$_id.ipAddress', 'Unknown IP'] },
             ipSource: { $ifNull: ['$_id.ipSource', 'unknown'] },
             username: { $ifNull: [{ $arrayElemAt: ['$user.username', 0] }, 'Unknown user'] },
