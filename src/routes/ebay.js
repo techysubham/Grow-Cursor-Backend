@@ -1,4 +1,4 @@
-﻿import express from 'express';
+import express from 'express';
 import axios from 'axios';
 import qs from 'qs';
 import jwt from 'jsonwebtoken';
@@ -38,6 +38,7 @@ import EndListingLog from '../models/EndListingLog.js';
 import AsinListRange from '../models/AsinListRange.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import PriceChangeLog from '../models/PriceChangeLog.js';
+import PtRefreshLog from '../models/PtRefreshLog.js';
 import OpenAI from 'openai';
 import {
   calculateOrderAmazonFinancials,
@@ -6196,8 +6197,9 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
 // Refresh existing DB orders from eBay by Pacific Time creation date range.
 // This catches silent cancel/refund updates that may not move lastModifiedDate.
 router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  let logEntry = null;
+  const { startDate, endDate, sellerId, dateMode, clickedRefreshAt, clickedConfirmAt } = req.body;
   try {
-    const { startDate, endDate, sellerId } = req.body;
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
 
     if (!dateRegex.test(startDate || '') || !dateRegex.test(endDate || '')) {
@@ -6216,6 +6218,30 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
       return res.status(400).json({ error: 'Date range cannot exceed 90 Pacific Time days' });
     }
 
+    // Create the PT Refresh log entry
+    try {
+      const refreshAt = clickedRefreshAt ? new Date(clickedRefreshAt) : new Date();
+      const confirmAt = clickedConfirmAt ? new Date(clickedConfirmAt) : new Date();
+      const clickedRefreshAtIST = moment(refreshAt).tz('Asia/Kolkata').format('YYYY-MM-DD HH:mm:ss [IST]');
+      const clickedConfirmAtIST = moment(confirmAt).tz('Asia/Kolkata').format('YYYY-MM-DD HH:mm:ss [IST]');
+
+      logEntry = await PtRefreshLog.create({
+        user: req.user.userId,
+        dateMode: dateMode || (startDate === endDate ? 'single' : 'range'),
+        startDate,
+        endDate,
+        sellerId: sellerId || null,
+        clickedRefreshAt: refreshAt,
+        clickedConfirmAt: confirmAt,
+        clickedRefreshAtIST,
+        clickedConfirmAtIST,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent']
+      });
+    } catch (logErr) {
+      console.error('Error creating PT refresh log entry:', logErr);
+    }
+
     const sellerQuery = { 'ebayTokens.access_token': { $exists: true, $ne: null } };
     if (sellerId) {
       if (!mongoose.Types.ObjectId.isValid(sellerId)) {
@@ -6226,6 +6252,19 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
 
     const sellers = await Seller.find(sellerQuery).populate('user', 'username email');
     if (sellers.length === 0) {
+      if (logEntry) {
+        try {
+          logEntry.success = true;
+          logEntry.status = 'completed';
+          logEntry.totalFetched = 0;
+          logEntry.totalExistingMatched = 0;
+          logEntry.totalUpdated = 0;
+          logEntry.totalIgnoredNew = 0;
+          await logEntry.save();
+        } catch (logErr) {
+          console.error('Error updating PT refresh log for 0 sellers:', logErr);
+        }
+      }
       return res.json({
         message: 'No matching connected eBay sellers found',
         pollResults: [],
@@ -6345,6 +6384,20 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
     }, {});
     const changeSamples = pollResults.flatMap(r => r.changeSamples || []).slice(0, 10);
 
+    if (logEntry) {
+      try {
+        logEntry.success = true;
+        logEntry.status = 'completed';
+        logEntry.totalFetched = totalFetched;
+        logEntry.totalExistingMatched = totalExistingMatched;
+        logEntry.totalUpdated = totalUpdated;
+        logEntry.totalIgnoredNew = totalIgnoredNew;
+        await logEntry.save();
+      } catch (logErr) {
+        console.error('Error updating PT refresh log success status:', logErr);
+      }
+    }
+
     res.json({
       message: 'Pacific Time order refresh complete',
       startDate,
@@ -6360,6 +6413,37 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
     });
   } catch (err) {
     console.error('Error in UTC order refresh:', err);
+    if (logEntry) {
+      try {
+        logEntry.success = false;
+        logEntry.status = 'failed';
+        logEntry.errorMessage = err.message;
+        await logEntry.save();
+      } catch (logErr) {
+        console.error('Error updating PT refresh log failure status:', logErr);
+      }
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/pt-refresh-history', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  try {
+    const logs = await PtRefreshLog.find()
+      .populate('user', 'username email')
+      .populate({
+        path: 'sellerId',
+        populate: {
+          path: 'user',
+          select: 'username email'
+        }
+      })
+      .sort({ createdAt: -1 })
+      .limit(100);
+
+    res.json(logs);
+  } catch (err) {
+    console.error('Error fetching PT refresh history:', err);
     res.status(500).json({ error: err.message });
   }
 });
