@@ -77,12 +77,20 @@ function getListingAiRunId(listingData = {}) {
 async function recordReviewSaveCounts({ listings = [], results = [], templateId, sellerId, userId }) {
   const savedStatuses = new Set(['created', 'updated', 'reactivated']);
   const countsByRunId = new Map();
+  const updateableDuplicateCountsByRunId = new Map();
 
   results.forEach((result, index) => {
     if (!savedStatuses.has(result.status)) return;
-    const aiRunId = getListingAiRunId(listings[index]);
+    const listingData = listings[index] || {};
+    const aiRunId = getListingAiRunId(listingData);
     if (!aiRunId) return;
     countsByRunId.set(aiRunId, (countsByRunId.get(aiRunId) || 0) + 1);
+    if (listingData._isDuplicateUpdate) {
+      updateableDuplicateCountsByRunId.set(
+        aiRunId,
+        (updateableDuplicateCountsByRunId.get(aiRunId) || 0) + 1
+      );
+    }
   });
 
   await Promise.all([...countsByRunId.entries()].map(([aiRunId, savedCount]) =>
@@ -98,6 +106,7 @@ async function recordReviewSaveCounts({ listings = [], results = [], templateId,
         },
         $inc: {
           savedFromReviewCount: savedCount,
+          updateableDuplicateCount: updateableDuplicateCountsByRunId.get(aiRunId) || 0,
           reviewSaveAttempts: 1
         }
       },
@@ -105,7 +114,11 @@ async function recordReviewSaveCounts({ listings = [], results = [], templateId,
     )
   ));
 
-  return [...countsByRunId.entries()].map(([aiRunId, savedCount]) => ({ aiRunId, savedCount }));
+  return [...countsByRunId.entries()].map(([aiRunId, savedCount]) => ({
+    aiRunId,
+    savedCount,
+    updateableDuplicateCount: updateableDuplicateCountsByRunId.get(aiRunId) || 0
+  }));
 }
 
 function buildDirectorySourceData(doc, priceOverride = null) {
@@ -6081,6 +6094,9 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             savedFromReviewCount: {
               $ifNull: [{ $arrayElemAt: ['$listingRun.savedFromReviewCount', 0] }, 0]
             },
+            updateableDuplicateCount: {
+              $ifNull: [{ $arrayElemAt: ['$listingRun.updateableDuplicateCount', 0] }, 0]
+            },
             reviewSaveAttempts: {
               $ifNull: [{ $arrayElemAt: ['$listingRun.reviewSaveAttempts', 0] }, 0]
             },
@@ -6546,6 +6562,7 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             successfulCalls: { $literal: 0 },
             failedCalls: { $literal: 0 },
             savedFromReviewCount: { $ifNull: ['$savedFromReviewCount', 0] },
+            updateableDuplicateCount: { $ifNull: ['$updateableDuplicateCount', 0] },
             reviewSaveAttempts: { $ifNull: ['$reviewSaveAttempts', 0] },
             lastSavedFromReviewAt: 1,
             successfulAsinCount: { $literal: 0 },
