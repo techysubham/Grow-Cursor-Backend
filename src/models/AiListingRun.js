@@ -33,6 +33,10 @@ const aiListingRunSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  updateableDuplicateCount: {
+    type: Number,
+    default: 0
+  },
   reviewSaveAttempts: {
     type: Number,
     default: 0
