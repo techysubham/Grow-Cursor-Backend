@@ -1,4 +1,4 @@
-﻿import express from 'express';
+import express from 'express';
 import axios from 'axios';
 import qs from 'qs';
 import jwt from 'jsonwebtoken';
@@ -11464,7 +11464,8 @@ router.get('/expiring-low-activity-listings', requireAuth, async (req, res) => {
     if (filteredListings.length > 0 && !aborted) {
       send({ type: 'progress', page: totalPages, totalPages, count: filteredListings.length, phase: 'analytics' });
 
-      const analyticsEnd   = new Date();
+      // Subtract 2 days (48 hours) from current time to guarantee the end date is in the past across all time zones and finalized on eBay.
+      const analyticsEnd   = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
       const analyticsStart = new Date(analyticsEnd.getTime() - 30 * 24 * 60 * 60 * 1000);
       const fromStr = analyticsStart.toISOString().slice(0, 10).replace(/-/g, '');
       const toStr   = analyticsEnd.toISOString().slice(0, 10).replace(/-/g, '');
