@@ -2951,7 +2951,7 @@ router.get('/order/:orderId', requireAuth, requirePageAccess('Fulfillment'), asy
  *         description: Internal server error
  */
 router.get('/stored-orders', requireAuth, async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient } = req.query;
 
   try {
     let query = {};
@@ -3069,6 +3069,28 @@ router.get('/stored-orders', requireAuth, async (req, res) => {
         query.$and.push(itemClause);
       } else {
         query.$or = itemClause.$or;
+      }
+    }
+
+    if (searchSku) {
+      const skuClause = {
+        $or: [
+          { 'lineItems.sku': { $regex: searchSku, $options: 'i' } },
+          { 'lineItems.SKU': { $regex: searchSku, $options: 'i' } },
+          { 'lineItems.sellerSku': { $regex: searchSku, $options: 'i' } },
+          { sku: { $regex: searchSku, $options: 'i' } }
+        ]
+      };
+
+      if (query.$or) {
+        if (!query.$and) query.$and = [];
+        query.$and.push({ $or: query.$or });
+        delete query.$or;
+        query.$and.push(skuClause);
+      } else if (query.$and) {
+        query.$and.push(skuClause);
+      } else {
+        query.$or = skuClause.$or;
       }
     }
 
