@@ -9275,12 +9275,6 @@ router.get('/chat/messages', requireAuth, async (req, res) => {
 
     const messages = await Message.find(query).sort({ messageDate: 1 });
 
-    // Mark as read
-    await Message.updateMany(
-      { ...query, sender: 'BUYER', read: false },
-      { read: true }
-    );
-
     res.json(messages);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -9375,6 +9369,32 @@ router.post('/chat/mark-unread', requireAuth, async (req, res) => {
     const result = await Message.updateMany(
       { ...query, sender: 'BUYER' },
       { read: false }
+    );
+
+    res.json({ success: true, modifiedCount: result.modifiedCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. MARK CONVERSATION AS READ
+router.post('/chat/mark-read', requireAuth, async (req, res) => {
+  const { orderId, buyerUsername, itemId } = req.body;
+
+  try {
+    let query = {};
+    if (orderId) {
+      query.orderId = orderId;
+    } else if (buyerUsername && itemId) {
+      query.buyerUsername = buyerUsername;
+      query.itemId = itemId;
+    } else {
+      return res.status(400).json({ error: 'Invalid query params' });
+    }
+
+    const result = await Message.updateMany(
+      { ...query, sender: 'BUYER', read: false },
+      { read: true }
     );
 
     res.json({ success: true, modifiedCount: result.modifiedCount });
