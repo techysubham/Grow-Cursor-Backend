@@ -867,7 +867,7 @@ const swaggerDefinition = {
                 summary: 'Fetch all messages for a thread',
                 description:
                     'Returns all stored messages for a conversation, sorted by `messageDate ASC`.\n\n' +
-                    '**Side effect:** marks all buyer messages in the thread as `read: true` (removes the unread badge).\n\n' +
+                    '**Read state:** fetching a thread does not change buyer-message read flags. Use `/ebay/chat/mark-read` or `/ebay/chat/mark-unread` for explicit status changes.\n\n' +
                     '**Query strategy:** prefer `orderId` when available; fall back to `buyerUsername + itemId`.\n\n' +
                     '**Auth:** any authenticated user',
                 parameters: [

@@ -2225,6 +2225,37 @@ function extractTextFromHtml(html) {
   return cleanText;
 }
 
+function firstXmlValue(value) {
+  if (value == null) return null;
+  if (Array.isArray(value)) return firstXmlValue(value[0]);
+  if (typeof value === 'object') {
+    if (value._ != null) return value._;
+    if (value.value != null) return value.value;
+    return null;
+  }
+  return value;
+}
+
+function parseEbayDateValue(value) {
+  const raw = firstXmlValue(value);
+  if (!raw) return null;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function extractEbayMessageDate(msg, question) {
+  // GetMemberMessages returns the buyer's sent time on MemberMessageExchange.CreationDate.
+  // LastModifiedDate is only a fallback; response Timestamp is request processing time.
+  return (
+    parseEbayDateValue(msg?.CreationDate) ||
+    parseEbayDateValue(msg?.ReceiveDate) ||
+    parseEbayDateValue(question?.CreationDate) ||
+    parseEbayDateValue(question?.ReceiveDate) ||
+    parseEbayDateValue(msg?.LastModifiedDate) ||
+    null
+  );
+}
+
 // HELPER: Process a single eBay XML Message and save to DB
 async function processEbayMessage(msg, seller) {
   try {
@@ -2261,16 +2292,24 @@ async function processEbayMessage(msg, seller) {
     // ----------------------------
 
     // --- DATE PARSING ---
-    const rawDate = question.CreationDate?.[0];
-    let messageDate = new Date();
-    if (rawDate) {
-      const parsedDate = new Date(rawDate);
-      if (!isNaN(parsedDate.getTime())) messageDate = parsedDate;
-    }
+    const ebayMessageDate = extractEbayMessageDate(msg, question);
+    const messageDate = ebayMessageDate || new Date();
 
     // 1. Prevent Duplicates
     const exists = await Message.findOne({ externalMessageId: msgID });
-    if (exists) return false;
+    if (exists) {
+      if (ebayMessageDate) {
+        const existingDateMs = exists.messageDate ? new Date(exists.messageDate).getTime() : null;
+        const createdAtMs = exists.createdAt ? new Date(exists.createdAt).getTime() : null;
+        const looksLikeSyncTime = existingDateMs && createdAtMs && Math.abs(existingDateMs - createdAtMs) < 60 * 1000;
+
+        if (!existingDateMs || looksLikeSyncTime || ebayMessageDate.getTime() !== existingDateMs) {
+          exists.messageDate = ebayMessageDate;
+          await exists.save();
+        }
+      }
+      return false;
+    }
 
     // 2. Determine Message Type (ORDER, INQUIRY, or DIRECT)
     let orderId = null;
@@ -9275,12 +9314,6 @@ router.get('/chat/messages', requireAuth, async (req, res) => {
 
     const messages = await Message.find(query).sort({ messageDate: 1 });
 
-    // Mark as read
-    await Message.updateMany(
-      { ...query, sender: 'BUYER', read: false },
-      { read: true }
-    );
-
     res.json(messages);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -9375,6 +9408,32 @@ router.post('/chat/mark-unread', requireAuth, async (req, res) => {
     const result = await Message.updateMany(
       { ...query, sender: 'BUYER' },
       { read: false }
+    );
+
+    res.json({ success: true, modifiedCount: result.modifiedCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. MARK CONVERSATION AS READ
+router.post('/chat/mark-read', requireAuth, async (req, res) => {
+  const { orderId, buyerUsername, itemId } = req.body;
+
+  try {
+    let query = {};
+    if (orderId) {
+      query.orderId = orderId;
+    } else if (buyerUsername && itemId) {
+      query.buyerUsername = buyerUsername;
+      query.itemId = itemId;
+    } else {
+      return res.status(400).json({ error: 'Invalid query params' });
+    }
+
+    const result = await Message.updateMany(
+      { ...query, sender: 'BUYER', read: false },
+      { read: true }
     );
 
     res.json({ success: true, modifiedCount: result.modifiedCount });
