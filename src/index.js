@@ -62,6 +62,7 @@ import asinListProductsRoutes from './routes/asinListProducts.js';
 import csvStorageRoutes from './routes/csvStorage.js';
 import attendanceRoutes from './routes/attendance.js';
 import userSellersRoutes from './routes/userSellers.js';
+import userCategoryTargetsRoutes from './routes/userCategoryTargets.js';
 import meetingsRoutes from './routes/meetings.js';
 import salaryRoutes from './routes/salary.js';
 import aiRoutes from './routes/ai.js';
@@ -214,6 +215,7 @@ app.use('/api/csv-storage', csvStorageRoutes);
 // it serves working-hours tracking behavior (timer sessions), not traditional attendance management.
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/user-sellers', userSellersRoutes);
+app.use('/api/user-category-targets', userCategoryTargetsRoutes);
 app.use('/api/meetings', meetingsRoutes);
 app.use('/api/salary', salaryRoutes);
 app.use('/api/ai', aiRoutes);
