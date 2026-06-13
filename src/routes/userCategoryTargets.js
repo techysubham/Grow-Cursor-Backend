@@ -5,13 +5,15 @@ import UserCategoryTarget from '../models/UserCategoryTarget.js';
 import User from '../models/User.js';
 import Seller from '../models/Seller.js';
 import AsinListCategory from '../models/AsinListCategory.js';
-import Listing from '../models/Listing.js';
+import AsinListRange from '../models/AsinListRange.js';
+import FeedUpload from '../models/FeedUpload.js';
 
 const router = express.Router();
 const PT_TIMEZONE = 'America/Los_Angeles';
 
 const pageAccess = requirePageAccess('UserCategoryTargets');
 const performancePageAccess = requirePageAccess(['UserCategoryTargets', 'UserListingPerformance']);
+const MARKETPLACES = ['US', 'UK', 'AU', 'Canada'];
 
 const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
 
@@ -43,10 +45,6 @@ function countInclusiveDays(startDate, endDate) {
   return Math.max(1, Math.floor((end - start) / 86400000) + 1);
 }
 
-function escapeRegex(value = '') {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function getStatus(percent) {
   if (percent >= 95) return 'onTrack';
   if (percent >= 60) return 'behind';
@@ -59,14 +57,16 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
     endDate = startDate,
     userId,
     sellerId,
+    marketplace,
     categoryId,
+    rangeId,
   } = req.query;
 
   if (!startDate || !endDate) {
     return res.status(400).json({ error: 'startDate and endDate are required' });
   }
 
-  if ([userId, sellerId, categoryId].filter(Boolean).some((id) => !isValidObjectId(id))) {
+  if ([userId, sellerId, categoryId, rangeId].filter(Boolean).some((id) => !isValidObjectId(id))) {
     return res.status(400).json({ error: 'Invalid filter id' });
   }
 
@@ -74,7 +74,9 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
     const targetQuery = {};
     if (userId) targetQuery.user = userId;
     if (sellerId) targetQuery.seller = sellerId;
+    if (marketplace) targetQuery.marketplace = marketplace;
     if (categoryId) targetQuery.category = categoryId;
+    if (rangeId) targetQuery.range = rangeId;
 
     const targets = await UserCategoryTarget.find(targetQuery)
       .populate('user', 'username email role department')
@@ -84,6 +86,7 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
         populate: { path: 'user', select: 'username email' },
       })
       .populate('category', 'name')
+      .populate('range', 'name categoryId')
       .sort({ updatedAt: -1 });
 
     const { start } = getPTDayBoundsUTC(startDate);
@@ -91,12 +94,30 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
     const days = countInclusiveDays(startDate, endDate);
 
     const cards = await Promise.all(targets.map(async (target) => {
-      const categoryName = target.category?.name || '';
-      const successfulListings = await Listing.countDocuments({
-        seller: target.seller?._id || target.seller,
-        startTime: { $gte: start, $lte: end },
-        categoryName: { $regex: escapeRegex(categoryName), $options: 'i' },
-      });
+      const sellerObjectId = target.seller?._id || target.seller;
+      const rangeObjectId = target.range?._id || target.range;
+
+      const uploadMatch = {
+        seller: sellerObjectId,
+        country: target.marketplace,
+        categoryId: target.category?._id || target.category,
+        status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
+        creationDate: { $gte: start, $lte: end },
+      };
+      if (rangeObjectId) uploadMatch.rangeId = rangeObjectId;
+
+      const uploadCounts = await FeedUpload.aggregate([
+        {
+          $match: uploadMatch,
+        },
+        {
+          $group: {
+            _id: null,
+            totalSuccess: { $sum: { $ifNull: ['$uploadSummary.successCount', 0] } },
+          },
+        },
+      ]);
+      const successfulListings = uploadCounts[0]?.totalSuccess || 0;
 
       const targetQuantity = (target.dailyDesiredQuantity || 0) * days;
       const completionPercent = targetQuantity > 0
@@ -108,13 +129,16 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
         targetId: target._id,
         user: target.user,
         seller: target.seller,
+        marketplace: target.marketplace,
         category: target.category,
+        range: target.range,
         dailyDesiredQuantity: target.dailyDesiredQuantity || 0,
         targetQuantity,
         successfulListings,
         missedListings: Math.max(targetQuantity - successfulListings, 0),
         completionPercent,
         status,
+        countSource: 'feedUploads',
       };
     }));
 
@@ -140,7 +164,7 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
       : 0;
 
     res.json({
-      filters: { startDate, endDate, days, userId: userId || null, sellerId: sellerId || null, categoryId: categoryId || null },
+      filters: { startDate, endDate, days, userId: userId || null, sellerId: sellerId || null, marketplace: marketplace || null, categoryId: categoryId || null, rangeId: rangeId || null },
       summary,
       cards,
     });
@@ -160,6 +184,7 @@ router.get('/', requireAuth, pageAccess, async (req, res) => {
         populate: { path: 'user', select: 'username email' },
       })
       .populate('category', 'name')
+      .populate('range', 'name categoryId')
       .sort({ updatedAt: -1 });
 
     res.json(targets);
@@ -170,13 +195,17 @@ router.get('/', requireAuth, pageAccess, async (req, res) => {
 });
 
 router.post('/', requireAuth, pageAccess, async (req, res) => {
-  const { userId, sellerId, categoryId, dailyDesiredQuantity } = req.body || {};
+  const { userId, sellerId, marketplace, categoryId, rangeId, dailyDesiredQuantity } = req.body || {};
 
-  if (!userId || !sellerId || !categoryId || dailyDesiredQuantity == null) {
-    return res.status(400).json({ error: 'userId, sellerId, categoryId, and dailyDesiredQuantity are required' });
+  if (!userId || !sellerId || !marketplace || !categoryId || dailyDesiredQuantity == null) {
+    return res.status(400).json({ error: 'userId, sellerId, marketplace, categoryId, and dailyDesiredQuantity are required' });
   }
 
-  if (![userId, sellerId, categoryId].every(isValidObjectId)) {
+  if (!MARKETPLACES.includes(marketplace)) {
+    return res.status(400).json({ error: 'marketplace must be one of: US, UK, AU, Canada' });
+  }
+
+  if (![userId, sellerId, categoryId].every(isValidObjectId) || (rangeId && !isValidObjectId(rangeId))) {
     return res.status(400).json({ error: 'Invalid user, seller, or category id' });
   }
 
@@ -186,19 +215,24 @@ router.post('/', requireAuth, pageAccess, async (req, res) => {
   }
 
   try {
-    const [userExists, sellerExists, categoryExists] = await Promise.all([
+    const [userExists, sellerExists, categoryExists, rangeDoc] = await Promise.all([
       User.exists({ _id: userId }),
       Seller.exists({ _id: sellerId }),
       AsinListCategory.exists({ _id: categoryId }),
+      rangeId ? AsinListRange.findById(rangeId).select('categoryId').lean() : Promise.resolve(null),
     ]);
 
     if (!userExists) return res.status(404).json({ error: 'User not found' });
     if (!sellerExists) return res.status(404).json({ error: 'Seller not found' });
     if (!categoryExists) return res.status(404).json({ error: 'Category not found' });
+    if (rangeId && !rangeDoc) return res.status(404).json({ error: 'Range not found' });
+    if (rangeDoc && rangeDoc.categoryId?.toString() !== categoryId) {
+      return res.status(400).json({ error: 'Range must belong to the selected category' });
+    }
 
     const target = await UserCategoryTarget.findOneAndUpdate(
-      { user: userId, seller: sellerId, category: categoryId },
-      { user: userId, seller: sellerId, category: categoryId, dailyDesiredQuantity: quantity },
+      { user: userId, seller: sellerId, marketplace, category: categoryId, range: rangeId || null },
+      { user: userId, seller: sellerId, marketplace, category: categoryId, range: rangeId || null, dailyDesiredQuantity: quantity },
       { upsert: true, new: true, runValidators: true }
     )
       .populate('user', 'username email role department')
@@ -207,7 +241,8 @@ router.post('/', requireAuth, pageAccess, async (req, res) => {
         select: 'storeName ebayMarketplaces user',
         populate: { path: 'user', select: 'username email' },
       })
-      .populate('category', 'name');
+      .populate('category', 'name')
+      .populate('range', 'name categoryId');
 
     res.json(target);
   } catch (err) {
