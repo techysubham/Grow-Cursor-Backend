@@ -79,6 +79,8 @@ export const PAGE_DEFAULT_ROLES = {
   'EmployeeManagement': ['superadmin', 'hradmin'],
   'AddUser': ['superadmin', 'listingadmin', 'hradmin', 'operationhead'],
   'UserSellerAssignments': ['superadmin', 'hradmin', 'hr'],
+  'UserCategoryTargets': ['superadmin', 'hradmin', 'hr'],
+  'UserListingPerformance': ['superadmin', 'hradmin', 'hr'],
   'Meetings': ['superadmin', 'productadmin', 'listingadmin', 'lister', 'advancelister', 'compatibilityadmin', 'compatibilityeditor', 'fulfillmentadmin', 'hradmin', 'hr', 'operationhead', 'trainee', 'hoc', 'compliancemanager'],
   'ViewAllMessages': ['superadmin'],
   'Attendance': ['superadmin'],

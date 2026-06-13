@@ -1,0 +1,336 @@
+import express from 'express';
+import mongoose from 'mongoose';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import UserCategoryTarget from '../models/UserCategoryTarget.js';
+import User from '../models/User.js';
+import Seller from '../models/Seller.js';
+import AsinListCategory from '../models/AsinListCategory.js';
+import AsinListRange from '../models/AsinListRange.js';
+import FeedUpload from '../models/FeedUpload.js';
+
+const router = express.Router();
+const PT_TIMEZONE = 'America/Los_Angeles';
+const IST_TIMEZONE = 'Asia/Kolkata';
+
+const pageAccess = requirePageAccess('UserCategoryTargets');
+const performancePageAccess = requirePageAccess(['UserCategoryTargets', 'UserListingPerformance']);
+const MARKETPLACES = ['US', 'UK', 'AU', 'Canada'];
+
+const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
+
+function getPTDate(offsetDays = 0) {
+  const date = new Date(Date.now() + offsetDays * 86400000);
+  return new Intl.DateTimeFormat('en-CA', { timeZone: PT_TIMEZONE }).format(date);
+}
+
+function getPTDayBoundsUTC(dateStr) {
+  function findMidnightUTC(ds) {
+    const pdt = new Date(`${ds}T07:00:00.000Z`);
+    const ptStr = new Intl.DateTimeFormat('en-CA', { timeZone: PT_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(pdt);
+    const ptHour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: PT_TIMEZONE, hour: 'numeric', hour12: false, hourCycle: 'h23' }).format(pdt), 10);
+    if (ptStr === ds && ptHour === 0) return pdt;
+    return new Date(`${ds}T08:00:00.000Z`);
+  }
+
+  const start = findMidnightUTC(dateStr);
+  const tmp = new Date(`${dateStr}T12:00:00.000Z`);
+  tmp.setUTCDate(tmp.getUTCDate() + 1);
+  const nextDateStr = tmp.toISOString().split('T')[0];
+  const end = new Date(findMidnightUTC(nextDateStr).getTime() - 1);
+  return { start, end };
+}
+
+function countInclusiveDays(startDate, endDate) {
+  const start = new Date(`${startDate}T12:00:00.000Z`);
+  const end = new Date(`${endDate}T12:00:00.000Z`);
+  return Math.max(1, Math.floor((end - start) / 86400000) + 1);
+}
+
+function getStatus(percent) {
+  if (percent >= 95) return 'onTrack';
+  if (percent >= 60) return 'behind';
+  return 'critical';
+}
+
+function buildUploadMatch(target, start, end) {
+  const sellerObjectId = target.seller?._id || target.seller;
+  const rangeObjectId = target.range?._id || target.range;
+  const match = {
+    seller: sellerObjectId,
+    country: target.marketplace,
+    categoryId: target.category?._id || target.category,
+    status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
+    creationDate: { $gte: start, $lte: end },
+  };
+  if (rangeObjectId) match.rangeId = rangeObjectId;
+  return match;
+}
+
+router.get('/performance', requireAuth, performancePageAccess, async (req, res) => {
+  const {
+    startDate = getPTDate(),
+    endDate = startDate,
+    userId,
+    sellerId,
+    marketplace,
+    categoryId,
+    rangeId,
+  } = req.query;
+
+  if (!startDate || !endDate) {
+    return res.status(400).json({ error: 'startDate and endDate are required' });
+  }
+
+  if ([userId, sellerId, categoryId, rangeId].filter(Boolean).some((id) => !isValidObjectId(id))) {
+    return res.status(400).json({ error: 'Invalid filter id' });
+  }
+
+  try {
+    const targetQuery = {};
+    if (userId) targetQuery.user = userId;
+    if (sellerId) targetQuery.seller = sellerId;
+    if (marketplace) targetQuery.marketplace = marketplace;
+    if (categoryId) targetQuery.category = categoryId;
+    if (rangeId) targetQuery.range = rangeId;
+
+    const targets = await UserCategoryTarget.find(targetQuery)
+      .populate('user', 'username email role department')
+      .populate({
+        path: 'seller',
+        select: 'storeName ebayMarketplaces user',
+        populate: { path: 'user', select: 'username email' },
+      })
+      .populate('category', 'name')
+      .populate('range', 'name categoryId')
+      .sort({ updatedAt: -1 });
+
+    const { start } = getPTDayBoundsUTC(startDate);
+    const { end } = getPTDayBoundsUTC(endDate);
+    const days = countInclusiveDays(startDate, endDate);
+
+    const cards = await Promise.all(targets.map(async (target) => {
+      const uploadMatch = buildUploadMatch(target, start, end);
+
+      const uploadCounts = await FeedUpload.aggregate([
+        {
+          $match: uploadMatch,
+        },
+        {
+          $group: {
+            _id: null,
+            totalSuccess: { $sum: { $ifNull: ['$uploadSummary.successCount', 0] } },
+          },
+        },
+      ]);
+      const successfulListings = uploadCounts[0]?.totalSuccess || 0;
+
+      const targetQuantity = (target.dailyDesiredQuantity || 0) * days;
+      const completionPercent = targetQuantity > 0
+        ? Math.round((successfulListings / targetQuantity) * 100)
+        : (successfulListings > 0 ? 100 : 0);
+      const status = getStatus(completionPercent);
+
+      return {
+        targetId: target._id,
+        user: target.user,
+        seller: target.seller,
+        marketplace: target.marketplace,
+        category: target.category,
+        range: target.range,
+        dailyDesiredQuantity: target.dailyDesiredQuantity || 0,
+        targetQuantity,
+        successfulListings,
+        missedListings: Math.max(targetQuantity - successfulListings, 0),
+        completionPercent,
+        status,
+        countSource: 'feedUploads',
+      };
+    }));
+
+    const seenUploadMatches = new Set();
+    const uploadMatchOr = targets.reduce((acc, target) => {
+      const match = buildUploadMatch(target, start, end);
+      const key = [
+        String(match.seller),
+        match.country,
+        String(match.categoryId),
+        match.rangeId ? String(match.rangeId) : 'all',
+      ].join('|');
+      if (seenUploadMatches.has(key)) return acc;
+      seenUploadMatches.add(key);
+      acc.push(match);
+      return acc;
+    }, []);
+
+    const submissionTimeDistribution = uploadMatchOr.length > 0
+      ? await FeedUpload.aggregate([
+        { $match: { $or: uploadMatchOr } },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%H',
+                date: '$creationDate',
+                timezone: IST_TIMEZONE,
+              },
+            },
+            uploadCount: { $sum: 1 },
+            successfulListings: { $sum: { $ifNull: ['$uploadSummary.successCount', 0] } },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ])
+      : [];
+
+    const submissionTimeByHour = new Map(
+      submissionTimeDistribution.map((item) => [
+        Number(item._id),
+        {
+          hour: Number(item._id),
+          uploadCount: item.uploadCount || 0,
+          successfulListings: item.successfulListings || 0,
+        },
+      ])
+    );
+
+    const submissionTimeRows = Array.from({ length: 24 }, (_, hour) => {
+      const row = submissionTimeByHour.get(hour) || { uploadCount: 0, successfulListings: 0 };
+      return {
+        hour,
+        label: new Intl.DateTimeFormat('en-US', {
+          timeZone: IST_TIMEZONE,
+          hour: 'numeric',
+          hour12: true,
+        }).format(new Date(Date.UTC(2026, 0, 1, hour - 5, 30))),
+        uploadCount: row.uploadCount,
+        successfulListings: row.successfulListings,
+      };
+    });
+
+    const summary = cards.reduce((acc, card) => {
+      acc.totalTargets += 1;
+      acc.totalTargetQuantity += card.targetQuantity;
+      acc.totalSuccessfulListings += card.successfulListings;
+      acc.totalMissedListings += card.missedListings;
+      acc[card.status] += 1;
+      return acc;
+    }, {
+      totalTargets: 0,
+      totalTargetQuantity: 0,
+      totalSuccessfulListings: 0,
+      totalMissedListings: 0,
+      onTrack: 0,
+      behind: 0,
+      critical: 0,
+    });
+
+    summary.averageCompletionPercent = summary.totalTargetQuantity > 0
+      ? Math.round((summary.totalSuccessfulListings / summary.totalTargetQuantity) * 100)
+      : 0;
+
+    res.json({
+      filters: { startDate, endDate, days, userId: userId || null, sellerId: sellerId || null, marketplace: marketplace || null, categoryId: categoryId || null, rangeId: rangeId || null },
+      summary,
+      cards,
+      submissionTimeDistribution: submissionTimeRows,
+    });
+  } catch (err) {
+    console.error('[UserCategoryTargets] GET /performance error:', err);
+    res.status(500).json({ error: 'Failed to fetch listing performance' });
+  }
+});
+
+router.get('/', requireAuth, pageAccess, async (req, res) => {
+  try {
+    const targets = await UserCategoryTarget.find()
+      .populate('user', 'username email role department')
+      .populate({
+        path: 'seller',
+        select: 'storeName ebayMarketplaces user',
+        populate: { path: 'user', select: 'username email' },
+      })
+      .populate('category', 'name')
+      .populate('range', 'name categoryId')
+      .sort({ updatedAt: -1 });
+
+    res.json(targets);
+  } catch (err) {
+    console.error('[UserCategoryTargets] GET / error:', err);
+    res.status(500).json({ error: 'Failed to fetch desired quantity targets' });
+  }
+});
+
+router.post('/', requireAuth, pageAccess, async (req, res) => {
+  const { userId, sellerId, marketplace, categoryId, rangeId, dailyDesiredQuantity } = req.body || {};
+
+  if (!userId || !sellerId || !marketplace || !categoryId || dailyDesiredQuantity == null) {
+    return res.status(400).json({ error: 'userId, sellerId, marketplace, categoryId, and dailyDesiredQuantity are required' });
+  }
+
+  if (!MARKETPLACES.includes(marketplace)) {
+    return res.status(400).json({ error: 'marketplace must be one of: US, UK, AU, Canada' });
+  }
+
+  if (![userId, sellerId, categoryId].every(isValidObjectId) || (rangeId && !isValidObjectId(rangeId))) {
+    return res.status(400).json({ error: 'Invalid user, seller, or category id' });
+  }
+
+  const quantity = Number(dailyDesiredQuantity);
+  if (!Number.isFinite(quantity) || quantity < 0) {
+    return res.status(400).json({ error: 'Daily desired quantity must be a number greater than or equal to 0' });
+  }
+
+  try {
+    const [userExists, sellerExists, categoryExists, rangeDoc] = await Promise.all([
+      User.exists({ _id: userId }),
+      Seller.exists({ _id: sellerId }),
+      AsinListCategory.exists({ _id: categoryId }),
+      rangeId ? AsinListRange.findById(rangeId).select('categoryId').lean() : Promise.resolve(null),
+    ]);
+
+    if (!userExists) return res.status(404).json({ error: 'User not found' });
+    if (!sellerExists) return res.status(404).json({ error: 'Seller not found' });
+    if (!categoryExists) return res.status(404).json({ error: 'Category not found' });
+    if (rangeId && !rangeDoc) return res.status(404).json({ error: 'Range not found' });
+    if (rangeDoc && rangeDoc.categoryId?.toString() !== categoryId) {
+      return res.status(400).json({ error: 'Range must belong to the selected category' });
+    }
+
+    const target = await UserCategoryTarget.findOneAndUpdate(
+      { user: userId, seller: sellerId, marketplace, category: categoryId, range: rangeId || null },
+      { user: userId, seller: sellerId, marketplace, category: categoryId, range: rangeId || null, dailyDesiredQuantity: quantity },
+      { upsert: true, new: true, runValidators: true }
+    )
+      .populate('user', 'username email role department')
+      .populate({
+        path: 'seller',
+        select: 'storeName ebayMarketplaces user',
+        populate: { path: 'user', select: 'username email' },
+      })
+      .populate('category', 'name')
+      .populate('range', 'name categoryId');
+
+    res.json(target);
+  } catch (err) {
+    console.error('[UserCategoryTargets] POST / error:', err);
+    res.status(500).json({ error: 'Failed to save desired quantity target' });
+  }
+});
+
+router.delete('/:id', requireAuth, pageAccess, async (req, res) => {
+  const { id } = req.params;
+  if (!isValidObjectId(id)) {
+    return res.status(400).json({ error: 'Invalid target id' });
+  }
+
+  try {
+    const deleted = await UserCategoryTarget.findByIdAndDelete(id);
+    if (!deleted) return res.status(404).json({ error: 'Desired quantity target not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[UserCategoryTargets] DELETE /:id error:', err);
+    res.status(500).json({ error: 'Failed to delete desired quantity target' });
+  }
+});
+
+export default router;
