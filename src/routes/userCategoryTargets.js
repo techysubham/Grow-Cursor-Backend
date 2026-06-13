@@ -10,6 +10,7 @@ import FeedUpload from '../models/FeedUpload.js';
 
 const router = express.Router();
 const PT_TIMEZONE = 'America/Los_Angeles';
+const IST_TIMEZONE = 'Asia/Kolkata';
 
 const pageAccess = requirePageAccess('UserCategoryTargets');
 const performancePageAccess = requirePageAccess(['UserCategoryTargets', 'UserListingPerformance']);
@@ -49,6 +50,20 @@ function getStatus(percent) {
   if (percent >= 95) return 'onTrack';
   if (percent >= 60) return 'behind';
   return 'critical';
+}
+
+function buildUploadMatch(target, start, end) {
+  const sellerObjectId = target.seller?._id || target.seller;
+  const rangeObjectId = target.range?._id || target.range;
+  const match = {
+    seller: sellerObjectId,
+    country: target.marketplace,
+    categoryId: target.category?._id || target.category,
+    status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
+    creationDate: { $gte: start, $lte: end },
+  };
+  if (rangeObjectId) match.rangeId = rangeObjectId;
+  return match;
 }
 
 router.get('/performance', requireAuth, performancePageAccess, async (req, res) => {
@@ -94,17 +109,7 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
     const days = countInclusiveDays(startDate, endDate);
 
     const cards = await Promise.all(targets.map(async (target) => {
-      const sellerObjectId = target.seller?._id || target.seller;
-      const rangeObjectId = target.range?._id || target.range;
-
-      const uploadMatch = {
-        seller: sellerObjectId,
-        country: target.marketplace,
-        categoryId: target.category?._id || target.category,
-        status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
-        creationDate: { $gte: start, $lte: end },
-      };
-      if (rangeObjectId) uploadMatch.rangeId = rangeObjectId;
+      const uploadMatch = buildUploadMatch(target, start, end);
 
       const uploadCounts = await FeedUpload.aggregate([
         {
@@ -142,6 +147,66 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
       };
     }));
 
+    const seenUploadMatches = new Set();
+    const uploadMatchOr = targets.reduce((acc, target) => {
+      const match = buildUploadMatch(target, start, end);
+      const key = [
+        String(match.seller),
+        match.country,
+        String(match.categoryId),
+        match.rangeId ? String(match.rangeId) : 'all',
+      ].join('|');
+      if (seenUploadMatches.has(key)) return acc;
+      seenUploadMatches.add(key);
+      acc.push(match);
+      return acc;
+    }, []);
+
+    const submissionTimeDistribution = uploadMatchOr.length > 0
+      ? await FeedUpload.aggregate([
+        { $match: { $or: uploadMatchOr } },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%H',
+                date: '$creationDate',
+                timezone: IST_TIMEZONE,
+              },
+            },
+            uploadCount: { $sum: 1 },
+            successfulListings: { $sum: { $ifNull: ['$uploadSummary.successCount', 0] } },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ])
+      : [];
+
+    const submissionTimeByHour = new Map(
+      submissionTimeDistribution.map((item) => [
+        Number(item._id),
+        {
+          hour: Number(item._id),
+          uploadCount: item.uploadCount || 0,
+          successfulListings: item.successfulListings || 0,
+        },
+      ])
+    );
+
+    const submissionTimeRows = Array.from({ length: 24 }, (_, hour) => {
+      const row = submissionTimeByHour.get(hour) || { uploadCount: 0, successfulListings: 0 };
+      return {
+        hour,
+        label: new Intl.DateTimeFormat('en-US', {
+          timeZone: IST_TIMEZONE,
+          hour: 'numeric',
+          hour12: true,
+        }).format(new Date(Date.UTC(2026, 0, 1, hour - 5, 30))),
+        uploadCount: row.uploadCount,
+        successfulListings: row.successfulListings,
+      };
+    });
+
     const summary = cards.reduce((acc, card) => {
       acc.totalTargets += 1;
       acc.totalTargetQuantity += card.targetQuantity;
@@ -167,6 +232,7 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
       filters: { startDate, endDate, days, userId: userId || null, sellerId: sellerId || null, marketplace: marketplace || null, categoryId: categoryId || null, rangeId: rangeId || null },
       summary,
       cards,
+      submissionTimeDistribution: submissionTimeRows,
     });
   } catch (err) {
     console.error('[UserCategoryTargets] GET /performance error:', err);
