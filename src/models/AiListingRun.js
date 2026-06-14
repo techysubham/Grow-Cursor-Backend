@@ -37,6 +37,18 @@ const aiListingRunSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  dismissedFromReviewCount: {
+    type: Number,
+    default: 0
+  },
+  dismissedNewAsinCount: {
+    type: Number,
+    default: 0
+  },
+  dismissedUpdateableDuplicateCount: {
+    type: Number,
+    default: 0
+  },
   reviewSaveAttempts: {
     type: Number,
     default: 0

@@ -74,10 +74,13 @@ function getListingAiRunId(listingData = {}) {
   return listingData._aiRunId || listingData.aiRunId || listingData._runId || listingData.runId || null;
 }
 
-async function recordReviewSaveCounts({ listings = [], results = [], templateId, sellerId, userId }) {
+async function recordReviewSaveCounts({ listings = [], results = [], templateId, sellerId, userId, dismissedByRunId = [] }) {
   const savedStatuses = new Set(['created', 'updated', 'reactivated']);
   const countsByRunId = new Map();
   const updateableDuplicateCountsByRunId = new Map();
+  const dismissedCountsByRunId = new Map();
+  const dismissedNewCountsByRunId = new Map();
+  const dismissedUpdateableDuplicateCountsByRunId = new Map();
 
   results.forEach((result, index) => {
     if (!savedStatuses.has(result.status)) return;
@@ -93,7 +96,32 @@ async function recordReviewSaveCounts({ listings = [], results = [], templateId,
     }
   });
 
-  await Promise.all([...countsByRunId.entries()].map(([aiRunId, savedCount]) =>
+  dismissedByRunId.forEach((item) => {
+    const aiRunId = item?.aiRunId;
+    if (!aiRunId) return;
+    dismissedCountsByRunId.set(
+      aiRunId,
+      (dismissedCountsByRunId.get(aiRunId) || 0) + Number(item.dismissedCount || 0)
+    );
+    dismissedNewCountsByRunId.set(
+      aiRunId,
+      (dismissedNewCountsByRunId.get(aiRunId) || 0) + Number(item.dismissedNewAsinCount || 0)
+    );
+    dismissedUpdateableDuplicateCountsByRunId.set(
+      aiRunId,
+      (dismissedUpdateableDuplicateCountsByRunId.get(aiRunId) || 0) + Number(item.dismissedUpdateableDuplicateCount || 0)
+    );
+  });
+
+  const runIds = new Set([
+    ...countsByRunId.keys(),
+    ...dismissedCountsByRunId.keys()
+  ]);
+
+  await Promise.all([...runIds].map((aiRunId) => {
+    const savedCount = countsByRunId.get(aiRunId) || 0;
+    const dismissedCount = dismissedCountsByRunId.get(aiRunId) || 0;
+    return (
     AiListingRun.findOneAndUpdate(
       { aiRunId },
       {
@@ -107,17 +135,24 @@ async function recordReviewSaveCounts({ listings = [], results = [], templateId,
         $inc: {
           savedFromReviewCount: savedCount,
           updateableDuplicateCount: updateableDuplicateCountsByRunId.get(aiRunId) || 0,
+          dismissedFromReviewCount: dismissedCount,
+          dismissedNewAsinCount: dismissedNewCountsByRunId.get(aiRunId) || 0,
+          dismissedUpdateableDuplicateCount: dismissedUpdateableDuplicateCountsByRunId.get(aiRunId) || 0,
           reviewSaveAttempts: 1
         }
       },
       { upsert: true, new: true }
     )
-  ));
+    );
+  }));
 
-  return [...countsByRunId.entries()].map(([aiRunId, savedCount]) => ({
+  return [...runIds].map((aiRunId) => ({
     aiRunId,
-    savedCount,
-    updateableDuplicateCount: updateableDuplicateCountsByRunId.get(aiRunId) || 0
+    savedCount: countsByRunId.get(aiRunId) || 0,
+    updateableDuplicateCount: updateableDuplicateCountsByRunId.get(aiRunId) || 0,
+    dismissedCount: dismissedCountsByRunId.get(aiRunId) || 0,
+    dismissedNewAsinCount: dismissedNewCountsByRunId.get(aiRunId) || 0,
+    dismissedUpdateableDuplicateCount: dismissedUpdateableDuplicateCountsByRunId.get(aiRunId) || 0
   }));
 }
 
@@ -2797,7 +2832,7 @@ router.post('/bulk-delete', requireAuth, async (req, res) => {
 // Bulk create listings from auto-fill results
 router.post('/bulk-create', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, listings, options = {} } = req.body;
+    const { templateId, sellerId, listings, options = {}, reviewStats = {} } = req.body;
 
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
@@ -3094,7 +3129,8 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
       results,
       templateId,
       sellerId,
-      userId: req.user.userId
+      userId: req.user.userId,
+      dismissedByRunId: Array.isArray(reviewStats.dismissedByRunId) ? reviewStats.dismissedByRunId : []
     });
 
     console.log(`Bulk create completed: ${created} created, ${reactivated} reactivated, ${failed} failed, ${skippedCount} skipped`);
@@ -3563,7 +3599,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
 // Bulk save: Save reviewed/edited listings to database
 router.post('/bulk-save', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, listings, options = {} } = req.body;
+    const { templateId, sellerId, listings, options = {}, reviewStats = {} } = req.body;
 
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
@@ -3926,7 +3962,8 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
       results,
       templateId,
       sellerId,
-      userId: req.user.userId
+      userId: req.user.userId,
+      dismissedByRunId: Array.isArray(reviewStats.dismissedByRunId) ? reviewStats.dismissedByRunId : []
     });
 
     console.log(`✅ Bulk save completed: ${created} created, ${updated} updated, ${reactivated} reactivated, ${failed} failed, ${skippedCount} skipped`);
@@ -6097,6 +6134,15 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             updateableDuplicateCount: {
               $ifNull: [{ $arrayElemAt: ['$listingRun.updateableDuplicateCount', 0] }, 0]
             },
+            dismissedFromReviewCount: {
+              $ifNull: [{ $arrayElemAt: ['$listingRun.dismissedFromReviewCount', 0] }, 0]
+            },
+            dismissedNewAsinCount: {
+              $ifNull: [{ $arrayElemAt: ['$listingRun.dismissedNewAsinCount', 0] }, 0]
+            },
+            dismissedUpdateableDuplicateCount: {
+              $ifNull: [{ $arrayElemAt: ['$listingRun.dismissedUpdateableDuplicateCount', 0] }, 0]
+            },
             reviewSaveAttempts: {
               $ifNull: [{ $arrayElemAt: ['$listingRun.reviewSaveAttempts', 0] }, 0]
             },
@@ -6563,6 +6609,9 @@ router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
             failedCalls: { $literal: 0 },
             savedFromReviewCount: { $ifNull: ['$savedFromReviewCount', 0] },
             updateableDuplicateCount: { $ifNull: ['$updateableDuplicateCount', 0] },
+            dismissedFromReviewCount: { $ifNull: ['$dismissedFromReviewCount', 0] },
+            dismissedNewAsinCount: { $ifNull: ['$dismissedNewAsinCount', 0] },
+            dismissedUpdateableDuplicateCount: { $ifNull: ['$dismissedUpdateableDuplicateCount', 0] },
             reviewSaveAttempts: { $ifNull: ['$reviewSaveAttempts', 0] },
             lastSavedFromReviewAt: 1,
             successfulAsinCount: { $literal: 0 },
