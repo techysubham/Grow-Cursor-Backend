@@ -14,6 +14,7 @@ import { getAsinCacheStats, clearAsinCache, invalidateAsinCache } from '../utils
 import AsinDirectory from '../models/AsinDirectory.js';
 import ApiUsage from '../models/ApiUsage.js';
 import AiListingRun from '../models/AiListingRun.js';
+import SellerSkuIndex from '../models/SellerSkuIndex.js';
 
 const router = express.Router();
 
@@ -244,6 +245,189 @@ async function runWithConcurrency(items, concurrency, worker, shouldContinue = (
 
   await Promise.allSettled(workers);
 }
+
+function getBaseSku(sku = '') {
+  const cleanSku = String(sku || '').trim();
+  return cleanSku.replace(/-\d+$/, '');
+}
+
+router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
+  let heartbeat = null;
+
+  try {
+    const { templateId, sellerId, asins: asinsParam, region = 'US' } = req.query;
+
+    if (!templateId || !sellerId || !asinsParam) {
+      return res.status(400).json({ error: 'Template ID, Seller ID, and ASINs are required' });
+    }
+
+    const asins = [
+      ...new Set(
+        String(asinsParam)
+          .split(',')
+          .map(a => a.trim().toUpperCase())
+          .filter(Boolean)
+      )
+    ];
+
+    if (asins.length === 0) {
+      return res.status(400).json({ error: 'At least one ASIN is required' });
+    }
+
+    if (asins.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 ASINs allowed per batch' });
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+
+    let streamClosed = false;
+    const sendSse = (payload) => {
+      if (streamClosed) return;
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      if (typeof res.flush === 'function') res.flush();
+    };
+    const sendDone = () => {
+      if (streamClosed) return;
+      res.write('data: [DONE]\n\n');
+      if (typeof res.flush === 'function') res.flush();
+    };
+
+    heartbeat = setInterval(() => {
+      sendSse({ type: 'ping', timestamp: Date.now() });
+    }, 15000);
+
+    req.on('close', () => {
+      streamClosed = true;
+      if (heartbeat) clearInterval(heartbeat);
+    });
+
+    const [seller, template] = await Promise.all([
+      Seller.findById(sellerId).select('_id').lean(),
+      getEffectiveTemplate(templateId, sellerId)
+    ]);
+
+    if (!seller || !template) {
+      sendSse({ type: 'error', error: 'Seller or template not found' });
+      sendDone();
+      if (heartbeat) clearInterval(heartbeat);
+      return res.end();
+    }
+
+    const generatedRows = asins.map(asin => {
+      const sku = generateSKUFromASIN(asin);
+      return { asin, sku, baseSku: getBaseSku(sku) };
+    });
+
+    const skuValues = [...new Set(generatedRows.flatMap(row => [row.sku, row.baseSku]).filter(Boolean))];
+    const activeRecords = skuValues.length > 0
+      ? await SellerSkuIndex.find({
+          seller: sellerId,
+          $or: [
+            { sku: { $in: skuValues } },
+            { baseSku: { $in: skuValues } }
+          ]
+        }).select('sku baseSku').lean()
+      : [];
+
+    const activeSkuSet = new Set();
+    activeRecords.forEach(record => {
+      if (record.sku) activeSkuSet.add(record.sku);
+      if (record.baseSku) activeSkuSet.add(record.baseSku);
+    });
+
+    const streamConcurrency = parseInt(process.env.ASIN_PRECHECK_CONCURRENCY, 10)
+      || parseInt(process.env.SCRAPER_API_CONCURRENT, 10)
+      || 10;
+    const rowByAsin = new Map(generatedRows.map(row => [row.asin, row]));
+    let completed = 0;
+
+    sendSse({ type: 'started', total: asins.length, concurrency: Math.min(streamConcurrency, asins.length) });
+
+    await runWithConcurrency(asins, streamConcurrency, async (asin) => {
+      if (streamClosed) return;
+
+      const generated = rowByAsin.get(asin) || {
+        sku: generateSKUFromASIN(asin),
+        baseSku: getBaseSku(generateSKUFromASIN(asin))
+      };
+
+      try {
+        sendSse({
+          type: 'item_started',
+          asin,
+          id: `asin-precheck-${asin}`,
+          progressStage: 'fetching'
+        });
+
+        const amazonData = await fetchAmazonData(asin, region);
+        const sourceData = buildAmazonSourceData(amazonData);
+        const active = activeSkuSet.has(generated.sku) || activeSkuSet.has(generated.baseSku);
+
+        sendSse({
+          type: 'item',
+          item: {
+            id: `asin-precheck-${asin}`,
+            asin,
+            sku: generated.sku,
+            baseSku: generated.baseSku,
+            active,
+            activeStatus: active ? 'active' : 'inactive',
+            title: amazonData.title || '',
+            image: Array.isArray(amazonData.images) ? amazonData.images[0] || '' : '',
+            sourceData,
+            status: 'success',
+            progressStage: 'complete',
+            errors: []
+          },
+          progress: ++completed,
+          total: asins.length
+        });
+      } catch (error) {
+        console.error(`[ASIN Precheck] Error processing ${asin}:`, error.message);
+        const active = activeSkuSet.has(generated.sku) || activeSkuSet.has(generated.baseSku);
+
+        sendSse({
+          type: 'item',
+          item: {
+            id: `asin-precheck-${asin}`,
+            asin,
+            sku: generated.sku,
+            baseSku: generated.baseSku,
+            active,
+            activeStatus: active ? 'active' : 'inactive',
+            title: '',
+            image: '',
+            sourceData: null,
+            status: 'error',
+            progressStage: 'complete',
+            errors: [error.message]
+          },
+          progress: ++completed,
+          total: asins.length
+        });
+      }
+    }, () => !streamClosed);
+
+    sendSse({ type: 'complete', total: completed });
+    sendDone();
+    if (heartbeat) clearInterval(heartbeat);
+    res.end();
+  } catch (error) {
+    console.error('[ASIN Precheck] Stream error:', error);
+    if (heartbeat) clearInterval(heartbeat);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'Failed to run ASIN precheck', details: error.message });
+    }
+    res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
+});
 
 /**
  * @swagger
@@ -1012,6 +1196,7 @@ router.get('/analytics', requireAuth, async (req, res) => {
 router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
   try {
     const { templateId, sellerId, asins: asinsParam, region = 'US' } = req.query;
+    const preferCachedAmazonData = req.query.preferCachedAmazonData === 'true';
 
     if (!templateId || !sellerId || !asinsParam) {
       return res.status(400).json({ error: 'Template ID, Seller ID, and ASINs are required' });
@@ -1165,7 +1350,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             // Always refresh duplicate ASIN previews so price/source data stays current.
             try {
               console.log(`[duplicate_updateable] Fetching fresh Amazon data for ${asin}`);
-              const amazonData = await fetchAmazonData(asin, region, { forceRefresh: true });
+              const amazonData = await fetchAmazonData(asin, region, { forceRefresh: !preferCachedAmazonData });
               if (amazonData) {
                 duplicateImages = Array.isArray(amazonData.images) ? amazonData.images : duplicateImages;
                 sourceData = buildAmazonSourceData(amazonData);
