@@ -33,6 +33,7 @@ import User from '../models/User.js';
 import ItemCategoryMap from '../models/ItemCategoryMap.js';
 import AutoCompatibilityBatch from '../models/AutoCompatibilityBatch.js';
 import AutoCompatibilityBatchItem from '../models/AutoCompatibilityBatchItem.js';
+import SkuIndexSyncRun from '../models/SkuIndexSyncRun.js';
 import AsinListCategory from '../models/AsinListCategory.js';
 import EndListingLog from '../models/EndListingLog.js';
 import AsinListRange from '../models/AsinListRange.js';
@@ -669,12 +670,69 @@ function extractBaseSku(sku) {
 
 // In-memory tracking: sellerId (string) → { status, startedAt, totalCount, lastSyncAt, error }
 const skuSyncStatus = new Map();
+const skuSyncDismissed = new Set();
+const SKU_SYNC_CONCURRENCY = 3;
+let activeSkuSyncRunId = null;
+let skuSyncStopRequested = false;
+
+function getSkuSyncStatusSnapshot(sellerId) {
+  const key = String(sellerId);
+  const mem = skuSyncStatus.get(key) || { status: 'idle' };
+  return { ...mem, dismissed: skuSyncDismissed.has(key) };
+}
+
+function throwIfSkuSyncDismissed(sellerId) {
+  if (skuSyncDismissed.has(String(sellerId))) {
+    throw new Error('SKU index sync dismissed');
+  }
+  if (skuSyncStopRequested) {
+    throw new Error('SKU index sync stopped');
+  }
+}
+
+async function updateSkuIndexRunSeller(runId, sellerId, patch = {}) {
+  if (!runId) return;
+  await SkuIndexSyncRun.updateOne(
+    { _id: runId, 'sellers.seller': sellerId },
+    { $set: Object.fromEntries(Object.entries(patch).map(([key, value]) => [`sellers.$.${key}`, value])) }
+  );
+}
+
+async function markInterruptedSkuIndexRuns() {
+  const now = new Date();
+  await SkuIndexSyncRun.updateMany(
+    { status: { $in: ['queued', 'running', 'stopping'] } },
+    {
+      $set: {
+        status: 'interrupted',
+        interruptedAt: now,
+        completedAt: now,
+        error: 'Server restarted before this SKU index sync run finished.',
+      },
+    }
+  );
+  await SkuIndexSyncRun.updateMany(
+    {
+      status: 'interrupted',
+      'sellers.status': { $in: ['queued', 'running'] },
+    },
+    {
+      $set: {
+        'sellers.$[seller].status': 'interrupted',
+        'sellers.$[seller].completedAt': now,
+        'sellers.$[seller].error': 'Server restarted before this seller sync finished.',
+      },
+    },
+    { arrayFilters: [{ 'seller.status': { $in: ['queued', 'running'] } }] }
+  );
+}
 
 // Background sync — paginates GetSellerList to rebuild the SellerSkuIndex collection.
 // send(obj) is an optional SSE callback for live progress; omit for fire-and-forget.
 async function runSkuIndexSync(seller, send = null) {
   const syncStart = new Date();
   const sellerId = seller._id.toString();
+  throwIfSkuSyncDismissed(sellerId);
 
   // Mirror the live-tiers approach: EndTimeFrom=now covers all currently active listings
   // (their end time is in the future). Use 120 days to catch long fixed-duration listings.
@@ -689,6 +747,7 @@ async function runSkuIndexSync(seller, send = null) {
   const startedAt = skuSyncStatus.get(sellerId)?.startedAt ?? syncStart;
 
   do {
+    throwIfSkuSyncDismissed(sellerId);
     // Re-check token on every page — covers multi-minute crawls where token may expire mid-loop
     const token = await ensureValidToken(seller);
 
@@ -762,6 +821,7 @@ async function runSkuIndexSync(seller, send = null) {
     page++;
   } while (page <= totalPages);
 
+  throwIfSkuSyncDismissed(sellerId);
   // Remove stale records — only runs if ALL pages completed without error (any throw above skips this)
   await SellerSkuIndex.deleteMany({ seller: seller._id, syncedAt: { $lt: syncStart } });
 
@@ -801,7 +861,7 @@ router.get('/sync-sku-index/stream', requireAuth, async (req, res) => {
   if (!sellerId) return res.status(400).json({ error: 'sellerId is required' });
 
   const current = skuSyncStatus.get(sellerId);
-  if (current?.status === 'running') {
+  if (current?.status === 'running' || current?.status === 'queued') {
     return res.status(409).json({ error: 'Sync already in progress for this seller' });
   }
 
@@ -818,6 +878,7 @@ router.get('/sync-sku-index/stream', requireAuth, async (req, res) => {
     if (!seller) { send({ type: 'error', error: 'Seller not found' }); return res.end(); }
 
     const startedAt = new Date();
+    skuSyncDismissed.delete(String(sellerId));
     skuSyncStatus.set(sellerId, { status: 'running', startedAt, totalCount: 0 });
 
     const { totalCount, syncedAt } = await runSkuIndexSync(seller, send);
@@ -826,8 +887,9 @@ router.get('/sync-sku-index/stream', requireAuth, async (req, res) => {
     send({ type: 'done', totalCount, syncedAt });
   } catch (err) {
     console.error('[sync-sku-index/stream] Error:', err.message);
-    skuSyncStatus.set(sellerId, { status: 'failed', error: err.message });
-    send({ type: 'error', error: err.message });
+    const status = skuSyncDismissed.has(String(sellerId)) ? 'dismissed' : 'failed';
+    skuSyncStatus.set(sellerId, { status, error: err.message });
+    send({ type: 'error', error: err.message, status });
   } finally {
     res.end();
   }
@@ -871,7 +933,23 @@ router.get('/sync-sku-index/stream', requireAuth, async (req, res) => {
 router.get('/sync-sku-index/status/:sellerId', requireAuth, async (req, res) => {
   try {
     const { sellerId } = req.params;
-    const mem = skuSyncStatus.get(sellerId) || { status: 'idle' };
+    let mem = getSkuSyncStatusSnapshot(sellerId);
+    const latestRun = await SkuIndexSyncRun.findOne({ 'sellers.seller': sellerId })
+      .sort({ startedAt: -1 })
+      .select('status runnerId source sellers startedAt completedAt stoppedAt interruptedAt requestedStop')
+      .lean();
+    const latestRunSeller = latestRun?.sellers?.find(s => String(s.seller) === String(sellerId));
+    if (latestRunSeller && ['queued', 'running', 'dismissed', 'interrupted'].includes(latestRunSeller.status)) {
+      mem = {
+        ...mem,
+        status: latestRunSeller.status,
+        totalCount: latestRunSeller.totalCount || mem.totalCount || 0,
+        error: latestRunSeller.error || mem.error || null,
+        source: latestRun.source,
+        runnerId: latestRun.runnerId,
+        runId: latestRun._id,
+      };
+    }
     const dbCount = await SellerSkuIndex.countDocuments({ seller: sellerId });
     // Get the syncedAt from the most recent record for this seller
     const latest = await SellerSkuIndex.findOne({ seller: sellerId }).sort({ syncedAt: -1 }).select('syncedAt').lean();
@@ -880,6 +958,97 @@ router.get('/sync-sku-index/status/:sellerId', requireAuth, async (req, res) => 
     res.status(500).json({ error: 'Failed to fetch sync status', details: error.message });
   }
 });
+
+router.get('/sync-sku-index/run-status', requireAuth, async (req, res) => {
+  try {
+    const run = await SkuIndexSyncRun.findOne({})
+      .sort({ startedAt: -1 })
+      .populate('sellers.seller', 'user')
+      .lean();
+    return res.json({
+      activeRunId: activeSkuSyncRunId,
+      stopRequested: skuSyncStopRequested,
+      run,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to fetch SKU index sync run status', details: error.message });
+  }
+});
+
+router.post('/sync-sku-index/dismiss/:sellerId', requireAuth, async (req, res) => {
+  try {
+    const { sellerId } = req.params;
+    const current = skuSyncStatus.get(String(sellerId));
+    skuSyncDismissed.add(String(sellerId));
+    skuSyncStatus.set(String(sellerId), {
+      ...current,
+      status: 'dismissed',
+      dismissedAt: new Date(),
+      error: null,
+    });
+    if (activeSkuSyncRunId) {
+      await updateSkuIndexRunSeller(activeSkuSyncRunId, sellerId, {
+        status: 'dismissed',
+        dismissedAt: new Date(),
+        completedAt: new Date(),
+        error: null,
+      });
+    }
+    return res.json({ success: true, status: 'dismissed' });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to dismiss SKU index sync', details: error.message });
+  }
+});
+
+router.post('/sync-sku-index/cron/stop', requireAuth, async (req, res) => {
+  try {
+    const activeRun = activeSkuSyncRunId
+      ? await SkuIndexSyncRun.findById(activeSkuSyncRunId).select('_id').lean()
+      : await SkuIndexSyncRun.findOne({ status: { $in: ['queued', 'running', 'stopping'] } }).sort({ startedAt: -1 }).select('_id').lean();
+
+    if (!activeRun) {
+      return res.status(409).json({ success: false, message: 'No active SKU index cron sync is running.' });
+    }
+
+    const now = new Date();
+    skuSyncStopRequested = true;
+    activeSkuSyncRunId = activeRun._id;
+
+    for (const [sellerId, state] of skuSyncStatus.entries()) {
+      if (state?.source === 'cron' && state.status === 'queued') {
+        skuSyncDismissed.add(String(sellerId));
+        skuSyncStatus.set(String(sellerId), { ...state, status: 'dismissed', dismissedAt: now });
+      }
+    }
+
+    await SkuIndexSyncRun.updateOne(
+      { _id: activeRun._id },
+      {
+        $set: {
+          status: 'stopping',
+          requestedStop: true,
+          stopRequestedAt: now,
+        },
+      }
+    );
+    await SkuIndexSyncRun.updateOne(
+      { _id: activeRun._id },
+      {
+        $set: {
+          'sellers.$[seller].status': 'dismissed',
+          'sellers.$[seller].dismissedAt': now,
+          'sellers.$[seller].completedAt': now,
+        },
+      },
+      { arrayFilters: [{ 'seller.status': 'queued' }] }
+    );
+
+    return res.json({ success: true, status: 'stopping', runId: activeRun._id });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to stop SKU index cron sync', details: error.message });
+  }
+});
+
 
 /**
  * @swagger
@@ -16825,6 +16994,18 @@ router.get('/auto-compatibility-batches-for-date', requireAuth, async (req, res)
 // Set RUNNER_ID=render in Render's env vars.
 // ============================================
 
+export async function initializeSkuIndexSyncState() {
+  try {
+    await markInterruptedSkuIndexRuns();
+    activeSkuSyncRunId = null;
+    skuSyncStopRequested = false;
+    skuSyncDismissed.clear();
+    console.log('[SKU Index Sync] Cleared stale running cron state after startup.');
+  } catch (err) {
+    console.error('[SKU Index Sync] Failed to initialize startup state:', err.message);
+  }
+}
+
 // Core logic for "Poll All Sellers".
 // Called by: POST /sync-all-sellers-listings (button) and the 1:00 AM IST cron job.
 export async function scheduledSyncAllSellers() {
@@ -16981,6 +17162,157 @@ export async function scheduledSyncAllSellers() {
     syncAllStatus.completedAt = new Date().toISOString();
     console.log(`[Sync All] Done: ${syncAllStatus.totalProcessed} processed, ${syncAllStatus.totalSkipped} skipped, ${syncAllStatus.errors.length} errors`);
   })();
+}
+
+export async function scheduledSkuIndexSyncAllSellers() {
+  if (activeSkuSyncRunId) {
+    console.log(`[SKU Index Cron] Run ${activeSkuSyncRunId} already active, skipping.`);
+    return [];
+  }
+
+  const allSellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+    .populate('user', 'username email');
+
+  const sellers = allSellers.filter(seller => {
+    const sellerId = seller._id.toString();
+    return skuSyncStatus.get(sellerId)?.status !== 'running';
+  });
+
+  if (sellers.length === 0) {
+    console.log('[SKU Index Cron] No eligible sellers to sync.');
+    return [];
+  }
+
+  const startedAt = new Date();
+  const run = await SkuIndexSyncRun.create({
+    source: 'cron',
+    runnerId: RUNNER_ID,
+    status: 'running',
+    requestedStop: false,
+    concurrency: SKU_SYNC_CONCURRENCY,
+    sellersTotal: sellers.length,
+    sellersComplete: 0,
+    startedAt,
+    sellers: sellers.map(seller => ({
+      seller: seller._id,
+      sellerName: seller.user?.username || seller.user?.email || seller._id.toString(),
+      status: 'queued',
+    })),
+  });
+
+  activeSkuSyncRunId = run._id;
+  skuSyncStopRequested = false;
+  skuSyncDismissed.clear();
+  sellers.forEach(seller => {
+    skuSyncStatus.set(seller._id.toString(), {
+      status: 'queued',
+      startedAt,
+      totalCount: 0,
+      source: 'cron',
+      runnerId: RUNNER_ID,
+    });
+  });
+
+  console.log(`[SKU Index Cron] Starting SKU index sync for ${sellers.length} seller(s), max ${SKU_SYNC_CONCURRENCY} at a time.`);
+  let nextIndex = 0;
+  const results = [];
+
+  const worker = async () => {
+    while (nextIndex < sellers.length) {
+      const freshRun = await SkuIndexSyncRun.findById(run._id).select('requestedStop').lean();
+      if (skuSyncStopRequested || freshRun?.requestedStop) {
+        skuSyncStopRequested = true;
+        break;
+      }
+
+      const seller = sellers[nextIndex++];
+      const sellerId = seller._id.toString();
+      const sellerName = seller.user?.username || seller.user?.email || sellerId;
+
+      if (skuSyncDismissed.has(sellerId)) {
+        skuSyncStatus.set(sellerId, { status: 'dismissed', source: 'cron', runnerId: RUNNER_ID, dismissedAt: new Date() });
+        await updateSkuIndexRunSeller(run._id, seller._id, { status: 'dismissed', dismissedAt: new Date(), completedAt: new Date() });
+        await SkuIndexSyncRun.updateOne({ _id: run._id }, { $inc: { sellersComplete: 1 } });
+        results.push({ sellerId, sellerName, status: 'dismissed' });
+        continue;
+      }
+
+      try {
+        const sellerStartedAt = new Date();
+        skuSyncStatus.set(sellerId, { status: 'running', startedAt: sellerStartedAt, totalCount: 0, source: 'cron', runnerId: RUNNER_ID });
+        await updateSkuIndexRunSeller(run._id, seller._id, { status: 'running', startedAt: sellerStartedAt, error: null });
+        console.log(`[SKU Index Cron] Starting seller ${sellerName}`);
+        const { totalCount, syncedAt } = await runSkuIndexSync(seller);
+        skuSyncStatus.set(sellerId, {
+          status: 'completed',
+          startedAt: sellerStartedAt,
+          totalCount,
+          lastSyncAt: syncedAt,
+          source: 'cron',
+          runnerId: RUNNER_ID,
+        });
+        await updateSkuIndexRunSeller(run._id, seller._id, { status: 'completed', totalCount, completedAt: new Date(), error: null });
+        await SkuIndexSyncRun.updateOne({ _id: run._id }, { $inc: { sellersComplete: 1 } });
+        results.push({ sellerId, sellerName, status: 'completed', totalCount });
+      } catch (err) {
+        const status = skuSyncDismissed.has(sellerId) || skuSyncStopRequested ? 'dismissed' : 'failed';
+        skuSyncStatus.set(sellerId, { status, error: status === 'dismissed' ? null : err.message, source: 'cron', runnerId: RUNNER_ID });
+        await updateSkuIndexRunSeller(run._id, seller._id, {
+          status,
+          error: status === 'dismissed' ? null : err.message,
+          dismissedAt: status === 'dismissed' ? new Date() : null,
+          completedAt: new Date(),
+        });
+        await SkuIndexSyncRun.updateOne({ _id: run._id }, { $inc: { sellersComplete: 1 } });
+        results.push({ sellerId, sellerName, status, error: err.message });
+        console.error(`[SKU Index Cron] ${sellerName} ${status}:`, err.message);
+      }
+    }
+  };
+
+  try {
+    const workerCount = Math.min(SKU_SYNC_CONCURRENCY, sellers.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    const finalRun = await SkuIndexSyncRun.findById(run._id).select('requestedStop sellersComplete').lean();
+    const now = new Date();
+    if (skuSyncStopRequested || finalRun?.requestedStop) {
+      await SkuIndexSyncRun.updateOne(
+        { _id: run._id },
+        {
+          $set: {
+            status: 'stopped',
+            requestedStop: true,
+            stoppedAt: now,
+            completedAt: now,
+          },
+        }
+      );
+      await SkuIndexSyncRun.updateOne(
+        { _id: run._id },
+        {
+          $set: {
+            'sellers.$[seller].status': 'dismissed',
+            'sellers.$[seller].dismissedAt': now,
+            'sellers.$[seller].completedAt': now,
+          },
+        },
+        { arrayFilters: [{ 'seller.status': 'queued' }] }
+      );
+    } else {
+      const failedCount = results.filter(r => r.status === 'failed').length;
+      await SkuIndexSyncRun.updateOne(
+        { _id: run._id },
+        { $set: { status: failedCount > 0 ? 'failed' : 'completed', completedAt: now } }
+      );
+    }
+
+    console.log(`[SKU Index Cron] Finished ${results.length} seller sync(s).`);
+    return results;
+  } finally {
+    activeSkuSyncRunId = null;
+    skuSyncStopRequested = false;
+  }
 }
 
 // Core logic for "Run All Sellers for Date".
