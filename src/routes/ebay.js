@@ -3287,6 +3287,33 @@ router.get('/stored-orders', requireAuth, async (req, res) => {
 
     const totalOrders = await Order.countDocuments(query);
     const totalPages = Math.ceil(totalOrders / limitNum);
+    let remarkCounts = {};
+
+    if (amazonArriving === 'true') {
+      const remarkStatsQuery = { ...query };
+      if (
+        remarkStatsQuery.remark &&
+        typeof remarkStatsQuery.remark === 'object' &&
+        remarkStatsQuery.remark.$ne === 'Delivered'
+      ) {
+        delete remarkStatsQuery.remark;
+      }
+
+      const remarkStats = await Order.aggregate([
+        { $match: remarkStatsQuery },
+        {
+          $group: {
+            _id: '$remark',
+            count: { $sum: 1 }
+          }
+        }
+      ]);
+
+      remarkCounts = remarkStats.reduce((acc, stat) => {
+        if (stat._id) acc[stat._id] = stat.count;
+        return acc;
+      }, {});
+    }
 
     const orders = await Order.find(query)
       .populate({
@@ -3338,6 +3365,7 @@ router.get('/stored-orders', requireAuth, async (req, res) => {
 
     res.json({
       orders: ordersWithConvoData,
+      remarkCounts,
       pagination: {
         currentPage: pageNum,
         totalPages,
