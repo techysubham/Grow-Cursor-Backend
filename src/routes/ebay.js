@@ -729,7 +729,7 @@ async function markInterruptedSkuIndexRuns() {
 
 // Background sync — paginates GetSellerList to rebuild the SellerSkuIndex collection.
 // send(obj) is an optional SSE callback for live progress; omit for fire-and-forget.
-async function runSkuIndexSync(seller, send = null) {
+async function runSkuIndexSync(seller, send = null, options = {}) {
   const syncStart = new Date();
   const sellerId = seller._id.toString();
   throwIfSkuSyncDismissed(sellerId);
@@ -815,8 +815,17 @@ async function runSkuIndexSync(seller, send = null) {
       totalCount += ops.length;
     }
 
-    skuSyncStatus.set(sellerId, { status: 'running', startedAt, totalCount });
-    if (send) send({ type: 'progress', page, totalPages, totalEntries, count: totalCount });
+    const progress = { page, totalPages, totalEntries, count: totalCount };
+    const previousStatus = skuSyncStatus.get(sellerId) || {};
+    skuSyncStatus.set(sellerId, {
+      ...previousStatus,
+      status: 'running',
+      startedAt,
+      totalCount,
+      progress,
+    });
+    if (options.onProgress) await options.onProgress(progress);
+    if (send) send({ type: 'progress', ...progress });
 
     page++;
   } while (page <= totalPages);
@@ -945,6 +954,14 @@ router.get('/sync-sku-index/status/:sellerId', requireAuth, async (req, res) => 
         status: latestRunSeller.status,
         totalCount: latestRunSeller.totalCount || mem.totalCount || 0,
         error: latestRunSeller.error || mem.error || null,
+        progress: latestRunSeller.status === 'running' && latestRunSeller.currentPage > 0
+          ? {
+              page: latestRunSeller.currentPage,
+              totalPages: latestRunSeller.totalPages,
+              totalEntries: latestRunSeller.totalEntries,
+              count: latestRunSeller.totalCount || mem.totalCount || 0,
+            }
+          : mem.progress || null,
         source: latestRun.source,
         runnerId: latestRun.runnerId,
         runId: latestRun._id,
@@ -17242,7 +17259,16 @@ export async function scheduledSkuIndexSyncAllSellers() {
         skuSyncStatus.set(sellerId, { status: 'running', startedAt: sellerStartedAt, totalCount: 0, source: 'cron', runnerId: RUNNER_ID });
         await updateSkuIndexRunSeller(run._id, seller._id, { status: 'running', startedAt: sellerStartedAt, error: null });
         console.log(`[SKU Index Cron] Starting seller ${sellerName}`);
-        const { totalCount, syncedAt } = await runSkuIndexSync(seller);
+        const { totalCount, syncedAt } = await runSkuIndexSync(seller, null, {
+          onProgress: async (progress) => {
+            await updateSkuIndexRunSeller(run._id, seller._id, {
+              currentPage: progress.page,
+              totalPages: progress.totalPages,
+              totalEntries: progress.totalEntries,
+              totalCount: progress.count,
+            });
+          },
+        });
         skuSyncStatus.set(sellerId, {
           status: 'completed',
           startedAt: sellerStartedAt,
@@ -17250,6 +17276,7 @@ export async function scheduledSkuIndexSyncAllSellers() {
           lastSyncAt: syncedAt,
           source: 'cron',
           runnerId: RUNNER_ID,
+          progress: null,
         });
         await updateSkuIndexRunSeller(run._id, seller._id, { status: 'completed', totalCount, completedAt: new Date(), error: null });
         await SkuIndexSyncRun.updateOne({ _id: run._id }, { $inc: { sellersComplete: 1 } });

@@ -10,6 +10,7 @@ import {
 
 const RUNNER_ID = (process.env.RUNNER_ID || 'local').trim().toLowerCase();
 const IS_RENDER_RUNNER = RUNNER_ID === 'render';
+const IS_SKU_INDEX_RUNNER = RUNNER_ID === 'render';
 
 export function initializeScheduledJobs() {
     initializeSkuIndexSyncState();
@@ -61,20 +62,24 @@ export function initializeScheduledJobs() {
 
     console.log('[CRON] Scheduled job initialized: Auto-upload CSV (every minute)');
 
-    if (IS_RENDER_RUNNER) {
-        // SKU Index Sync at 12:10 AM IST daily.
+    if (IS_SKU_INDEX_RUNNER) {
+        // SKU Index Sync at 12:30 PM IST daily.
         // Runs only on the Render runner and processes at most 3 sellers concurrently.
-        cron.schedule('10 0 * * *', async () => {
+        cron.schedule('30 12 * * *', async () => {
             try {
-                console.log('[CRON] Scheduled SKU Index Sync starting at 12:10 AM IST...');
+                console.log('[CRON] Scheduled SKU Index Sync starting at 12:30 PM IST...');
                 await scheduledSkuIndexSyncAllSellers();
             } catch (err) {
                 console.error('[CRON] Scheduled SKU Index Sync error:', err.message);
             }
         }, { timezone: 'Asia/Kolkata' });
 
-        console.log(`[CRON] Scheduled job initialized: SKU Index Sync at 12:10 AM IST (runner: ${RUNNER_ID})`);
+        console.log(`[CRON] Scheduled job initialized: SKU Index Sync at 12:30 PM IST (runner: ${RUNNER_ID})`);
+    } else {
+        console.log(`[CRON] Skipping SKU Index Sync cron initialization for runner: ${RUNNER_ID}. Set RUNNER_ID=render to enable automatic runs.`);
+    }
 
+    if (IS_RENDER_RUNNER) {
         // Poll All Sellers at 1:00 AM IST daily.
         // Syncs eBay listings from lastListingPolledAt up to "now" for every seller.
         // After this runs, the DB will contain the previous day's listings ready for auto-compat.
@@ -89,7 +94,6 @@ export function initializeScheduledJobs() {
 
         console.log(`[CRON] Scheduled job initialized: Poll All Sellers at 1:00 AM IST (runner: ${RUNNER_ID})`);
     } else {
-        console.log(`[CRON] Skipping SKU Index Sync cron initialization for runner: ${RUNNER_ID}. Set RUNNER_ID=render to enable automatic runs.`);
         console.log(`[CRON] Skipping Poll All Sellers cron initialization for runner: ${RUNNER_ID}. Set RUNNER_ID=render to enable automatic runs.`);
     }
 
