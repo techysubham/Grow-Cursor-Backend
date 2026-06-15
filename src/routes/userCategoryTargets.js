@@ -123,6 +123,46 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
         },
       ]);
       const successfulListings = uploadCounts[0]?.totalSuccess || 0;
+      const uploadTimeDistribution = await FeedUpload.aggregate([
+        {
+          $match: uploadMatch,
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%H',
+                date: '$creationDate',
+                timezone: IST_TIMEZONE,
+              },
+            },
+            uploadCount: { $sum: 1 },
+            successfulListings: { $sum: { $ifNull: ['$uploadSummary.successCount', 0] } },
+          },
+        },
+      ]);
+      const uploadTimeByHour = new Map(
+        uploadTimeDistribution.map((item) => [
+          Number(item._id),
+          {
+            uploadCount: item.uploadCount || 0,
+            successfulListings: item.successfulListings || 0,
+          },
+        ])
+      );
+      const submissionTimeDistribution = Array.from({ length: 24 }, (_, hour) => {
+        const row = uploadTimeByHour.get(hour) || { uploadCount: 0, successfulListings: 0 };
+        return {
+          hour,
+          label: new Intl.DateTimeFormat('en-US', {
+            timeZone: IST_TIMEZONE,
+            hour: 'numeric',
+            hour12: true,
+          }).format(new Date(Date.UTC(2026, 0, 1, hour - 5, 30))),
+          uploadCount: row.uploadCount,
+          successfulListings: row.successfulListings,
+        };
+      });
 
       const targetQuantity = (target.dailyDesiredQuantity || 0) * days;
       const completionPercent = targetQuantity > 0
@@ -144,6 +184,7 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
         completionPercent,
         status,
         countSource: 'feedUploads',
+        submissionTimeDistribution,
       };
     }));
 
