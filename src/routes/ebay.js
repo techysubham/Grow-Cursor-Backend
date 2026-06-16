@@ -15450,6 +15450,26 @@ router.put('/feed/manual-end-listings/:id', requireAuth, requirePageAccess('Manu
   }
 });
 
+router.delete('/feed/manual-end-listings/:id', requireAuth, requirePageAccess('ManualEndListing'), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Valid entry is required.' });
+    }
+
+    const adjustment = await ManualEndListingAdjustment.findByIdAndDelete(id).lean();
+    if (!adjustment) {
+      return res.status(404).json({ error: 'Manual end listing entry not found.' });
+    }
+
+    res.json({ success: true, id });
+  } catch (err) {
+    console.error('[Manual End Listing] Delete error:', err.message);
+    res.status(500).json({ error: 'Failed to delete manual end listing entry' });
+  }
+});
+
 router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('DailyListingComparison'), async (req, res) => {
   try {
     const defaultDate = new Intl.DateTimeFormat('en-CA', {
