@@ -31,6 +31,7 @@ export const PAGE_DEFAULT_ROLES = {
   'ManageTemplates': ['superadmin'],
   'ListingsDatabase': ['superadmin'],
   'SelectSeller': ['superadmin', 'lister', 'advancelister', 'trainee'],
+  'AsinPrecheck': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'SellerTemplates': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'TemplateListings': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'ListingDirectory': ['superadmin', 'lister', 'advancelister', 'trainee'],
