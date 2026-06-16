@@ -15391,6 +15391,65 @@ router.post('/feed/manual-end-listings', requireAuth, requirePageAccess('ManualE
   }
 });
 
+router.put('/feed/manual-end-listings/:id', requireAuth, requirePageAccess('ManualEndListing'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { pdtDate, sellerId, country, quantity, note } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Valid entry is required.' });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(pdtDate || ''))) {
+      return res.status(400).json({ error: 'Valid PDT date is required.' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(sellerId)) {
+      return res.status(400).json({ error: 'Valid seller is required.' });
+    }
+    const normalizedCountry = String(country || '').trim();
+    if (!normalizedCountry) {
+      return res.status(400).json({ error: 'Country is required.' });
+    }
+    const normalizedQuantity = Number.parseInt(quantity, 10);
+    if (!Number.isInteger(normalizedQuantity) || normalizedQuantity < 1) {
+      return res.status(400).json({ error: 'Quantity must be a positive whole number.' });
+    }
+
+    const seller = await Seller.findById(sellerId).select('_id').lean();
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found.' });
+    }
+
+    const adjustment = await ManualEndListingAdjustment.findByIdAndUpdate(
+      id,
+      {
+        pdtDate,
+        seller: sellerId,
+        country: normalizedCountry,
+        quantity: normalizedQuantity,
+        note: String(note || '').trim().slice(0, 500),
+      },
+      { new: true }
+    ).lean();
+
+    if (!adjustment) {
+      return res.status(404).json({ error: 'Manual end listing entry not found.' });
+    }
+
+    res.json({
+      id: adjustment._id,
+      pdtDate: adjustment.pdtDate,
+      sellerId: adjustment.seller,
+      country: adjustment.country,
+      quantity: adjustment.quantity,
+      note: adjustment.note,
+      updatedAt: adjustment.updatedAt,
+    });
+  } catch (err) {
+    console.error('[Manual End Listing] Update error:', err.message);
+    res.status(500).json({ error: 'Failed to update manual end listing entry' });
+  }
+});
+
 router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('DailyListingComparison'), async (req, res) => {
   try {
     const defaultDate = new Intl.DateTimeFormat('en-CA', {
