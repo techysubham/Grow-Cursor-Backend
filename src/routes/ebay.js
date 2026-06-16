@@ -36,6 +36,7 @@ import AutoCompatibilityBatchItem from '../models/AutoCompatibilityBatchItem.js'
 import SkuIndexSyncRun from '../models/SkuIndexSyncRun.js';
 import AsinListCategory from '../models/AsinListCategory.js';
 import EndListingLog from '../models/EndListingLog.js';
+import ManualEndListingAdjustment from '../models/ManualEndListingAdjustment.js';
 import AsinListRange from '../models/AsinListRange.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import PriceChangeLog from '../models/PriceChangeLog.js';
@@ -15311,6 +15312,85 @@ export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDa
  *               items:
  *                 type: object
  */
+router.get('/feed/manual-end-listings', requireAuth, requirePageAccess('ManualEndListing'), async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 25));
+    const rows = await ManualEndListingAdjustment.find()
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .populate({
+        path: 'seller',
+        select: 'user',
+        populate: { path: 'user', select: 'username email' }
+      })
+      .populate('createdBy', 'username email')
+      .lean();
+
+    res.json(rows.map(row => ({
+      id: row._id,
+      pdtDate: row.pdtDate,
+      sellerId: row.seller?._id,
+      sellerName: row.seller?.user?.username || 'Unknown',
+      country: row.country,
+      quantity: row.quantity,
+      note: row.note || '',
+      createdBy: row.createdBy?.username || 'Unknown',
+      createdAt: row.createdAt,
+    })));
+  } catch (err) {
+    console.error('[Manual End Listing] History error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch manual end listing entries' });
+  }
+});
+
+router.post('/feed/manual-end-listings', requireAuth, requirePageAccess('ManualEndListing'), async (req, res) => {
+  try {
+    const { pdtDate, sellerId, country, quantity, note } = req.body || {};
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(pdtDate || ''))) {
+      return res.status(400).json({ error: 'Valid PDT date is required.' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(sellerId)) {
+      return res.status(400).json({ error: 'Valid seller is required.' });
+    }
+    const normalizedCountry = String(country || '').trim();
+    if (!normalizedCountry) {
+      return res.status(400).json({ error: 'Country is required.' });
+    }
+    const normalizedQuantity = Number.parseInt(quantity, 10);
+    if (!Number.isInteger(normalizedQuantity) || normalizedQuantity < 1) {
+      return res.status(400).json({ error: 'Quantity must be a positive whole number.' });
+    }
+
+    const seller = await Seller.findById(sellerId).select('_id').lean();
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found.' });
+    }
+
+    const adjustment = await ManualEndListingAdjustment.create({
+      pdtDate,
+      seller: sellerId,
+      country: normalizedCountry,
+      quantity: normalizedQuantity,
+      note: String(note || '').trim().slice(0, 500),
+      createdBy: req.user?.userId || null,
+    });
+
+    res.status(201).json({
+      id: adjustment._id,
+      pdtDate: adjustment.pdtDate,
+      sellerId: adjustment.seller,
+      country: adjustment.country,
+      quantity: adjustment.quantity,
+      note: adjustment.note,
+      createdAt: adjustment.createdAt,
+    });
+  } catch (err) {
+    console.error('[Manual End Listing] Create error:', err.message);
+    res.status(500).json({ error: 'Failed to save manual end listing entry' });
+  }
+});
+
 router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('DailyListingComparison'), async (req, res) => {
   try {
     const defaultDate = new Intl.DateTimeFormat('en-CA', {
@@ -15324,7 +15404,7 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
     const { start } = getPTDayBoundsUTC(startDate);
     const { end } = getPTDayBoundsUTC(endDate);
 
-    const [feedRows, endRows] = await Promise.all([
+    const [feedRows, endRows, manualEndRows] = await Promise.all([
       FeedUpload.aggregate([
         {
           $match: {
@@ -15409,6 +15489,52 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
           }
         }
       ])
+      ,
+      ManualEndListingAdjustment.aggregate([
+        {
+          $match: {
+            pdtDate: { $gte: startDate, $lte: endDate }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              seller: '$seller',
+              country: '$country'
+            },
+            endedListings: { $sum: '$quantity' },
+            manualEndedListings: { $sum: '$quantity' }
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: '_id.seller',
+            foreignField: '_id',
+            as: 'sellerDoc'
+          }
+        },
+        { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'sellerDoc.user',
+            foreignField: '_id',
+            as: 'userDoc'
+          }
+        },
+        { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            sellerId: '$_id.seller',
+            sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
+            country: '$_id.country',
+            endedListings: 1,
+            manualEndedListings: 1
+          }
+        }
+      ])
     ]);
 
     const bySeller = new Map();
@@ -15419,6 +15545,7 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
         sellerName: row.sellerName,
         successfulListings: 0,
         endedListings: 0,
+        manualEndedListings: 0,
         marketplaces: []
       };
       const country = row.country || 'US';
@@ -15428,28 +15555,32 @@ router.get('/feed/daily-listing-comparison', requireAuth, requirePageAccess('Dai
       if (existingMarketplace) {
         existingMarketplace.successfulListings += successfulListings;
       } else {
-        existing.marketplaces.push({ country, successfulListings, endedListings: 0 });
+        existing.marketplaces.push({ country, successfulListings, endedListings: 0, manualEndedListings: 0 });
       }
       bySeller.set(key, existing);
     }
 
-    for (const row of endRows) {
+    for (const row of [...endRows, ...manualEndRows]) {
       const key = String(row.sellerId || row.sellerName);
       const existing = bySeller.get(key) || {
         sellerId: row.sellerId,
         sellerName: row.sellerName,
         successfulListings: 0,
         endedListings: 0,
+        manualEndedListings: 0,
         marketplaces: []
       };
       const country = row.country || 'Unknown';
       const endedListings = row.endedListings || 0;
+      const manualEndedListings = row.manualEndedListings || 0;
       existing.endedListings += endedListings;
+      existing.manualEndedListings = (existing.manualEndedListings || 0) + manualEndedListings;
       const existingMarketplace = existing.marketplaces.find(m => m.country === country);
       if (existingMarketplace) {
         existingMarketplace.endedListings = (existingMarketplace.endedListings || 0) + endedListings;
+        existingMarketplace.manualEndedListings = (existingMarketplace.manualEndedListings || 0) + manualEndedListings;
       } else {
-        existing.marketplaces.push({ country, successfulListings: 0, endedListings });
+        existing.marketplaces.push({ country, successfulListings: 0, endedListings, manualEndedListings });
       }
       bySeller.set(key, existing);
     }
