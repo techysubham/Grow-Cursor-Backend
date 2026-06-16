@@ -1,12 +1,20 @@
 import cron from 'node-cron';
 import Attendance from './models/Attendance.js';
 import { runScheduledUploads } from './lib/ebayFeedUpload.js';
-import { scheduledSyncAllSellers, scheduledRunAutoCompatForDate } from './routes/ebay.js';
+import {
+    scheduledSyncAllSellers,
+    scheduledRunAutoCompatForDate,
+    scheduledSkuIndexSyncAllSellers,
+    initializeSkuIndexSyncState
+} from './routes/ebay.js';
 
 const RUNNER_ID = (process.env.RUNNER_ID || 'local').trim().toLowerCase();
 const IS_RENDER_RUNNER = RUNNER_ID === 'render';
+const IS_SKU_INDEX_RUNNER = RUNNER_ID === 'render';
 
 export function initializeScheduledJobs() {
+    initializeSkuIndexSyncState();
+
     // Auto-stop all active timers daily at 2:00 AM
     cron.schedule('0 2 * * *', async () => {
         try {
@@ -53,6 +61,23 @@ export function initializeScheduledJobs() {
     });
 
     console.log('[CRON] Scheduled job initialized: Auto-upload CSV (every minute)');
+
+    if (IS_SKU_INDEX_RUNNER) {
+        // SKU Index Sync at 12:30 PM IST daily.
+        // Runs only on the Render runner and processes at most 3 sellers concurrently.
+        cron.schedule('30 12 * * *', async () => {
+            try {
+                console.log('[CRON] Scheduled SKU Index Sync starting at 12:30 PM IST...');
+                await scheduledSkuIndexSyncAllSellers();
+            } catch (err) {
+                console.error('[CRON] Scheduled SKU Index Sync error:', err.message);
+            }
+        }, { timezone: 'Asia/Kolkata' });
+
+        console.log(`[CRON] Scheduled job initialized: SKU Index Sync at 12:30 PM IST (runner: ${RUNNER_ID})`);
+    } else {
+        console.log(`[CRON] Skipping SKU Index Sync cron initialization for runner: ${RUNNER_ID}. Set RUNNER_ID=render to enable automatic runs.`);
+    }
 
     if (IS_RENDER_RUNNER) {
         // Poll All Sellers at 1:00 AM IST daily.
