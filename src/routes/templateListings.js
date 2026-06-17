@@ -268,6 +268,10 @@ function getBaseSku(sku = '') {
   return cleanSku.replace(/-\d+$/, '');
 }
 
+function getSkuLookupValues(sku = '') {
+  return [...new Set([String(sku || '').trim(), getBaseSku(sku)].filter(Boolean))];
+}
+
 function toObjectId(value) {
   return mongoose.Types.ObjectId.isValid(value) ? new mongoose.Types.ObjectId(value) : null;
 }
@@ -700,17 +704,65 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
           deletedAt: null,
           customLabel: { $in: skus },
         })
-          .select('_id customLabel sellerId templateId title startPrice status createdAt')
+          .select('_id customLabel sellerId templateId title startPrice createdAt amazonLink +_asinReference')
           .sort({ customLabel: 1, sellerId: 1, _id: 1 })
           .lean()
       : [];
 
     const listingsBySku = new Map();
+    const skuIndexPairs = [];
     listings.forEach((listing) => {
       const sku = String(listing.customLabel || '').trim();
       if (!sku) return;
       if (!listingsBySku.has(sku)) listingsBySku.set(sku, []);
       listingsBySku.get(sku).push(listing);
+      if (listing.sellerId) {
+        skuIndexPairs.push({
+          seller: listing.sellerId,
+          skuValues: getSkuLookupValues(sku),
+        });
+      }
+    });
+
+    const skuIndexOr = skuIndexPairs
+      .filter(pair => pair.seller && pair.skuValues?.length)
+      .map(pair => ({
+        seller: pair.seller,
+        $or: [
+          { sku: { $in: pair.skuValues } },
+          { baseSku: { $in: pair.skuValues } },
+        ],
+      }));
+    const skuIndexRecords = skuIndexOr.length > 0
+      ? await SellerSkuIndex.find({ $or: skuIndexOr })
+          .select('seller baseSku sku itemId syncedAt title')
+          .lean()
+      : [];
+    const skuIndexBySellerAndSku = new Map();
+    const skuIndexByBaseSku = new Map();
+    skuIndexRecords.forEach((record) => {
+      getSkuLookupValues(record.sku || record.baseSku).forEach((value) => {
+        const key = `${String(record.seller)}::${value}`;
+        if (!skuIndexBySellerAndSku.has(key)) skuIndexBySellerAndSku.set(key, []);
+        skuIndexBySellerAndSku.get(key).push(record);
+      });
+    });
+    const skuLookupValues = [...new Set(skus.flatMap(sku => getSkuLookupValues(sku)))];
+    const allSkuIndexRecords = skuLookupValues.length > 0
+      ? await SellerSkuIndex.find({
+          $or: [
+            { sku: { $in: skuLookupValues } },
+            { baseSku: { $in: skuLookupValues } },
+          ],
+        })
+          .select('seller baseSku sku itemId syncedAt title')
+          .lean()
+      : [];
+    allSkuIndexRecords.forEach((record) => {
+      getSkuLookupValues(record.sku || record.baseSku).forEach((value) => {
+        if (!skuIndexByBaseSku.has(value)) skuIndexByBaseSku.set(value, []);
+        skuIndexByBaseSku.get(value).push(record);
+      });
     });
 
     const sellerIdsFromListings = [
@@ -719,7 +771,10 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
     const sellerIdsFromOrders = [
       ...new Set(pageOrderRows.flatMap(row => (row.orders || []).map(order => String(order.seller)).filter(Boolean))),
     ];
-    const allSellerIds = [...new Set([...sellerIdsFromListings, ...sellerIdsFromOrders])];
+    const sellerIdsFromSkuIndex = [
+      ...new Set(allSkuIndexRecords.map(record => String(record.seller)).filter(Boolean)),
+    ];
+    const allSellerIds = [...new Set([...sellerIdsFromListings, ...sellerIdsFromOrders, ...sellerIdsFromSkuIndex])];
     const sellerDocs = allSellerIds.length > 0
       ? await Seller.find({ _id: { $in: allSellerIds } }).populate('user', 'username email').lean()
       : [];
@@ -739,6 +794,12 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
     const formattedRows = pageOrderRows.map((orderRow) => {
       const rowListings = listingsBySku.get(orderRow._id) || [];
       const sellerIds = new Set(rowListings.map(listing => String(listing.sellerId)).filter(Boolean));
+      const skuIndexRowsById = new Map();
+      getSkuLookupValues(orderRow._id).forEach((value) => {
+        (skuIndexByBaseSku.get(value) || []).forEach(record => skuIndexRowsById.set(String(record._id), record));
+      });
+      const skuIndexRows = [...skuIndexRowsById.values()];
+      const skuIndexSellerIds = new Set(skuIndexRows.map(record => String(record.seller)).filter(Boolean));
       let minTemplatePrice = null;
       let maxTemplatePrice = null;
       let priceTotal = 0;
@@ -758,6 +819,8 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
         sku: orderRow._id,
         listingCount: rowListings.length,
         sellerCount: sellerIds.size,
+        skuIndexCount: skuIndexRows.length,
+        skuIndexSellerCount: skuIndexSellerIds.size,
         minTemplatePrice: normalizeMoney(minTemplatePrice),
         maxTemplatePrice: normalizeMoney(maxTemplatePrice),
         avgTemplatePrice: normalizeMoney(priceCount > 0 ? priceTotal / priceCount : null),
@@ -772,8 +835,23 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
           templateName: templateNameById.get(String(listing.templateId)) || 'Template',
           title: listing.title || '',
           startPrice: normalizeMoney(listing.startPrice),
-          status: listing.status || '',
           createdAt: listing.createdAt,
+          asin: listing._asinReference || '',
+          amazonLink: listing.amazonLink || (listing._asinReference ? `https://www.amazon.com/dp/${listing._asinReference}` : ''),
+          skuSyncIndex: (() => {
+            const recordsById = new Map();
+            getSkuLookupValues(listing.customLabel).forEach((value) => {
+              (skuIndexBySellerAndSku.get(`${String(listing.sellerId)}::${value}`) || [])
+                .forEach(record => recordsById.set(String(record._id), record));
+            });
+            const records = [...recordsById.values()];
+            return {
+              present: records.length > 0,
+              count: records.length,
+              itemIds: records.map(record => record.itemId).filter(Boolean),
+              syncedAt: records[0]?.syncedAt || null,
+            };
+          })(),
         })).sort((a, b) => a.sellerName.localeCompare(b.sellerName)),
         orders: (orderRow.orders || []).map(order => ({
           orderId: order.orderId,
@@ -787,6 +865,18 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
           profit: normalizeMoney(order.profit),
           quantity: order.quantity || 0,
         })),
+        syncRecords: skuIndexRows
+          .map(record => ({
+            id: record._id,
+            sellerId: record.seller,
+            sellerName: sellerNameById.get(String(record.seller)) || String(record.seller || ''),
+            itemId: record.itemId || '',
+            sku: record.sku || '',
+            baseSku: record.baseSku || '',
+            syncedAt: record.syncedAt || null,
+            title: record.title || '',
+          }))
+          .sort((a, b) => a.sellerName.localeCompare(b.sellerName) || String(a.itemId).localeCompare(String(b.itemId))),
       };
     });
 
