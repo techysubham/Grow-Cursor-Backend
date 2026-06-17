@@ -7,6 +7,8 @@ import Seller from '../models/Seller.js';
 import AsinListCategory from '../models/AsinListCategory.js';
 import AsinListRange from '../models/AsinListRange.js';
 import FeedUpload from '../models/FeedUpload.js';
+import TemplateListing from '../models/TemplateListing.js';
+import AiListingRun from '../models/AiListingRun.js';
 
 const router = express.Router();
 const PT_TIMEZONE = 'America/Los_Angeles';
@@ -66,6 +68,23 @@ function buildUploadMatch(target, start, end) {
   return match;
 }
 
+function buildIstHourlyRows(hourMap = new Map()) {
+  return Array.from({ length: 24 }, (_, hour) => {
+    const row = hourMap.get(hour) || { uploadCount: 0, successfulListings: 0, failedListings: 0 };
+    return {
+      hour,
+      label: new Intl.DateTimeFormat('en-US', {
+        timeZone: IST_TIMEZONE,
+        hour: 'numeric',
+        hour12: true,
+      }).format(new Date(Date.UTC(2026, 0, 1, hour - 5, 30))),
+      uploadCount: row.uploadCount || 0,
+      successfulListings: row.successfulListings || 0,
+      failedListings: row.failedListings || 0,
+    };
+  });
+}
+
 router.get('/performance', requireAuth, performancePageAccess, async (req, res) => {
   const {
     startDate = getPTDate(),
@@ -107,6 +126,49 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
     const { start } = getPTDayBoundsUTC(startDate);
     const { end } = getPTDayBoundsUTC(endDate);
     const days = countInclusiveDays(startDate, endDate);
+    const targetUserIds = [...new Set(targets.map((target) => String(target.user?._id || target.user)).filter(Boolean))];
+    const targetSellerIds = [...new Set(targets.map((target) => String(target.seller?._id || target.seller)).filter(Boolean))];
+    const aiRunMatch = {
+      lastSavedFromReviewAt: { $gte: start, $lte: end },
+    };
+    if (targetUserIds.length > 0) {
+      aiRunMatch.userId = { $in: targetUserIds.map((id) => new mongoose.Types.ObjectId(id)) };
+    }
+    if (targetSellerIds.length > 0) {
+      aiRunMatch.sellerId = { $in: targetSellerIds.map((id) => new mongoose.Types.ObjectId(id)) };
+    }
+
+    const aiSavedRows = targetUserIds.length > 0
+      ? await AiListingRun.aggregate([
+        { $match: aiRunMatch },
+        {
+          $lookup: {
+            from: TemplateListing.collection.name,
+            localField: 'aiRunId',
+            foreignField: 'aiRunId',
+            as: 'savedListings',
+          },
+        },
+        {
+          $project: {
+            userId: 1,
+            savedCount: {
+              $max: [
+                { $size: '$savedListings' },
+                { $ifNull: ['$savedFromReviewCount', 0] },
+              ],
+            },
+          },
+        },
+        {
+          $group: {
+            _id: '$userId',
+            aiSavedCount: { $sum: '$savedCount' },
+          },
+        },
+      ])
+      : [];
+    const aiSavedByUserId = new Map(aiSavedRows.map((row) => [String(row._id), row.aiSavedCount || 0]));
 
     const cards = await Promise.all(targets.map(async (target) => {
       const uploadMatch = buildUploadMatch(target, start, end);
@@ -119,10 +181,12 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
           $group: {
             _id: null,
             totalSuccess: { $sum: { $ifNull: ['$uploadSummary.successCount', 0] } },
+            totalFailed: { $sum: { $ifNull: ['$uploadSummary.failureCount', 0] } },
           },
         },
       ]);
       const successfulListings = uploadCounts[0]?.totalSuccess || 0;
+      const failedListings = uploadCounts[0]?.totalFailed || 0;
       const uploadTimeDistribution = await FeedUpload.aggregate([
         {
           $match: uploadMatch,
@@ -138,6 +202,7 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
             },
             uploadCount: { $sum: 1 },
             successfulListings: { $sum: { $ifNull: ['$uploadSummary.successCount', 0] } },
+            failedListings: { $sum: { $ifNull: ['$uploadSummary.failureCount', 0] } },
           },
         },
       ]);
@@ -147,22 +212,11 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
           {
             uploadCount: item.uploadCount || 0,
             successfulListings: item.successfulListings || 0,
+            failedListings: item.failedListings || 0,
           },
         ])
       );
-      const submissionTimeDistribution = Array.from({ length: 24 }, (_, hour) => {
-        const row = uploadTimeByHour.get(hour) || { uploadCount: 0, successfulListings: 0 };
-        return {
-          hour,
-          label: new Intl.DateTimeFormat('en-US', {
-            timeZone: IST_TIMEZONE,
-            hour: 'numeric',
-            hour12: true,
-          }).format(new Date(Date.UTC(2026, 0, 1, hour - 5, 30))),
-          uploadCount: row.uploadCount,
-          successfulListings: row.successfulListings,
-        };
-      });
+      const submissionTimeDistribution = buildIstHourlyRows(uploadTimeByHour);
 
       const targetQuantity = (target.dailyDesiredQuantity || 0) * days;
       const completionPercent = targetQuantity > 0
@@ -180,6 +234,8 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
         dailyDesiredQuantity: target.dailyDesiredQuantity || 0,
         targetQuantity,
         successfulListings,
+        failedListings,
+        aiSavedCount: aiSavedByUserId.get(String(target.user?._id || target.user)) || 0,
         missedListings: Math.max(targetQuantity - successfulListings, 0),
         completionPercent,
         status,
@@ -217,6 +273,7 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
             },
             uploadCount: { $sum: 1 },
             successfulListings: { $sum: { $ifNull: ['$uploadSummary.successCount', 0] } },
+            failedListings: { $sum: { $ifNull: ['$uploadSummary.failureCount', 0] } },
           },
         },
         { $sort: { _id: 1 } },
@@ -230,28 +287,18 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
           hour: Number(item._id),
           uploadCount: item.uploadCount || 0,
           successfulListings: item.successfulListings || 0,
+          failedListings: item.failedListings || 0,
         },
       ])
     );
 
-    const submissionTimeRows = Array.from({ length: 24 }, (_, hour) => {
-      const row = submissionTimeByHour.get(hour) || { uploadCount: 0, successfulListings: 0 };
-      return {
-        hour,
-        label: new Intl.DateTimeFormat('en-US', {
-          timeZone: IST_TIMEZONE,
-          hour: 'numeric',
-          hour12: true,
-        }).format(new Date(Date.UTC(2026, 0, 1, hour - 5, 30))),
-        uploadCount: row.uploadCount,
-        successfulListings: row.successfulListings,
-      };
-    });
+    const submissionTimeRows = buildIstHourlyRows(submissionTimeByHour);
 
     const summary = cards.reduce((acc, card) => {
       acc.totalTargets += 1;
       acc.totalTargetQuantity += card.targetQuantity;
       acc.totalSuccessfulListings += card.successfulListings;
+      acc.totalFailedListings += card.failedListings;
       acc.totalMissedListings += card.missedListings;
       acc[card.status] += 1;
       return acc;
@@ -259,7 +306,9 @@ router.get('/performance', requireAuth, performancePageAccess, async (req, res) 
       totalTargets: 0,
       totalTargetQuantity: 0,
       totalSuccessfulListings: 0,
+      totalFailedListings: 0,
       totalMissedListings: 0,
+      totalAiSavedCount: aiSavedRows.reduce((sum, row) => sum + Number(row.aiSavedCount || 0), 0),
       onTrack: 0,
       behind: 0,
       critical: 0,
