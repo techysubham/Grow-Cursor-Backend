@@ -719,19 +719,16 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
       if (listing.sellerId) {
         skuIndexPairs.push({
           seller: listing.sellerId,
-          skuValues: getSkuLookupValues(sku),
+          sku,
         });
       }
     });
 
     const skuIndexOr = skuIndexPairs
-      .filter(pair => pair.seller && pair.skuValues?.length)
+      .filter(pair => pair.seller && pair.sku)
       .map(pair => ({
         seller: pair.seller,
-        $or: [
-          { sku: { $in: pair.skuValues } },
-          { baseSku: { $in: pair.skuValues } },
-        ],
+        sku: pair.sku,
       }));
     const skuIndexRecords = skuIndexOr.length > 0
       ? await SellerSkuIndex.find({ $or: skuIndexOr })
@@ -739,30 +736,27 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
           .lean()
       : [];
     const skuIndexBySellerAndSku = new Map();
-    const skuIndexByBaseSku = new Map();
+    const skuIndexBySku = new Map();
     skuIndexRecords.forEach((record) => {
-      getSkuLookupValues(record.sku || record.baseSku).forEach((value) => {
-        const key = `${String(record.seller)}::${value}`;
-        if (!skuIndexBySellerAndSku.has(key)) skuIndexBySellerAndSku.set(key, []);
-        skuIndexBySellerAndSku.get(key).push(record);
-      });
+      const value = String(record.sku || '').trim();
+      if (!value) return;
+      const key = `${String(record.seller)}::${value}`;
+      if (!skuIndexBySellerAndSku.has(key)) skuIndexBySellerAndSku.set(key, []);
+      skuIndexBySellerAndSku.get(key).push(record);
     });
-    const skuLookupValues = [...new Set(skus.flatMap(sku => getSkuLookupValues(sku)))];
+    const skuLookupValues = [...new Set(skus.map(sku => String(sku || '').trim()).filter(Boolean))];
     const allSkuIndexRecords = skuLookupValues.length > 0
       ? await SellerSkuIndex.find({
-          $or: [
-            { sku: { $in: skuLookupValues } },
-            { baseSku: { $in: skuLookupValues } },
-          ],
+          sku: { $in: skuLookupValues },
         })
           .select('seller baseSku sku itemId syncedAt title')
           .lean()
       : [];
     allSkuIndexRecords.forEach((record) => {
-      getSkuLookupValues(record.sku || record.baseSku).forEach((value) => {
-        if (!skuIndexByBaseSku.has(value)) skuIndexByBaseSku.set(value, []);
-        skuIndexByBaseSku.get(value).push(record);
-      });
+      const value = String(record.sku || '').trim();
+      if (!value) return;
+      if (!skuIndexBySku.has(value)) skuIndexBySku.set(value, []);
+      skuIndexBySku.get(value).push(record);
     });
 
     const sellerIdsFromListings = [
@@ -794,11 +788,7 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
     const formattedRows = pageOrderRows.map((orderRow) => {
       const rowListings = listingsBySku.get(orderRow._id) || [];
       const sellerIds = new Set(rowListings.map(listing => String(listing.sellerId)).filter(Boolean));
-      const skuIndexRowsById = new Map();
-      getSkuLookupValues(orderRow._id).forEach((value) => {
-        (skuIndexByBaseSku.get(value) || []).forEach(record => skuIndexRowsById.set(String(record._id), record));
-      });
-      const skuIndexRows = [...skuIndexRowsById.values()];
+      const skuIndexRows = skuIndexBySku.get(String(orderRow._id || '').trim()) || [];
       const skuIndexSellerIds = new Set(skuIndexRows.map(record => String(record.seller)).filter(Boolean));
       let minTemplatePrice = null;
       let maxTemplatePrice = null;
@@ -839,12 +829,7 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
           asin: listing._asinReference || '',
           amazonLink: listing.amazonLink || (listing._asinReference ? `https://www.amazon.com/dp/${listing._asinReference}` : ''),
           skuSyncIndex: (() => {
-            const recordsById = new Map();
-            getSkuLookupValues(listing.customLabel).forEach((value) => {
-              (skuIndexBySellerAndSku.get(`${String(listing.sellerId)}::${value}`) || [])
-                .forEach(record => recordsById.set(String(record._id), record));
-            });
-            const records = [...recordsById.values()];
+            const records = skuIndexBySellerAndSku.get(`${String(listing.sellerId)}::${String(listing.customLabel || '').trim()}`) || [];
             return {
               present: records.length > 0,
               count: records.length,

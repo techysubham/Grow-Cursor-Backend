@@ -17,5 +17,8 @@ const SellerSkuIndexSchema = new mongoose.Schema({
 SellerSkuIndexSchema.index({ seller: 1, itemId: 1 }, { unique: true });
 // Fast lookup by baseSku (the field used by check-sku-active)
 SellerSkuIndexSchema.index({ seller: 1, baseSku: 1 });
+// Fast exact-SKU lookups used by SKU Seller Profit.
+SellerSkuIndexSchema.index({ seller: 1, sku: 1 });
+SellerSkuIndexSchema.index({ sku: 1 });
 
 export default mongoose.model('SellerSkuIndex', SellerSkuIndexSchema);
