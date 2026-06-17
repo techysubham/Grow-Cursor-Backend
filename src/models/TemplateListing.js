@@ -207,6 +207,12 @@ templateListingSchema.index({ templateId: 1, sellerId: 1, downloadBatchId: 1 });
 // Covering index for database-view filtered + sorted queries (deletedAt + optional seller/template + sort)
 templateListingSchema.index({ deletedAt: 1, sellerId: 1, templateId: 1, createdAt: -1 });
 
+// Supports SKU Seller Profit streaming report: active rows in SKU order, with seller grouping.
+templateListingSchema.index({ deletedAt: 1, customLabel: 1, sellerId: 1 });
+templateListingSchema.index({ sellerId: 1, deletedAt: 1, customLabel: 1 });
+templateListingSchema.index({ sellerId: 1, deletedAt: 1, createdAt: -1, customLabel: 1 });
+templateListingSchema.index({ deletedAt: 1, createdAt: -1, customLabel: 1, sellerId: 1 });
+
 // Text index for fast full-text search on title and SKU (customLabel)
 // _asinReference is handled separately via exact/prefix match
 templateListingSchema.index({ title: 'text', customLabel: 'text' }, { weights: { title: 2, customLabel: 10 }, name: 'listing_text_search' });

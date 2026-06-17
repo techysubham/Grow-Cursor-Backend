@@ -43,6 +43,7 @@ export const PAGE_DEFAULT_ROLES = {
   'FeedUploadStats': ['superadmin', 'listingadmin'],
   'DailyListingComparison': ['superadmin', 'listingadmin'],
   'ManualEndListing': ['superadmin', 'listingadmin'],
+  'SkuSellerOrderProfit': ['superadmin', 'listingadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'SellerUploadLimits': ['superadmin', 'listingadmin'],
   'CsvStorage': ['superadmin', 'listingadmin', 'lister'],
   'ProductResearch': ['superadmin', 'productadmin'],
