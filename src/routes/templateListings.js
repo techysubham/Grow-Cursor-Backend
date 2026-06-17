@@ -16,8 +16,24 @@ import AsinDirectory from '../models/AsinDirectory.js';
 import ApiUsage from '../models/ApiUsage.js';
 import AiListingRun from '../models/AiListingRun.js';
 import SellerSkuIndex from '../models/SellerSkuIndex.js';
+import User from '../models/User.js';
 
 const router = express.Router();
+const EXCLUDED_CLIENT_USERNAME = 'Vergo';
+
+async function getExcludedClientSellerIds() {
+  const excludedUsers = await User.find({
+    username: { $regex: new RegExp(`^${EXCLUDED_CLIENT_USERNAME}$`, 'i') },
+  })
+    .select('_id')
+    .lean();
+
+  if (excludedUsers.length === 0) return [];
+
+  return Seller.find({
+    user: { $in: excludedUsers.map(user => user._id) },
+  }).distinct('_id');
+}
 
 function firstHeaderValue(value) {
   if (Array.isArray(value)) return value[0] || '';
@@ -261,6 +277,43 @@ function normalizeMoney(value) {
   return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
 }
 
+function getPTDayBoundsUTC(dateStr) {
+  function getPTHour(d) {
+    return parseInt(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Los_Angeles',
+        hour: 'numeric',
+        hour12: false,
+        hourCycle: 'h23',
+      }).format(d),
+      10,
+    );
+  }
+
+  function getPTDateStr(d) {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(d);
+  }
+
+  function findMidnightUTC(ds) {
+    const pst = new Date(`${ds}T08:00:00.000Z`);
+    if (getPTDateStr(pst) === ds && getPTHour(pst) === 0) return pst;
+    const pdt = new Date(`${ds}T07:00:00.000Z`);
+    if (getPTDateStr(pdt) === ds && getPTHour(pdt) === 0) return pdt;
+    return pst;
+  }
+
+  const start = findMidnightUTC(dateStr);
+  const tmp = new Date(`${dateStr}T12:00:00.000Z`);
+  tmp.setUTCDate(tmp.getUTCDate() + 1);
+  const nextStart = findMidnightUTC(tmp.toISOString().split('T')[0]);
+  return { start, end: new Date(nextStart.getTime() - 1) };
+}
+
 router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
   let heartbeat = null;
 
@@ -445,21 +498,24 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
       search = '',
       sellerId = '',
       page = 1,
-      limit = 25,
-      ordersPerSku = 5,
+      limit = 50,
       orderFrom = '',
       orderTo = '',
       createdFrom = '',
       createdTo = '',
+      marketplace = '',
+      searchMarketplace = '',
+      excludeClient = '',
+      excludeLowValue = '',
     } = req.query;
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 25));
-    const ordersLimit = Math.min(25, Math.max(1, parseInt(ordersPerSku, 10) || 5));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
     const sellerObjectId = sellerId && sellerId !== 'all' ? toObjectId(sellerId) : null;
     const trimmedSearch = String(search || '').trim();
     const fromValue = orderFrom || createdFrom;
     const toValue = orderTo || createdTo;
+    const marketplaceValue = marketplace || searchMarketplace;
 
     if (sellerId && sellerId !== 'all' && !sellerObjectId) {
       return res.status(400).json({ error: 'Invalid sellerId' });
@@ -468,8 +524,8 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
       return res.status(400).json({ error: 'Order From and Order To are required.' });
     }
 
-    const fromDate = new Date(`${fromValue}T00:00:00.000Z`);
-    const toDate = new Date(`${toValue}T23:59:59.999Z`);
+    const { start: fromDate } = getPTDayBoundsUTC(fromValue);
+    const { end: toDate } = getPTDayBoundsUTC(toValue);
     if (Number.isNaN(fromDate.getTime())) return res.status(400).json({ error: 'Invalid orderFrom date' });
     if (Number.isNaN(toDate.getTime())) return res.status(400).json({ error: 'Invalid orderTo date' });
     if (fromDate > toDate) return res.status(400).json({ error: 'Order From must be before Order To' });
@@ -478,6 +534,27 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
       dateSold: { $gte: fromDate, $lte: toDate },
     };
     if (sellerObjectId) orderMatch.seller = sellerObjectId;
+    if (marketplaceValue) {
+      orderMatch.purchaseMarketplaceId = marketplaceValue === 'EBAY_ENCA' ? 'EBAY_CA' : marketplaceValue;
+    }
+    const orderAndConditions = [];
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        orderAndConditions.push({ seller: { $nin: excludedSellerIds } });
+      }
+    }
+    if (excludeLowValue === 'true') {
+      orderAndConditions.push({
+        $or: [
+          { subtotalUSD: { $gte: 3 } },
+          { subtotal: { $gte: 3 } },
+        ],
+      });
+    }
+    if (orderAndConditions.length > 0) {
+      orderMatch.$and = orderAndConditions;
+    }
 
     const skuSetExpression = {
       $setUnion: [
@@ -513,6 +590,7 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
           seller: 1,
           dateSold: 1,
           creationDate: 1,
+          purchaseMarketplaceId: 1,
           productName: 1,
           subtotal: 1,
           subtotalUSD: 1,
@@ -522,8 +600,9 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
         },
       },
       { $unwind: '$skuCandidates' },
-      { $set: { sku: { $trim: { input: '$skuCandidates' } } } },
-      { $match: { sku: { $nin: ['', 'null', 'undefined'] } } },
+      { $set: { sku: { $trim: { input: { $toString: { $ifNull: ['$skuCandidates', ''] } } } } } },
+      { $match: { sku: { $regex: /\S/ } } },
+      { $match: { sku: { $nin: ['null', 'undefined'] } } },
     ];
 
     if (trimmedSearch) {
@@ -539,7 +618,7 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
       });
     }
 
-    orderPipeline.push(
+    const groupedOrderStages = [
       { $sort: { dateSold: -1, creationDate: -1, _id: -1 } },
       {
         $group: {
@@ -551,9 +630,11 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
           orders: {
             $push: {
               orderId: '$orderId',
+              sku: '$sku',
               seller: '$seller',
               dateSold: '$dateSold',
               creationDate: '$creationDate',
+              purchaseMarketplaceId: '$purchaseMarketplaceId',
               productName: '$productName',
               subtotal: '$subtotal',
               subtotalUSD: '$subtotalUSD',
@@ -563,25 +644,55 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
           },
         },
       },
-      { $sort: { lastOrderDate: -1, _id: 1 } },
-      { $limit: pageNum * limitNum + 1 },
+    ];
+
+    const [aggregationResult = {}] = await Order.aggregate([
+      { $match: orderMatch },
       {
-        $project: {
-          orderCount: 1,
-          totalSubtotal: 1,
-          totalProfit: 1,
-          lastOrderDate: 1,
-          orders: { $slice: ['$orders', ordersLimit] },
+        $facet: {
+          rawSummary: [
+            { $count: 'totalFilteredOrders' },
+          ],
+          rows: [
+            ...orderPipeline.slice(1),
+            ...groupedOrderStages,
+            { $sort: { lastOrderDate: -1, _id: 1 } },
+            { $skip: (pageNum - 1) * limitNum },
+            { $limit: limitNum },
+            {
+              $project: {
+                orderCount: 1,
+                totalSubtotal: 1,
+                totalProfit: 1,
+                lastOrderDate: 1,
+                orders: 1,
+              },
+            },
+          ],
+          summary: [
+            ...orderPipeline.slice(1),
+            ...groupedOrderStages,
+            {
+              $group: {
+                _id: null,
+                totalSkus: { $sum: 1 },
+                totalOrders: { $sum: '$orderCount' },
+              },
+            },
+          ],
         },
       },
-    );
-
-    const groupedOrders = await Order.aggregate(orderPipeline)
+    ])
       .option({ allowDiskUse: true, maxTimeMS: 60000 });
 
-    const start = (pageNum - 1) * limitNum;
-    const pageOrderRows = groupedOrders.slice(start, start + limitNum);
-    const hasNextPage = groupedOrders.length > start + limitNum;
+    const pageOrderRows = aggregationResult.rows || [];
+    const summary = aggregationResult.summary?.[0] || {};
+    const rawSummary = aggregationResult.rawSummary?.[0] || {};
+    const total = summary.totalSkus || 0;
+    const totalOrders = summary.totalOrders || 0;
+    const totalFilteredOrders = rawSummary.totalFilteredOrders || 0;
+    const pages = total > 0 ? Math.ceil(total / limitNum) : 0;
+    const hasNextPage = pageNum < pages;
     const skus = pageOrderRows.map(row => row._id).filter(Boolean);
 
     const listings = skus.length > 0
@@ -666,7 +777,9 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
         })).sort((a, b) => a.sellerName.localeCompare(b.sellerName)),
         orders: (orderRow.orders || []).map(order => ({
           orderId: order.orderId,
+          sku: order.sku || orderRow._id,
           sellerName: sellerNameById.get(String(order.seller)) || String(order.seller || ''),
+          marketplace: order.purchaseMarketplaceId || '',
           dateSold: order.dateSold || order.creationDate || null,
           productName: order.productName || '',
           subtotal: normalizeMoney(order.subtotal),
@@ -682,8 +795,11 @@ router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSeller
       pagination: {
         page: pageNum,
         limit: limitNum,
-        total: null,
-        pages: null,
+        total,
+        pages,
+        totalOrders,
+        totalFilteredOrders,
+        ordersWithoutUsableSku: Math.max(0, totalFilteredOrders - totalOrders),
         hasNextPage,
         scannedListings: null,
         source: 'orders',
