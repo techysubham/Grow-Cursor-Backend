@@ -997,7 +997,11 @@ router.get('/sync-sku-index/status/:sellerId', requireAuth, async (req, res) => 
       .select('status runnerId source sellers startedAt completedAt stoppedAt interruptedAt requestedStop')
       .lean();
     const latestRunSeller = latestRun?.sellers?.find(s => String(s.seller) === String(sellerId));
-    if (latestRunSeller && ['queued', 'running', 'dismissed', 'interrupted'].includes(latestRunSeller.status)) {
+    const shouldUseLatestRunStatus = latestRunSeller
+      && ['queued', 'running', 'dismissed', 'interrupted', 'failed'].includes(latestRunSeller.status)
+      && !(latestRunSeller.status === 'failed' && mem.status === 'completed');
+
+    if (shouldUseLatestRunStatus) {
       mem = {
         ...mem,
         status: latestRunSeller.status,
