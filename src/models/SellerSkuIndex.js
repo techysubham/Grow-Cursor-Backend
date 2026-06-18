@@ -10,6 +10,8 @@ const SellerSkuIndexSchema = new mongoose.Schema({
     sku:    { type: String, default: '' },
     baseSku:{ type: String, default: '' }, // sku with trailing -<number> stripped
     title:  { type: String, default: '' },
+    price: { type: Number, default: null },
+    currency: { type: String, default: '' },
     syncedAt: { type: Date, required: true },
 });
 
