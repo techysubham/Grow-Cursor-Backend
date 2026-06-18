@@ -770,24 +770,34 @@ async function markInterruptedSkuIndexRuns() {
 
 // Background sync — paginates GetSellerList to rebuild the SellerSkuIndex collection.
 // send(obj) is an optional SSE callback for live progress; omit for fire-and-forget.
+function getSkuSyncWindow(syncStart = new Date()) {
+  return {
+    syncStart,
+    endTimeFrom: syncStart,
+    endTimeTo: new Date(syncStart.getTime() + 120 * 24 * 60 * 60 * 1000),
+  };
+}
+
 async function runSkuIndexSync(seller, send = null, options = {}) {
-  const syncStart = new Date();
+  const syncStart = options.syncStart ? new Date(options.syncStart) : new Date();
   const sellerId = seller._id.toString();
   throwIfSkuSyncDismissed(sellerId);
 
   // Mirror the live-tiers approach: EndTimeFrom=now covers all currently active listings
   // (their end time is in the future). Use 120 days to catch long fixed-duration listings.
   // SITEID=0 is used unconditionally (same as live-tiers) so USD price fields always resolve.
-  const endTimeFrom = syncStart.toISOString();
-  const endTimeTo = new Date(syncStart.getTime() + 120 * 24 * 60 * 60 * 1000).toISOString();
+  const endTimeFrom = (options.endTimeFrom ? new Date(options.endTimeFrom) : syncStart).toISOString();
+  const endTimeTo = (options.endTimeTo ? new Date(options.endTimeTo) : new Date(syncStart.getTime() + 120 * 24 * 60 * 60 * 1000)).toISOString();
 
-  let page = 1;
-  let totalPages = 1;
-  let totalCount = 0;
+  let page = Math.max(1, Number(options.startPage || 1));
+  let totalPages = Math.max(1, Number(options.totalPages || 1));
+  let totalCount = Math.max(0, Number(options.initialCount || 0));
+  const seenItemIds = new Set(options.seenItemIds || []);
+  let duplicateItemCount = 0;
   // Cache once — set by the SSE endpoint before invoking this function
   const startedAt = skuSyncStatus.get(sellerId)?.startedAt ?? syncStart;
 
-  do {
+  while (page <= totalPages) {
     throwIfSkuSyncDismissed(sellerId);
     // Re-check token on every page — covers multi-minute crawls where token may expire mid-loop
     const token = await ensureValidToken(seller);
@@ -809,6 +819,7 @@ async function runSkuIndexSync(seller, send = null, options = {}) {
   <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
   <OutputSelector>ItemArray.Item.SKU</OutputSelector>
   <OutputSelector>ItemArray.Item.Title</OutputSelector>
+  <OutputSelector>ItemArray.Item.SellingStatus.CurrentPrice</OutputSelector>
   <OutputSelector>PaginationResult</OutputSelector>
 </GetSellerListRequest>`;
 
@@ -847,12 +858,22 @@ async function runSkuIndexSync(seller, send = null, options = {}) {
     let skuBlankCount = 0;
     let skuPresentCount = 0;
     for (const item of items) {
+      const itemId = item.ItemID?.[0];
+      if (!itemId) continue;
+      if (seenItemIds.has(itemId)) {
+        duplicateItemCount++;
+      } else {
+        seenItemIds.add(itemId);
+      }
       const sku = item.SKU?.[0] || '';
+      const currentPrice = item.SellingStatus?.[0]?.CurrentPrice?.[0];
+      const price = currentPrice?._ != null ? Number.parseFloat(currentPrice._) : null;
+      const currency = currentPrice?.$?.currencyID || '';
       if (sku) skuPresentCount++; else skuBlankCount++;
       ops.push({
         updateOne: {
-          filter: { seller: seller._id, itemId: item.ItemID[0] },
-          update: { $set: { sku, baseSku: extractBaseSku(sku), title: item.Title?.[0] || '', syncedAt: syncStart } },
+          filter: { seller: seller._id, itemId },
+          update: { $set: { sku, baseSku: extractBaseSku(sku), title: item.Title?.[0] || '', price, currency, syncedAt: syncStart } },
           upsert: true,
         },
       });
@@ -877,14 +898,25 @@ async function runSkuIndexSync(seller, send = null, options = {}) {
     if (send) send({ type: 'progress', ...progress });
 
     page++;
-  } while (page <= totalPages);
+  }
 
   throwIfSkuSyncDismissed(sellerId);
   // Remove stale records — only runs if ALL pages completed without error (any throw above skips this)
-  await SellerSkuIndex.deleteMany({ seller: seller._id, syncedAt: { $lt: syncStart } });
+  const cleanup = await SellerSkuIndex.deleteMany({ seller: seller._id, syncedAt: { $lt: syncStart } });
+  const finalDbCount = await SellerSkuIndex.countDocuments({ seller: seller._id });
 
-  console.log(`[sync-sku-index] seller=${sellerId} DONE — ${totalCount} listings indexed`);
-  return { totalCount, syncedAt: syncStart };
+  console.log(
+    `[sync-sku-index] seller=${sellerId} DONE - processed=${totalCount} uniqueItemIds=${seenItemIds.size} ` +
+    `duplicates=${duplicateItemCount} cleanupDeleted=${cleanup.deletedCount || 0} finalDbCount=${finalDbCount}`
+  );
+  return {
+    totalCount: finalDbCount,
+    processedCount: totalCount,
+    uniqueItemCount: seenItemIds.size,
+    duplicateItemCount,
+    cleanupDeleted: cleanup.deletedCount || 0,
+    syncedAt: syncStart,
+  };
 }
 
 // GET /ebay/sync-sku-index/stream?sellerId=...  — SSE: streams progress then done
@@ -17315,13 +17347,212 @@ router.get('/auto-compatibility-batches-for-date', requireAuth, async (req, res)
 // Set RUNNER_ID=render in Render's env vars.
 // ============================================
 
+async function resumeSkuIndexSyncRun(runId) {
+  if (activeSkuSyncRunId) {
+    console.log(`[SKU Index Resume] Another SKU run is already active (${activeSkuSyncRunId}), skipping resume for ${runId}.`);
+    return [];
+  }
+
+  const run = await SkuIndexSyncRun.findById(runId).lean();
+  if (!run || run.requestedStop || !run.syncStartedAt || !run.endTimeFrom || !run.endTimeTo) return [];
+
+  const pendingRunSellers = (run.sellers || []).filter(s => ['queued', 'running'].includes(s.status));
+  if (pendingRunSellers.length === 0) {
+    await SkuIndexSyncRun.updateOne(
+      { _id: run._id },
+      { $set: { status: 'completed', completedAt: new Date() } }
+    );
+    return [];
+  }
+
+  const sellerDocs = await Seller.find({ _id: { $in: pendingRunSellers.map(s => s.seller) } })
+    .populate('user', 'username email');
+  const sellerMap = new Map(sellerDocs.map(seller => [seller._id.toString(), seller]));
+  const workItems = pendingRunSellers
+    .map(runSeller => ({ runSeller, seller: sellerMap.get(String(runSeller.seller)) }))
+    .filter(item => item.seller);
+
+  activeSkuSyncRunId = run._id;
+  skuSyncStopRequested = false;
+  skuSyncDismissed.clear();
+
+  await SkuIndexSyncRun.updateOne(
+    { _id: run._id },
+    { $set: { status: 'running', error: null } }
+  );
+
+  for (const { runSeller, seller } of workItems) {
+    skuSyncStatus.set(String(seller._id), {
+      status: runSeller.status === 'running' ? 'running' : 'queued',
+      startedAt: runSeller.startedAt || new Date(),
+      totalCount: runSeller.totalCount || 0,
+      source: 'cron',
+      runnerId: RUNNER_ID,
+      progress: runSeller.currentPage > 0
+        ? {
+            page: runSeller.currentPage,
+            totalPages: runSeller.totalPages,
+            totalEntries: runSeller.totalEntries,
+            count: runSeller.totalCount || 0,
+          }
+        : null,
+    });
+  }
+
+  console.log(`[SKU Index Resume] Resuming run ${run._id} with ${workItems.length} seller(s).`);
+  let nextIndex = 0;
+  const results = [];
+
+  const worker = async () => {
+    while (nextIndex < workItems.length) {
+      const freshRun = await SkuIndexSyncRun.findById(run._id).select('requestedStop').lean();
+      if (skuSyncStopRequested || freshRun?.requestedStop) {
+        skuSyncStopRequested = true;
+        break;
+      }
+
+      const { runSeller, seller } = workItems[nextIndex++];
+      const sellerId = seller._id.toString();
+      const sellerName = seller.user?.username || seller.user?.email || sellerId;
+      const sellerStartedAt = runSeller.startedAt || new Date();
+
+      try {
+        skuSyncStatus.set(sellerId, {
+          status: 'running',
+          startedAt: sellerStartedAt,
+          totalCount: runSeller.totalCount || 0,
+          source: 'cron',
+          runnerId: RUNNER_ID,
+          progress: null,
+        });
+        await updateSkuIndexRunSeller(run._id, seller._id, { status: 'running', startedAt: sellerStartedAt, error: null });
+
+        const startPage = (runSeller.currentPage || 0) + 1;
+        console.log(`[SKU Index Resume] Resuming seller ${sellerName} at page ${startPage}`);
+        const { totalCount, syncedAt } = await runSkuIndexSync(seller, null, {
+          syncStart: run.syncStartedAt,
+          endTimeFrom: run.endTimeFrom,
+          endTimeTo: run.endTimeTo,
+          startPage,
+          totalPages: runSeller.totalPages || 1,
+          initialCount: runSeller.totalCount || 0,
+          onProgress: async (progress) => {
+            await updateSkuIndexRunSeller(run._id, seller._id, {
+              currentPage: progress.page,
+              totalPages: progress.totalPages,
+              totalEntries: progress.totalEntries,
+              totalCount: progress.count,
+            });
+          },
+        });
+
+        skuSyncStatus.set(sellerId, {
+          status: 'completed',
+          startedAt: sellerStartedAt,
+          totalCount,
+          lastSyncAt: syncedAt,
+          source: 'cron',
+          runnerId: RUNNER_ID,
+          progress: null,
+        });
+        await updateSkuIndexRunSeller(run._id, seller._id, { status: 'completed', totalCount, completedAt: new Date(), error: null });
+        await SkuIndexSyncRun.updateOne({ _id: run._id }, { $inc: { sellersComplete: 1 } });
+        results.push({ sellerId, sellerName, status: 'completed', totalCount });
+      } catch (err) {
+        const status = skuSyncDismissed.has(sellerId) || skuSyncStopRequested ? 'dismissed' : 'failed';
+        skuSyncStatus.set(sellerId, { status, error: status === 'dismissed' ? null : err.message, source: 'cron', runnerId: RUNNER_ID });
+        await updateSkuIndexRunSeller(run._id, seller._id, {
+          status,
+          error: status === 'dismissed' ? null : err.message,
+          dismissedAt: status === 'dismissed' ? new Date() : null,
+          completedAt: new Date(),
+        });
+        await SkuIndexSyncRun.updateOne({ _id: run._id }, { $inc: { sellersComplete: 1 } });
+        results.push({ sellerId, sellerName, status, error: err.message });
+      }
+    }
+  };
+
+  try {
+    const workerCount = Math.min(SKU_SYNC_CONCURRENCY, workItems.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    const finalRun = await SkuIndexSyncRun.findById(run._id).select('requestedStop').lean();
+    const now = new Date();
+    if (skuSyncStopRequested || finalRun?.requestedStop) {
+      await SkuIndexSyncRun.updateOne(
+        { _id: run._id },
+        { $set: { status: 'stopped', requestedStop: true, stoppedAt: now, completedAt: now } }
+      );
+    } else {
+      const latestRun = await SkuIndexSyncRun.findById(run._id).select('sellers').lean();
+      const failedCount = (latestRun?.sellers || []).filter(s => s.status === 'failed').length;
+      await SkuIndexSyncRun.updateOne(
+        { _id: run._id },
+        { $set: { status: failedCount > 0 ? 'failed' : 'completed', completedAt: now } }
+      );
+    }
+
+    return results;
+  } finally {
+    activeSkuSyncRunId = null;
+    skuSyncStopRequested = false;
+  }
+}
+
 export async function initializeSkuIndexSyncState() {
   try {
-    await markInterruptedSkuIndexRuns();
+    const resumableRuns = await SkuIndexSyncRun.find({
+      status: { $in: ['queued', 'running', 'stopping'] },
+      requestedStop: { $ne: true },
+      runnerId: RUNNER_ID,
+      syncStartedAt: { $ne: null },
+      endTimeFrom: { $ne: null },
+      endTimeTo: { $ne: null },
+    }).sort({ startedAt: 1 }).lean();
+
+    const resumableRunIds = new Set(resumableRuns.map(run => String(run._id)));
+    await SkuIndexSyncRun.updateMany(
+      {
+        status: { $in: ['queued', 'running', 'stopping'] },
+        _id: { $nin: [...resumableRunIds] },
+      },
+      {
+        $set: {
+          status: 'interrupted',
+          interruptedAt: new Date(),
+          completedAt: new Date(),
+          error: 'Server restarted before this SKU index sync run finished and this run cannot be resumed safely.',
+        },
+      }
+    );
+    await SkuIndexSyncRun.updateMany(
+      {
+        status: 'interrupted',
+        _id: { $nin: [...resumableRunIds] },
+        'sellers.status': { $in: ['queued', 'running'] },
+      },
+      {
+        $set: {
+          'sellers.$[seller].status': 'interrupted',
+          'sellers.$[seller].completedAt': new Date(),
+          'sellers.$[seller].error': 'Server restarted before this seller sync finished and this run cannot be resumed safely.',
+        },
+      },
+      { arrayFilters: [{ 'seller.status': { $in: ['queued', 'running'] } }] }
+    );
+
     activeSkuSyncRunId = null;
     skuSyncStopRequested = false;
     skuSyncDismissed.clear();
-    console.log('[SKU Index Sync] Cleared stale running cron state after startup.');
+    for (const run of resumableRuns) {
+      try {
+        await resumeSkuIndexSyncRun(run._id);
+      } catch (err) {
+        console.error(`[SKU Index Sync] Failed to resume run ${run._id}:`, err.message);
+      }
+    }
+    console.log(`[SKU Index Sync] Startup state initialized. Resuming ${resumableRuns.length} SKU run(s).`);
   } catch (err) {
     console.error('[SKU Index Sync] Failed to initialize startup state:', err.message);
   }
@@ -17505,6 +17736,7 @@ export async function scheduledSkuIndexSyncAllSellers() {
   }
 
   const startedAt = new Date();
+  const syncWindow = getSkuSyncWindow(startedAt);
   const run = await SkuIndexSyncRun.create({
     source: 'cron',
     runnerId: RUNNER_ID,
@@ -17513,6 +17745,9 @@ export async function scheduledSkuIndexSyncAllSellers() {
     concurrency: SKU_SYNC_CONCURRENCY,
     sellersTotal: sellers.length,
     sellersComplete: 0,
+    syncStartedAt: syncWindow.syncStart,
+    endTimeFrom: syncWindow.endTimeFrom,
+    endTimeTo: syncWindow.endTimeTo,
     startedAt,
     sellers: sellers.map(seller => ({
       seller: seller._id,
@@ -17564,6 +17799,9 @@ export async function scheduledSkuIndexSyncAllSellers() {
         await updateSkuIndexRunSeller(run._id, seller._id, { status: 'running', startedAt: sellerStartedAt, error: null });
         console.log(`[SKU Index Cron] Starting seller ${sellerName}`);
         const { totalCount, syncedAt } = await runSkuIndexSync(seller, null, {
+          syncStart: run.syncStartedAt || run.startedAt,
+          endTimeFrom: run.endTimeFrom,
+          endTimeTo: run.endTimeTo,
           onProgress: async (progress) => {
             await updateSkuIndexRunSeller(run._id, seller._id, {
               currentPage: progress.page,
