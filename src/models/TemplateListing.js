@@ -6,7 +6,7 @@ const templateListingSchema = new mongoose.Schema({
     ref: 'ListingTemplate',
     required: true
   },
-  
+
   // Seller association for multi-seller template management
   sellerId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -14,7 +14,7 @@ const templateListingSchema = new mongoose.Schema({
     required: true,
     index: true
   },
-  
+
   // CORE COLUMNS (38 fixed fields)
   action: {
     type: String,
@@ -83,7 +83,7 @@ const templateListingSchema = new mongoose.Schema({
   shippingProfileName: String,
   returnProfileName: String,
   paymentProfileName: String,
-  
+
   // ASIN reference for tracking (NOT exported to CSV)
   _asinReference: {
     type: String,
@@ -91,13 +91,21 @@ const templateListingSchema = new mongoose.Schema({
     select: false,
     index: true
   },
-  
+
+  // Original Amazon source price at time of first listing (NOT exported to CSV)
+  // Used to calculate "Actual Profit" in the ASIN Review Modal for duplicate ASINs
+  _amazonSourcePrice: {
+    type: String,
+    default: null,
+    select: false
+  },
+
   // Amazon product link - auto-generated from ASIN
   amazonLink: {
     type: String,
     trim: true
   },
-  
+
   // Listing status for database tracking
   status: {
     type: String,
@@ -105,7 +113,7 @@ const templateListingSchema = new mongoose.Schema({
     default: 'draft',
     index: true
   },
-  
+
   // eBay integration fields (for future use)
   ebayItemId: {
     type: String,
@@ -117,13 +125,13 @@ const templateListingSchema = new mongoose.Schema({
   },
   ebayPublishedAt: Date,
   lastSyncedAt: Date,
-  
+
   // Soft delete support
   deletedAt: {
     type: Date,
     default: null
   },
-  
+
   // Download batch tracking
   downloadBatchId: {
     type: String,
@@ -142,7 +150,7 @@ const templateListingSchema = new mongoose.Schema({
     type: String,
     default: null
   },
-  
+
   // Duplicate tracking
   duplicateCount: {
     type: Number,
@@ -158,17 +166,21 @@ const templateListingSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
-  
+
   // CUSTOM COLUMNS (flexible Map structure)
   customFields: {
     type: Map,
     of: String,
     default: new Map()
   },
-  
+
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
+  },
+  aiRunId: {
+    type: String,
+    index: true
   },
   createdAt: {
     type: Date,
@@ -192,20 +204,33 @@ templateListingSchema.index({ customLabel: 1 });
 templateListingSchema.index({ deletedAt: 1 });
 templateListingSchema.index({ templateId: 1, sellerId: 1, downloadBatchId: 1 });
 
+// Covering index for database-view filtered + sorted queries (deletedAt + optional seller/template + sort)
+templateListingSchema.index({ deletedAt: 1, sellerId: 1, templateId: 1, createdAt: -1 });
+
+// Supports SKU Seller Profit streaming report: active rows in SKU order, with seller grouping.
+templateListingSchema.index({ deletedAt: 1, customLabel: 1, sellerId: 1 });
+templateListingSchema.index({ sellerId: 1, deletedAt: 1, customLabel: 1 });
+templateListingSchema.index({ sellerId: 1, deletedAt: 1, createdAt: -1, customLabel: 1 });
+templateListingSchema.index({ deletedAt: 1, createdAt: -1, customLabel: 1, sellerId: 1 });
+
+// Text index for fast full-text search on title and SKU (customLabel)
+// _asinReference is handled separately via exact/prefix match
+templateListingSchema.index({ title: 'text', customLabel: 'text' }, { weights: { title: 2, customLabel: 10 }, name: 'listing_text_search' });
+
 // Pre-save hook to auto-generate Amazon link and update timestamp
-templateListingSchema.pre('save', function(next) {
+templateListingSchema.pre('save', function (next) {
   this.updatedAt = Date.now();
-  
+
   // Auto-generate Amazon link from ASIN
   if (this._asinReference && !this.amazonLink) {
     this.amazonLink = `https://www.amazon.com/dp/${this._asinReference}`;
   }
-  
+
   // Update amazonLink if ASIN changed
   if (this.isModified('_asinReference') && this._asinReference) {
     this.amazonLink = `https://www.amazon.com/dp/${this._asinReference}`;
   }
-  
+
   next();
 });
 

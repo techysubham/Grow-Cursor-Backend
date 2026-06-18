@@ -39,6 +39,45 @@ function getDateRange(startDate, endDate) {
 }
 
 // POST / - Create a new leave request
+/**
+ * @swagger
+ * /leaves:
+ *   post:
+ *     tags: [Leaves]
+ *     summary: Submit a leave request
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Creates a new leave request for the authenticated employee.
+ *       Validates advance notice, monthly quota, no date overlap with existing
+ *       approved/pending requests, and department concurrency limit.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [startDate, endDate, reason]
+ *             properties:
+ *               startDate:
+ *                 type: string
+ *                 format: date
+ *                 example: "2026-05-25"
+ *               endDate:
+ *                 type: string
+ *                 format: date
+ *                 example: "2026-05-26"
+ *               reason:
+ *                 type: string
+ *                 example: "Medical appointment"
+ *     responses:
+ *       201:
+ *         description: Leave request created
+ *       400:
+ *         description: Validation error (overlap, quota exceeded, or insufficient advance notice)
+ *       401:
+ *         description: Unauthorized
+ */
 router.post('/', requireAuth, validate(createLeaveSchema), async (req, res) => {
     try {
         const { startDate, endDate, reason } = req.body;
@@ -160,6 +199,21 @@ router.post('/', requireAuth, validate(createLeaveSchema), async (req, res) => {
 });
 
 // GET / - Get current user's leave requests
+/**
+ * @swagger
+ * /leaves:
+ *   get:
+ *     tags: [Leaves]
+ *     summary: Get own leave requests
+ *     security:
+ *       - bearerAuth: []
+ *     description: Returns all leave requests for the authenticated employee, sorted newest first.
+ *     responses:
+ *       200:
+ *         description: Array of leave requests
+ *       401:
+ *         description: Unauthorized
+ */
 router.get('/', requireAuth, async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -173,6 +227,37 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // GET /admin - Get all leave requests (HR Admin and Superadmin only)
+/**
+ * @swagger
+ * /leaves/admin:
+ *   get:
+ *     tags: [Leaves]
+ *     summary: Get all leave requests (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns all leave requests across all employees, populated with user details.
+ *       Supports optional `status` and `department` query filters.
+ *       **Requires LeaveAdmin page access.**
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [pending, approved, rejected]
+ *         description: Filter by status
+ *       - in: query
+ *         name: department
+ *         schema: { type: string }
+ *         description: Filter by department name
+ *     responses:
+ *       200:
+ *         description: Array of all leave requests
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden — requires LeaveAdmin page access
+ */
 router.get('/admin', requireAuth, requirePageAccess('LeaveAdmin'), async (req, res) => {
     try {
         const { status, department } = req.query;
@@ -200,6 +285,47 @@ router.get('/admin', requireAuth, requirePageAccess('LeaveAdmin'), async (req, r
 });
 
 // PUT /:id/status - Approve or reject a leave request (HR Admin and Superadmin only)
+/**
+ * @swagger
+ * /leaves/{id}/status:
+ *   put:
+ *     tags: [Leaves]
+ *     summary: Approve or reject a leave request (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     description: Updates the status of a leave request. **Requires LeaveAdmin page access.**
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Leave request ObjectId
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [status]
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [approved, rejected]
+ *               rejectionReason:
+ *                 type: string
+ *                 description: Required when status is "rejected"
+ *     responses:
+ *       200:
+ *         description: Status updated
+ *       400:
+ *         description: Rejection reason required when rejecting
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden — requires LeaveAdmin page access
+ *       404:
+ *         description: Leave request not found
+ */
 router.put('/:id/status', requireAuth, requirePageAccess('LeaveAdmin'), validate(updateLeaveStatusSchema), async (req, res) => {
     try {
         const { id } = req.params;
@@ -266,6 +392,31 @@ router.put('/:id/status', requireAuth, requirePageAccess('LeaveAdmin'), validate
 });
 
 // DELETE /:id - Cancel a leave request (Employee only, if pending)
+/**
+ * @swagger
+ * /leaves/{id}:
+ *   delete:
+ *     tags: [Leaves]
+ *     summary: Cancel own leave request
+ *     security:
+ *       - bearerAuth: []
+ *     description: Cancels a pending leave request. Only the request owner can cancel.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Leave request ObjectId
+ *     responses:
+ *       200:
+ *         description: Leave request cancelled
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden — can only cancel own requests
+ *       404:
+ *         description: Leave request not found
+ */
 router.delete('/:id', requireAuth, async (req, res) => {
     try {
         const { id } = req.params;

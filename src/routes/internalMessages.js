@@ -1,23 +1,146 @@
 import { Router } from 'express';
-import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { requireAuth, requireAuthSSE, requirePageAccess } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { sendMessageSchema } from '../schemas/index.js';
 import InternalMessage from '../models/InternalMessage.js';
 import User from '../models/User.js';
 
 const router = Router();
+const unreadStreamClients = new Map();
+
+/**
+ * @swagger
+ * tags:
+ *   name: InternalMessages
+ *   description: Internal user-to-user messaging system
+ */
 
 // Helper function to generate conversation ID
 function generateConversationId(username1, username2) {
   return [username1, username2].sort().join('_');
 }
 
-// 1. SEARCH USERS (for starting new conversations)
+function addUnreadStreamClient(userId, res) {
+  const userKey = String(userId);
+  const clients = unreadStreamClients.get(userKey) || new Set();
+  clients.add(res);
+  unreadStreamClients.set(userKey, clients);
+}
+
+function removeUnreadStreamClient(userId, res) {
+  const userKey = String(userId);
+  const clients = unreadStreamClients.get(userKey);
+  if (!clients) return;
+
+  clients.delete(res);
+  if (clients.size === 0) {
+    unreadStreamClients.delete(userKey);
+  }
+}
+
+async function getUnreadState(userId) {
+  const [unreadMessageCount, unreadConversationRows] = await Promise.all([
+    InternalMessage.countDocuments({
+      recipient: userId,
+      read: false
+    }),
+    InternalMessage.aggregate([
+      {
+        $match: {
+          recipient: userId,
+          read: false
+        }
+      },
+      {
+        $group: {
+          _id: '$conversationId'
+        }
+      },
+      {
+        $count: 'count'
+      }
+    ])
+  ]);
+
+  return {
+    unreadMessageCount,
+    unreadConversationCount: unreadConversationRows[0]?.count || 0
+  };
+}
+
+async function emitUnreadState(userId, payload = {}) {
+  const userKey = String(userId);
+  const clients = unreadStreamClients.get(userKey);
+  if (!clients?.size) return;
+
+  const { unreadMessageCount, unreadConversationCount } = await getUnreadState(userId);
+
+  const message = `data: ${JSON.stringify({
+    type: 'unread-state',
+    hasUnread: unreadConversationCount > 0,
+    unreadCount: unreadMessageCount,
+    unreadMessageCount,
+    unreadConversationCount,
+    ...payload
+  })}\n\n`;
+
+  for (const client of clients) {
+    client.write(message);
+  }
+}
+
+function emitHeartbeat(res) {
+  res.write(': keep-alive\n\n');
+}
+
+router.get('/unread-stream', requireAuthSSE, async (req, res) => {
+  const userId = req.user.userId;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  addUnreadStreamClient(userId, res);
+
+  const heartbeat = setInterval(() => {
+    emitHeartbeat(res);
+  }, 25000);
+
+  try {
+    await emitUnreadState(userId, { reason: 'connected' });
+  } catch (err) {
+    clearInterval(heartbeat);
+    removeUnreadStreamClient(userId, res);
+    return res.end();
+  }
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    removeUnreadStreamClient(userId, res);
+    res.end();
+  });
+});
+
+/**
+ * @swagger
+ * /internal-messages/search-users:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: Search users to start or find a conversation
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: q, required: true, schema: { type: string }, description: Search query (username or name) }
+ *     responses:
+ *       200: { description: Array of matching user summaries }
+ *       401: { description: Unauthorized }
+ */
 router.get('/search-users', requireAuth, async (req, res) => {
   try {
     const { q } = req.query;
     const currentUserId = req.user.userId;
-    
+
     if (!q || q.trim().length < 2) {
       return res.json([]);
     }
@@ -28,8 +151,8 @@ router.get('/search-users', requireAuth, async (req, res) => {
       active: true,
       username: { $regex: q, $options: 'i' }
     })
-    .select('username role email')
-    .limit(20);
+      .select('username role email')
+      .limit(20);
 
     res.json(users);
   } catch (err) {
@@ -39,6 +162,18 @@ router.get('/search-users', requireAuth, async (req, res) => {
 });
 
 // 2. GET CONVERSATIONS LIST (Sidebar)
+/**
+ * @swagger
+ * /internal-messages/conversations:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: List all conversations for the current user
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200: { description: Array of conversation metadata with last message and unread count }
+ *       401: { description: Unauthorized }
+ */
 router.get('/conversations', requireAuth, async (req, res) => {
   try {
     const currentUserId = req.user.userId;
@@ -93,10 +228,10 @@ router.get('/conversations', requireAuth, async (req, res) => {
     const populatedConversations = await Promise.all(
       conversations.map(async (conv) => {
         // Determine who the "other user" is
-        const otherUserId = conv.lastSender.toString() === currentUserId 
-          ? conv.lastRecipient 
+        const otherUserId = conv.lastSender.toString() === currentUserId
+          ? conv.lastRecipient
           : conv.lastSender;
-        
+
         const otherUser = await User.findById(otherUserId).select('username role email');
 
         return {
@@ -117,6 +252,23 @@ router.get('/conversations', requireAuth, async (req, res) => {
 });
 
 // 3. GET MESSAGES IN CONVERSATION
+/**
+ * @swagger
+ * /internal-messages/messages/{conversationId}:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: Get messages for a specific conversation
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: conversationId, required: true, schema: { type: string } }
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 50 } }
+ *     responses:
+ *       200: { description: Paginated message list (oldest first) }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden — not a participant }
+ */
 router.get('/messages/:conversationId', requireAuth, async (req, res) => {
   try {
     const { conversationId } = req.params;
@@ -151,6 +303,11 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
       { $set: { read: true } }
     );
 
+    await emitUnreadState(currentUser._id, {
+      reason: 'messages-read',
+      conversationId
+    });
+
     res.json(messages);
   } catch (err) {
     console.error('Get messages error:', err);
@@ -159,6 +316,29 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
 });
 
 // 4. SEND MESSAGE
+/**
+ * @swagger
+ * /internal-messages/send:
+ *   post:
+ *     tags: [InternalMessages]
+ *     summary: Send a message to another user
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [recipientUsername, message]
+ *             properties:
+ *               recipientUsername: { type: string }
+ *               message: { type: string }
+ *     responses:
+ *       201: { description: Sent message object }
+ *       400: { description: Validation error or self-message attempt }
+ *       401: { description: Unauthorized }
+ */
 router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) => {
   try {
     const { recipientId, body, mediaUrls } = req.body;
@@ -196,6 +376,13 @@ router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) 
     await newMessage.populate('sender', 'username role');
     await newMessage.populate('recipient', 'username role');
 
+    await emitUnreadState(recipient._id, {
+      reason: 'message-received',
+      conversationId,
+      messageId: newMessage._id.toString(),
+      senderId: sender._id.toString()
+    });
+
     res.json(newMessage);
   } catch (err) {
     console.error('Send message error:', err);
@@ -204,16 +391,28 @@ router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) 
 });
 
 // 5. GET UNREAD COUNT (for badge)
+/**
+ * @swagger
+ * /internal-messages/unread-count:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: Get total unread message count for the current user
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200: { description: Object with unreadCount integer }
+ *       401: { description: Unauthorized }
+ */
 router.get('/unread-count', requireAuth, async (req, res) => {
   try {
     const currentUserId = req.user.userId;
+    const { unreadMessageCount, unreadConversationCount } = await getUnreadState(currentUserId);
 
-    const count = await InternalMessage.countDocuments({
-      recipient: currentUserId,
-      read: false
+    res.json({
+      count: unreadMessageCount,
+      unreadMessageCount,
+      unreadConversationCount
     });
-
-    res.json({ count });
   } catch (err) {
     console.error('Get unread count error:', err);
     res.status(500).json({ error: err.message });
@@ -225,6 +424,23 @@ router.get('/unread-count', requireAuth, async (req, res) => {
 // ============================================
 
 // 6. SUPERADMIN: Get All Conversations
+/**
+ * @swagger
+ * /internal-messages/admin/all-conversations:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: Admin — list all conversations across all users
+ *     security:
+ *       - bearerAuth: []
+ *     description: Requires ViewAllMessages page access.
+ *     parameters:
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 20 } }
+ *     responses:
+ *       200: { description: Paginated list of all conversations }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/admin/all-conversations', requireAuth, requirePageAccess('ViewAllMessages'), async (req, res) => {
   try {
     const { page = 1, limit = 50, search } = req.query;
@@ -236,9 +452,9 @@ router.get('/admin/all-conversations', requireAuth, requirePageAccess('ViewAllMe
       const users = await User.find({
         username: { $regex: search, $options: 'i' }
       }).select('_id');
-      
+
       const userIds = users.map(u => u._id);
-      
+
       matchStage = {
         $or: [
           { sender: { $in: userIds } },
@@ -289,6 +505,22 @@ router.get('/admin/all-conversations', requireAuth, requirePageAccess('ViewAllMe
 });
 
 // 7. SUPERADMIN: View Any Conversation
+/**
+ * @swagger
+ * /internal-messages/admin/conversation/{conversationId}:
+ *   get:
+ *     tags: [InternalMessages]
+ *     summary: Admin — view messages in any conversation
+ *     security:
+ *       - bearerAuth: []
+ *     description: Requires ViewAllMessages page access.
+ *     parameters:
+ *       - { in: path, name: conversationId, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Message list for the conversation }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/admin/conversation/:conversationId', requireAuth, requirePageAccess('ViewAllMessages'), async (req, res) => {
   try {
     const { conversationId } = req.params;

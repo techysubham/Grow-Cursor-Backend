@@ -6,8 +6,27 @@ import { createBankAccountSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
-// GET /api/bank-accounts - List all
-// Accessible from both BankAccounts page and Transactions page (for dropdown)
+/**
+ * @swagger
+ * tags:
+ *   name: BankAccounts
+ *   description: Bank account reference data
+ */
+
+/**
+ * @swagger
+ * /bank-accounts:
+ *   get:
+ *     tags: [BankAccounts]
+ *     summary: List all bank accounts
+ *     security:
+ *       - bearerAuth: []
+ *     description: Accessible from BankAccounts, Transactions, and Payoneer pages.
+ *     responses:
+ *       200: { description: Array of bank account records sorted by name }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/', requireAuth, requirePageAccess(['BankAccounts', 'Transactions','Payoneer']), async (req, res) => {
     try {
         const accounts = await BankAccount.find().sort({ name: 1 });
@@ -18,6 +37,32 @@ router.get('/', requireAuth, requirePageAccess(['BankAccounts', 'Transactions','
 });
 
 // POST /api/bank-accounts - Create
+/**
+ * @swagger
+ * /bank-accounts:
+ *   post:
+ *     tags: [BankAccounts]
+ *     summary: Create a bank account
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string }
+ *               accountNumber: { type: string }
+ *               bankName: { type: string }
+ *               currency: { type: string }
+ *     responses:
+ *       201: { description: Created bank account }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.post('/', requireAuth, requirePageAccess('BankAccounts'), validate(createBankAccountSchema), async (req, res) => {
     try {
         const { name, accountNumber, ifscCode } = req.body;
@@ -36,6 +81,26 @@ router.post('/', requireAuth, requirePageAccess('BankAccounts'), validate(create
 });
 
 // PUT /api/bank-accounts/:id - Update
+/**
+ * @swagger
+ * /bank-accounts/{id}:
+ *   put:
+ *     tags: [BankAccounts]
+ *     summary: Update a bank account
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema: { type: object }
+ *     responses:
+ *       200: { description: Updated bank account }
+ *       404: { description: Bank account not found }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.put('/:id', requireAuth, requirePageAccess('BankAccounts'), async (req, res) => {
     try {
         const { id } = req.params;
@@ -52,6 +117,22 @@ router.put('/:id', requireAuth, requirePageAccess('BankAccounts'), async (req, r
 });
 
 // DELETE /api/bank-accounts/:id - Delete
+/**
+ * @swagger
+ * /bank-accounts/{id}:
+ *   delete:
+ *     tags: [BankAccounts]
+ *     summary: Delete a bank account
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Deletion confirmation }
+ *       404: { description: Bank account not found }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.delete('/:id', requireAuth, requirePageAccess('BankAccounts'), async (req, res) => {
     try {
         const { id } = req.params;

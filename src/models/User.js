@@ -28,7 +28,7 @@ const UserSchema = new mongoose.Schema(
     },
     department: { type: String, trim: true },
     active: { type: Boolean, default: true },
-    isStrictTimer: { type: Boolean, default: true }, // Mandatory timer tracking (false for superadmin by default)
+    isStrictTimer: { type: Boolean, default: false }, // Working-hours timer is opt-in per user.
     // Dynamic page access control
     pagePermissions: [{ type: String }], // Array of page IDs e.g. ['OrdersDashboard', 'FeedUpload']
     useCustomPermissions: { type: Boolean, default: false }, // When true, only pagePermissions apply; when false, role-based defaults

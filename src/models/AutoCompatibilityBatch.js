@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 const AutoCompatibilityBatchSchema = new mongoose.Schema({
   seller: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', required: true },
-  triggeredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  triggeredBy: { type: mongoose.Schema.Types.Mixed, ref: 'User', default: 'auto' },
   status: { type: String, enum: ['running', 'completed', 'failed'], default: 'running' },
   targetDate: { type: String, required: true }, // YYYY-MM-DD — listing startTime filter
   itemLimit: { type: Number, default: 0 }, // 0 = no limit, >0 = max items to process

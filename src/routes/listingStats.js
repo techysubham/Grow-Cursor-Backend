@@ -4,10 +4,28 @@ import Seller from '../models/Seller.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 
 const router = express.Router();
+const PT_TIMEZONE = 'America/Los_Angeles';
+
+function getPTDayBoundsUTC(dateStr) {
+  function findMidnightUTC(ds) {
+    const pdt = new Date(`${ds}T07:00:00.000Z`);
+    const ptStr = new Intl.DateTimeFormat('en-CA', { timeZone: PT_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(pdt);
+    const ptHour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: PT_TIMEZONE, hour: 'numeric', hour12: false, hourCycle: 'h23' }).format(pdt), 10);
+    if (ptStr === ds && ptHour === 0) return pdt;
+    return new Date(`${ds}T08:00:00.000Z`);
+  }
+
+  const start = findMidnightUTC(dateStr);
+  const tmp = new Date(`${dateStr}T12:00:00.000Z`);
+  tmp.setUTCDate(tmp.getUTCDate() + 1);
+  const nextDateStr = tmp.toISOString().split('T')[0];
+  const end = new Date(findMidnightUTC(nextDateStr).getTime() - 1);
+  return { start, end };
+}
 
 /**
  * @swagger
- * /api/listing-stats/day-wise-counts:
+ * /listing-stats/day-wise-counts:
  *   get:
  *     summary: Get day-wise listing counts per seller
  *     description: Returns the count of listings per seller per day based on startTime in PST timezone
@@ -53,12 +71,12 @@ router.get('/day-wise-counts', requireAuth, async (req, res) => {
     if (startDate || endDate) {
       matchCriteria.startTime = {};
       if (startDate) {
-        // IST midnight → UTC: e.g. 2026-04-14T00:00:00+05:30 = 2026-04-13T18:30:00Z
-        matchCriteria.startTime.$gte = new Date(startDate + 'T00:00:00+05:30');
+        // Pacific midnight converted to UTC.
+        matchCriteria.startTime.$gte = getPTDayBoundsUTC(startDate).start;
       }
       if (endDate) {
-        // IST end of day → UTC: e.g. 2026-04-14T23:59:59.999+05:30 = 2026-04-14T18:29:59.999Z
-        matchCriteria.startTime.$lte = new Date(endDate + 'T23:59:59.999+05:30');
+        // Pacific end of day converted to UTC.
+        matchCriteria.startTime.$lte = getPTDayBoundsUTC(endDate).end;
       }
     }
 
@@ -73,7 +91,7 @@ router.get('/day-wise-counts', requireAuth, async (req, res) => {
               $dateToString: { 
                 format: '%Y-%m-%d', 
                 date: '$startTime',
-                timezone: 'Asia/Kolkata'
+                timezone: PT_TIMEZONE
               }
             }
           },
@@ -144,7 +162,7 @@ router.get('/day-wise-counts', requireAuth, async (req, res) => {
 
 /**
  * @swagger
- * /api/listing-stats/summary:
+ * /listing-stats/summary:
  *   get:
  *     summary: Get summary statistics for listings
  *     description: Returns overall summary of listing counts per seller based on startTime in PST timezone
@@ -179,13 +197,11 @@ router.get('/summary', requireAuth, async (req, res) => {
     if (startDate || endDate) {
       matchCriteria.startTime = {};
       if (startDate) {
-        // Convert PST date to UTC for query
-        const startDateUTC = new Date(startDate + 'T00:00:00+05:30');
-        matchCriteria.startTime.$gte = startDateUTC;
+        // Convert Pacific date to UTC for query.
+        matchCriteria.startTime.$gte = getPTDayBoundsUTC(startDate).start;
       }
       if (endDate) {
-        const endDateUTC = new Date(endDate + 'T23:59:59.999+05:30');
-        matchCriteria.startTime.$lte = endDateUTC;
+        matchCriteria.startTime.$lte = getPTDayBoundsUTC(endDate).end;
       }
     }
 

@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import pLimit from 'p-limit';
+import { trackApiUsage } from './apiUsageTracker.js';
 
 let openaiClient = null;
 
@@ -25,9 +26,25 @@ function getOpenAIClient() {
  */
 export async function generateWithGemini(prompt, options = {}) {
   return aiLimit(async () => {
+    const startTime = Date.now();
+    const {
+      maxTokens = 150,
+      asin,
+      fieldName,
+      fieldType,
+      aiRunId,
+      aiRunStartedAt,
+      templateId,
+      sellerId,
+      userId,
+      ipAddress,
+      ipSource,
+      forwardedFor,
+      userAgent,
+      model = 'gpt-4o-mini'
+    } = options;
+
     try {
-      const { maxTokens = 150 } = options;
-      
       const openai = getOpenAIClient();
       const completion = await openai.chat.completions.create({
         messages: [
@@ -36,7 +53,7 @@ export async function generateWithGemini(prompt, options = {}) {
             content: prompt
           }
         ],
-        model: 'gpt-4o-mini',
+        model,
         temperature: 0.3,
         max_tokens: maxTokens,
       });
@@ -46,10 +63,59 @@ export async function generateWithGemini(prompt, options = {}) {
       // Strip markdown code blocks (```html ... ```, ```javascript ... ```, etc.)
       // This prevents AI from wrapping HTML/code responses in markdown fences
       content = content.replace(/```(?:html|javascript|python|css|json|[a-z]*)?\n?([\s\S]*?)```/g, '$1').trim();
+
+      const usage = completion.usage || {};
+      trackApiUsage({
+        service: 'OpenAI',
+        asin,
+        creditsUsed: usage.total_tokens || 1,
+        success: true,
+        responseTime: Date.now() - startTime,
+        extractedFields: fieldName ? [fieldName] : [],
+        model,
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens,
+        totalTokens: usage.total_tokens,
+        fieldName,
+        fieldType,
+        aiRunId,
+        aiRunStartedAt,
+        templateId,
+        sellerId,
+        userId,
+        ipAddress,
+        ipSource,
+        forwardedFor,
+        userAgent,
+        promptChars: prompt.length,
+        completionChars: content.length
+      }).catch(err => console.error('[OpenAI Usage Tracker] Failed to track:', err.message));
       
       return content;
     } catch (error) {
       console.error('OpenAI API error:', error);
+      trackApiUsage({
+        service: 'OpenAI',
+        asin,
+        creditsUsed: 1,
+        success: false,
+        errorMessage: error.message,
+        responseTime: Date.now() - startTime,
+        extractedFields: fieldName ? [fieldName] : [],
+        model,
+        fieldName,
+        fieldType,
+        aiRunId,
+        aiRunStartedAt,
+        templateId,
+        sellerId,
+        userId,
+        ipAddress,
+        ipSource,
+        forwardedFor,
+        userAgent,
+        promptChars: prompt.length
+      }).catch(err => console.error('[OpenAI Usage Tracker] Failed to track error:', err.message));
       throw new Error('Failed to generate content with OpenAI');
     }
   });

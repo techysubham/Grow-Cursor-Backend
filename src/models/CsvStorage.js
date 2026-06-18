@@ -83,15 +83,29 @@ const csvStorageSchema = new mongoose.Schema({
     },
     scheduledUploadStatus: {
         type: String,
-        enum: ['pending', 'processing', 'done', 'failed', null],
+        enum: ['pending', 'processing', 'done', 'failed', 'limit_blocked', null],
         default: null
     },
     source: {
         type: String,
         enum: ['manual', 'asin_list', null],
         default: null
+    },
+    country: {
+        type: String,
+        enum: ['US', 'UK', 'AU', 'Canada', null],
+        default: null
     }
 });
+
+// Sparse compound index so the every-minute cron query
+// ({ scheduledUploadStatus: 'pending', scheduledUploadAt: { $lte: now } })
+// is an instant index seek instead of a full collection scan.
+// sparse: true excludes documents where both fields are null (the majority).
+csvStorageSchema.index(
+    { scheduledUploadStatus: 1, scheduledUploadAt: 1 },
+    { sparse: true }
+);
 
 const CsvStorage = mongoose.model('CsvStorage', csvStorageSchema);
 

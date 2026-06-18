@@ -18,7 +18,57 @@ import {
 
 const router = Router();
 
+/**
+ * @swagger
+ * tags:
+ *   name: Users
+ *   description: User account management
+ */
+
 // Superadmin creates all (productadmin, listingadmin, lister); Listing Admin creates listers only
+/**
+ * @swagger
+ * /users:
+ *   post:
+ *     tags: [Users]
+ *     summary: Create a new user account
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Creates a new user and an associated EmployeeProfile.
+ *       If the new user's role is `seller`, a Seller document is also created.
+ *       Role-based creation rules are enforced:
+ *       - Listers/productadmin/compatibilityeditor cannot create users.
+ *       - listingadmin can only create listers.
+ *       - compatibilityadmin can only create compatibilityeditors.
+ *       - Only superadmin/hradmin/operationhead can create admin-level roles.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [username, password, newUserRole]
+ *             properties:
+ *               username: { type: string, example: jane_lister }
+ *               password: { type: string, format: password }
+ *               email: { type: string, format: email }
+ *               newUserRole:
+ *                 type: string
+ *                 enum: [productadmin, listingadmin, lister, advancelister, compatibilityadmin,
+ *                   compatibilityeditor, seller, fulfillmentadmin, hradmin, hr,
+ *                   operationhead, trainee, hoc, compliancemanager]
+ *               department: { type: string, example: Listing }
+ *     responses:
+ *       200:
+ *         description: User created — returns id, email, username, role
+ *       400:
+ *         description: Missing fields or invalid role
+ *       403:
+ *         description: Caller role not permitted to create this user role
+ *       409:
+ *         description: Email or username already in use
+ */
 router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
   const { role } = req.user;
   const { email, username, password, newUserRole, department } = req.body || {};
@@ -84,16 +134,13 @@ router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
   // Compatibility admins and creating compatibility editors default to Compatibility
   if (role === 'compatibilityadmin' || newUserRole === 'compatibilityeditor') finalDepartment = 'Compatibility';
 
-  // Set isStrictTimer to false for superadmin, true for all others
-  const isStrictTimer = newUserRole !== 'superadmin';
-
   const user = await User.create({
     email,
     username,
     passwordHash,
     role: newUserRole,
     department: finalDepartment,
-    isStrictTimer
+    isStrictTimer: false
   });
 
   // Create an EmployeeProfile for the new user so they appear on admin pages immediately
@@ -136,18 +183,71 @@ router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /users/listers:
+ *   get:
+ *     tags: [Users]
+ *     summary: List all active listers
+ *     security:
+ *       - bearerAuth: []
+ *     description: Returns active users with role `lister`. **Requires AddUser page access.**
+ *     responses:
+ *       200:
+ *         description: Array of lister users (username, email, role)
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/listers', requireAuth, requirePageAccess('AddUser'), async (req, res) => {
   const listers = await User.find({ role: 'lister', active: true }).select('email username role');
   res.json(listers);
 });
 
 // List compatibility editors (for superadmin or compatibilityadmin)
+/**
+ * @swagger
+ * /users/compatibility-editors:
+ *   get:
+ *     tags: [Users]
+ *     summary: List all active compatibility editors
+ *     security:
+ *       - bearerAuth: []
+ *     description: Returns active users with role `compatibilityeditor`. **Requires AddCompatibilityEditor page access.**
+ *     responses:
+ *       200:
+ *         description: Array of compatibility editor users
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/compatibility-editors', requireAuth, requirePageAccess('AddCompatibilityEditor'), async (req, res) => {
   const editors = await User.find({ role: 'compatibilityeditor', active: true }).select('email username role');
   res.json(editors);
 });
 
 // Check if email or username already exists (requires auth to prevent user enumeration)
+/**
+ * @swagger
+ * /users/check-exists:
+ *   get:
+ *     tags: [Users]
+ *     summary: Check if a username or email is already taken
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns `{ exists: boolean }`. Auth required to prevent unauthenticated user enumeration.
+ *     parameters:
+ *       - in: query
+ *         name: email
+ *         schema: { type: string }
+ *         description: Email to check (provide either email or username, not both)
+ *       - in: query
+ *         name: username
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Returns an object with a single boolean field indicating whether the value is taken
+ *       401: { description: Unauthorized }
+ */
 router.get('/check-exists', requireAuth, async (req, res) => {
   const { email, username } = req.query;
   try {
@@ -166,6 +266,21 @@ router.get('/check-exists', requireAuth, async (req, res) => {
 });
 
 // GET / - fetch all active users
+/**
+ * @swagger
+ * /users:
+ *   get:
+ *     tags: [Users]
+ *     summary: List all active users
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns all users where active is true with username, email, role, department, and page permission fields.
+ *     responses:
+ *       200:
+ *         description: Array of user objects
+ *       401: { description: Unauthorized }
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     const users = await User.find({ active: true }).select('username email role department pagePermissions useCustomPermissions');
@@ -176,6 +291,43 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // GET /page-access-audit-logs - Fetch page access audit history
+/**
+ * @swagger
+ * /users/page-access-audit-logs:
+ *   get:
+ *     tags: [Users]
+ *     summary: Fetch page access audit history
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Paginated log of all page permission changes across all users.
+ *       Supports filtering by actor, target user, page ID, event type, and date range.
+ *       **Requires PageAccessAuditLog page access.**
+ *     parameters:
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 50, maximum: 100 } }
+ *       - { in: query, name: targetUserId, schema: { type: string }, description: Filter by target user ObjectId }
+ *       - { in: query, name: actorUserId, schema: { type: string }, description: Filter by actor user ObjectId }
+ *       - { in: query, name: pageId, schema: { type: string }, description: Filter by specific page ID }
+ *       - { in: query, name: eventType, schema: { type: string, default: all }, description: "all | user_created | page_permissions_updated" }
+ *       - { in: query, name: effectiveChangesOnly, schema: { type: string, enum: ['true','false'], default: 'false' } }
+ *       - { in: query, name: fromDate, schema: { type: string, format: date-time } }
+ *       - { in: query, name: toDate, schema: { type: string, format: date-time } }
+ *     responses:
+ *       200:
+ *         description: Paginated audit log
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 logs: { type: array, items: { type: object } }
+ *                 total: { type: integer }
+ *                 page: { type: integer }
+ *                 totalPages: { type: integer }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/page-access-audit-logs', requireAuth, requirePageAccess('PageAccessAuditLog'), async (req, res) => {
   try {
     const {
@@ -252,6 +404,37 @@ router.get('/page-access-audit-logs', requireAuth, requirePageAccess('PageAccess
 });
 
 // PUT /:id/strict-timer - Toggle strict timer for a user (Superadmin only)
+/**
+ * @swagger
+ * /users/{id}/strict-timer:
+ *   put:
+ *     tags: [Users]
+ *     summary: Enable or disable strict timer for a user
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Toggles `isStrictTimer` on the user. If disabling, any active timer session
+ *       for that user is automatically stopped. **Requires Attendance page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [isStrictTimer]
+ *             properties:
+ *               isStrictTimer: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Timer setting updated
+ *       400:
+ *         description: isStrictTimer must be a boolean
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: User not found }
+ */
 router.put('/:id/strict-timer', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -304,6 +487,24 @@ router.put('/:id/strict-timer', requireAuth, requirePageAccess('Attendance'), as
 // ============================================
 
 // GET /:id/page-permissions - Get a user's page permissions
+/**
+ * @swagger
+ * /users/{id}/page-permissions:
+ *   get:
+ *     tags: [Users]
+ *     summary: Get a user's page permissions
+ *     security:
+ *       - bearerAuth: []
+ *     description: Returns the user's `pagePermissions`, `useCustomPermissions`, and role. **Requires PageAccessManagement page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: User permission details
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: User not found }
+ */
 router.get('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessManagement'), async (req, res) => {
   try {
     const user = await User.findById(req.params.id).select('username role pagePermissions useCustomPermissions');
@@ -322,6 +523,43 @@ router.get('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessMa
 });
 
 // PUT /:id/page-permissions - Set a user's page permissions
+/**
+ * @swagger
+ * /users/{id}/page-permissions:
+ *   put:
+ *     tags: [Users]
+ *     summary: Update a user's page permissions
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Updates `pagePermissions` and `useCustomPermissions` for a user.
+ *       If effective access changes, increments `permissionsVersion` to invalidate active sessions.
+ *       All changes are recorded in the PageAccessAuditLog.
+ *       **Requires PageAccessManagement page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [pagePermissions, useCustomPermissions]
+ *             properties:
+ *               pagePermissions:
+ *                 type: array
+ *                 items: { type: string }
+ *                 description: Array of page ID strings
+ *               useCustomPermissions: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Permissions updated (or no-op if unchanged)
+ *       400:
+ *         description: Invalid input
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: User not found }
+ */
 router.put('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessManagement'), async (req, res) => {
   try {
     const { pagePermissions, useCustomPermissions } = req.body;
@@ -429,6 +667,37 @@ router.put('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessMa
 // ============================================
 
 // PUT /:id/password - Change a user's password (Superadmin only)
+/**
+ * @swagger
+ * /users/{id}/password:
+ *   put:
+ *     tags: [Users]
+ *     summary: Change a user's password (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Hashes the new password and increments `tokenVersion` to invalidate all
+ *       existing sessions for that user. **Requires UserPasswordManagement page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [newPassword]
+ *             properties:
+ *               newPassword: { type: string, minLength: 6, format: password }
+ *     responses:
+ *       200:
+ *         description: Password updated and all sessions invalidated
+ *       400:
+ *         description: newPassword missing or too short
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: User not found }
+ */
 router.put('/:id/password', requireAuth, requirePageAccess('UserPasswordManagement'), async (req, res) => {
   try {
     const { newPassword } = req.body;

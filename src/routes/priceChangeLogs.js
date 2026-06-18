@@ -1,15 +1,75 @@
 import express from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import PriceChangeLog from '../models/PriceChangeLog.js';
+import { parsePagination } from '../utils/paginate.js';
 
 const router = express.Router();
 
 // GET /api/price-change-logs — Get price change history with filters
+/**
+ * @swagger
+ * /price-change-logs:
+ *   get:
+ *     tags: [Price Change Logs]
+ *     summary: Get eBay price change audit log (paginated)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: legacyItemId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: orderId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: userId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: successOnly
+ *         schema: { type: string, enum: ['true','false'] }
+ *       - in: query
+ *         name: failedOnly
+ *         schema: { type: string, enum: ['true','false'] }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *     responses:
+ *       200:
+ *         description: Paginated price change logs
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 logs:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/PriceChangeLog'
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     total:      { type: integer }
+ *                     page:       { type: integer }
+ *                     limit:      { type: integer }
+ *                     totalPages: { type: integer }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req, res) => {
   try {
     const {
-      page = 1,
-      limit = 50,
       legacyItemId,
       orderId,
       userId,
@@ -35,7 +95,7 @@ router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req
       if (endDate) query.createdAt.$lte = new Date(endDate);
     }
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const { page, limit, skip } = parsePagination(req.query, { defaultLimit: 50 });
 
     const [logs, total] = await Promise.all([
       PriceChangeLog.find(query)
@@ -47,7 +107,7 @@ router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req
         })
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(parseInt(limit))
+        .limit(limit)
         .lean(),
       PriceChangeLog.countDocuments(query)
     ]);
@@ -56,9 +116,9 @@ router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req
       logs,
       pagination: {
         total,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        totalPages: Math.ceil(total / parseInt(limit))
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
       }
     });
   } catch (err) {

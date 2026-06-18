@@ -8,13 +8,17 @@ import Case from '../models/Case.js';
 import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import MarketMetric from '../models/MarketMetric.js';
+import TemplateListing from '../models/TemplateListing.js';
+import ConversationMeta from '../models/ConversationMeta.js';
 
 const router = Router();
+const EXCLUDED_CLIENT_USERNAME = 'Vergo';
 
 const PT_TIMEZONE = 'America/Los_Angeles';
 const SNAD_RETURN_REASONS = [
   'NOT_AS_DESCRIBED',
   'DEFECTIVE_ITEM',
+  'ORDERED_DIFFERENT_ITEM',
   'WRONG_ITEM',
   'MISSING_PARTS',
   'ARRIVED_DAMAGED',
@@ -22,6 +26,8 @@ const SNAD_RETURN_REASONS = [
   'NOT_AUTHENTIC',
   'DOES_NOT_FIT'
 ];
+const ORDER_CANCELLATION_STATES = ['CANCEL_REQUESTED', 'IN_PROGRESS', 'CANCELED', 'CANCELLED'];
+const FINAL_CANCELLED_STATES = ['CANCELED', 'CANCELLED'];
 
 function getPtDateString(date = new Date()) {
   const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -92,6 +98,398 @@ function getCurrentAccountHealthWindow() {
   return { windowStart, calculationEnd };
 }
 
+function normalizeObjectIdOrNull(value, fieldName) {
+  if (value == null || value === '' || value === 'null') {
+    return null;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(value)) {
+    const error = new Error(`Invalid ${fieldName}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return new mongoose.Types.ObjectId(value);
+}
+
+async function getExcludedClientSellerIds() {
+  const sellers = await Seller.find({})
+    .populate('user', 'username')
+    .select('_id user')
+    .lean();
+
+  return sellers
+    .filter((seller) => seller.user?.username?.trim().toLowerCase() === EXCLUDED_CLIENT_USERNAME.toLowerCase())
+    .map((seller) => seller._id);
+}
+
+async function applyExcludedClientFilter(match, sellerField, excludeClient) {
+  if (excludeClient !== 'true') {
+    return;
+  }
+
+  const excludedSellerIds = await getExcludedClientSellerIds();
+  if (excludedSellerIds.length === 0) {
+    return;
+  }
+
+  match[sellerField] = match[sellerField]
+    ? { $in: [match[sellerField]].filter((sellerObjectId) => !excludedSellerIds.some((excludedId) => excludedId.equals(sellerObjectId))) }
+    : { $nin: excludedSellerIds };
+}
+
+function applyOrderMarketplaceFilter(match, marketplace) {
+  if (!marketplace) {
+    return;
+  }
+
+  if (marketplace === 'EBAY_CA' || marketplace === 'EBAY_ENCA') {
+    match.purchaseMarketplaceId = { $in: ['EBAY_CA', 'EBAY_ENCA'] };
+    return;
+  }
+
+  if (marketplace === 'GB' || marketplace === 'EBAY_GB') {
+    match.purchaseMarketplaceId = { $in: ['GB', 'EBAY_GB'] };
+    return;
+  }
+
+  match.purchaseMarketplaceId = marketplace;
+}
+
+async function buildOrdersCrpMatch({ startDate, endDate, sellerId, marketplace, excludeClient, excludeLowValue }) {
+  const match = {};
+
+  if (startDate || endDate) {
+    match.dateSold = {};
+    if (startDate) match.dateSold.$gte = getPTDayBoundsUTC(startDate).start;
+    if (endDate) match.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
+  }
+
+  const sellerObjectId = normalizeObjectIdOrNull(sellerId, 'sellerId');
+  if (sellerObjectId) {
+    match.seller = sellerObjectId;
+  }
+
+  await applyExcludedClientFilter(match, 'seller', excludeClient);
+  applyOrderMarketplaceFilter(match, marketplace);
+
+  if (excludeLowValue === 'true') {
+    match.$or = [{ subtotalUSD: { $gte: 3 } }, { subtotal: { $gte: 3 } }];
+  }
+
+  return match;
+}
+
+async function buildListingsCrpMatch({ startDate, endDate, sellerId, excludeClient }) {
+  const match = { deletedAt: null };
+
+  if (startDate || endDate) {
+    match.createdAt = {};
+    if (startDate) match.createdAt.$gte = getPTDayBoundsUTC(startDate).start;
+    if (endDate) match.createdAt.$lte = getPTDayBoundsUTC(endDate).end;
+  }
+
+  const sellerObjectId = normalizeObjectIdOrNull(sellerId, 'sellerId');
+  if (sellerObjectId) {
+    match.sellerId = sellerObjectId;
+  }
+
+  await applyExcludedClientFilter(match, 'sellerId', excludeClient);
+
+  return match;
+}
+
+function stringifyObjectId(value) {
+  return value ? String(value) : null;
+}
+
+function buildCrpKey(categoryId, rangeId, productId) {
+  return [categoryId || 'null', rangeId || 'null', productId || 'null'].join('::');
+}
+
+function normalizeComparisonRow(row, side) {
+  const categoryId = stringifyObjectId(row.categoryId);
+  const rangeId = stringifyObjectId(row.rangeId);
+  const productId = stringifyObjectId(row.productId);
+
+  return {
+    key: buildCrpKey(categoryId, rangeId, productId),
+    categoryId,
+    rangeId,
+    productId,
+    categoryName: row.categoryName || 'Unassigned',
+    rangeName: row.rangeName || null,
+    productName: row.productName || null,
+    [side]: {
+      count: row.count || 0,
+      previews: row.previews || [],
+    },
+  };
+}
+
+function mergeComparisonRows(listingRows, orderRows) {
+  const merged = new Map();
+
+  const upsert = (row, side) => {
+    const normalized = normalizeComparisonRow(row, side);
+    const existing = merged.get(normalized.key) || {
+      key: normalized.key,
+      categoryId: normalized.categoryId,
+      rangeId: normalized.rangeId,
+      productId: normalized.productId,
+      categoryName: normalized.categoryName,
+      rangeName: normalized.rangeName,
+      productName: normalized.productName,
+      listings: { count: 0, previews: [] },
+      orders: { count: 0, previews: [] },
+    };
+
+    existing.categoryName = existing.categoryName || normalized.categoryName;
+    existing.rangeName = existing.rangeName || normalized.rangeName;
+    existing.productName = existing.productName || normalized.productName;
+    existing[side] = normalized[side];
+
+    merged.set(normalized.key, existing);
+  };
+
+  listingRows.forEach((row) => upsert(row, 'listings'));
+  orderRows.forEach((row) => upsert(row, 'orders'));
+
+  return Array.from(merged.values())
+    .map((row) => ({
+      ...row,
+      gap: row.orders.count - row.listings.count,
+      absGap: Math.abs(row.orders.count - row.listings.count),
+    }))
+    .sort((left, right) => {
+      if (right.absGap !== left.absGap) return right.absGap - left.absGap;
+      const rightTotal = right.orders.count + right.listings.count;
+      const leftTotal = left.orders.count + left.listings.count;
+      if (rightTotal !== leftTotal) return rightTotal - leftTotal;
+      return `${left.categoryName}|${left.rangeName || ''}|${left.productName || ''}`
+        .localeCompare(`${right.categoryName}|${right.rangeName || ''}|${right.productName || ''}`);
+    });
+}
+
+function getChartBucket(row, level) {
+  if (level === 'range') {
+    return {
+      id: row.rangeId || `range:${row.categoryId || 'null'}:unassigned`,
+      name: row.rangeName || `Unassigned (${row.categoryName || 'No Category'})`,
+    };
+  }
+
+  if (level === 'product') {
+    return {
+      id: row.productId || `product:${row.rangeId || row.categoryId || 'null'}:unassigned`,
+      name: row.productName || `Unassigned (${row.rangeName || row.categoryName || 'No CRP'})`,
+    };
+  }
+
+  return {
+    id: row.categoryId || 'category:unassigned',
+    name: row.categoryName || 'Unassigned',
+  };
+}
+
+function buildChartData(rows, side, level) {
+  const buckets = new Map();
+
+  rows.forEach((row) => {
+    const count = row[side]?.count || 0;
+    if (!count) return;
+
+    const bucket = getChartBucket(row, level);
+    const key = `${level}:${bucket.id}`;
+    const current = buckets.get(key) || { id: bucket.id, name: bucket.name, count: 0 };
+    current.count += count;
+    buckets.set(key, current);
+  });
+
+  return Array.from(buckets.values())
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 12);
+}
+
+async function getOrderComparisonRows(match) {
+  return Order.aggregate([
+    { $match: match },
+    {
+      $lookup: {
+        from: 'asinlistcategories',
+        localField: 'orderCategoryId',
+        foreignField: '_id',
+        as: 'categoryDoc'
+      }
+    },
+    {
+      $lookup: {
+        from: 'asinlistranges',
+        localField: 'orderRangeId',
+        foreignField: '_id',
+        as: 'rangeDoc'
+      }
+    },
+    {
+      $lookup: {
+        from: 'asinlistproducts',
+        localField: 'orderProductId',
+        foreignField: '_id',
+        as: 'productDoc'
+      }
+    },
+    { $sort: { dateSold: -1 } },
+    {
+      $group: {
+        _id: {
+          categoryId: { $ifNull: ['$orderCategoryId', null] },
+          rangeId: { $ifNull: ['$orderRangeId', null] },
+          productId: { $ifNull: ['$orderProductId', null] },
+        },
+        categoryName: {
+          $first: {
+            $cond: [
+              { $eq: ['$orderCategoryId', null] },
+              'Unassigned',
+              { $ifNull: [{ $arrayElemAt: ['$categoryDoc.name', 0] }, 'Unassigned'] }
+            ]
+          }
+        },
+        rangeName: { $first: { $ifNull: [{ $arrayElemAt: ['$rangeDoc.name', 0] }, null] } },
+        productName: { $first: { $ifNull: [{ $arrayElemAt: ['$productDoc.name', 0] }, null] } },
+        count: { $sum: 1 },
+        previews: {
+          $push: {
+            id: '$_id',
+            orderId: '$orderId',
+            dateSold: '$dateSold',
+            productName: '$productName',
+            amount: { $ifNull: ['$subtotalUSD', '$subtotal'] }
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        categoryId: '$_id.categoryId',
+        rangeId: '$_id.rangeId',
+        productId: '$_id.productId',
+        categoryName: 1,
+        rangeName: 1,
+        productName: 1,
+        count: 1,
+        previews: { $slice: ['$previews', 3] }
+      }
+    },
+    { $sort: { count: -1, categoryName: 1, rangeName: 1, productName: 1 } }
+  ]);
+}
+
+async function getListingComparisonRows(match) {
+  return TemplateListing.aggregate([
+    { $match: match },
+    {
+      $lookup: {
+        from: 'listingtemplates',
+        localField: 'templateId',
+        foreignField: '_id',
+        as: 'templateDoc'
+      }
+    },
+    { $unwind: { path: '$templateDoc', preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: 'asinlistproducts',
+        localField: 'templateDoc.listProductId',
+        foreignField: '_id',
+        as: 'productDoc'
+      }
+    },
+    {
+      $addFields: {
+        productDocObj: { $arrayElemAt: ['$productDoc', 0] },
+        derivedProductId: { $ifNull: ['$templateDoc.listProductId', null] }
+      }
+    },
+    {
+      $addFields: {
+        derivedRangeId: { $ifNull: ['$productDocObj.rangeId', '$templateDoc.rangeId'] }
+      }
+    },
+    {
+      $lookup: {
+        from: 'asinlistranges',
+        localField: 'derivedRangeId',
+        foreignField: '_id',
+        as: 'rangeDoc'
+      }
+    },
+    {
+      $addFields: {
+        rangeDocObj: { $arrayElemAt: ['$rangeDoc', 0] },
+        derivedCategoryId: {
+          $ifNull: ['$productDocObj.categoryId', { $arrayElemAt: ['$rangeDoc.categoryId', 0] }]
+        }
+      }
+    },
+    {
+      $lookup: {
+        from: 'asinlistcategories',
+        localField: 'derivedCategoryId',
+        foreignField: '_id',
+        as: 'categoryDoc'
+      }
+    },
+    { $sort: { createdAt: -1 } },
+    {
+      $group: {
+        _id: {
+          categoryId: { $ifNull: ['$derivedCategoryId', null] },
+          rangeId: { $ifNull: ['$derivedRangeId', null] },
+          productId: { $ifNull: ['$derivedProductId', null] },
+        },
+        categoryName: {
+          $first: {
+            $cond: [
+              { $eq: ['$derivedCategoryId', null] },
+              'Unassigned',
+              { $ifNull: [{ $arrayElemAt: ['$categoryDoc.name', 0] }, 'Unassigned'] }
+            ]
+          }
+        },
+        rangeName: { $first: { $ifNull: ['$rangeDocObj.name', null] } },
+        productName: { $first: { $ifNull: ['$productDocObj.name', null] } },
+        count: { $sum: 1 },
+        previews: {
+          $push: {
+            id: '$_id',
+            customLabel: '$customLabel',
+            asin: '$_asinReference',
+            title: '$title',
+            createdAt: '$createdAt',
+            status: '$status'
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        categoryId: '$_id.categoryId',
+        rangeId: '$_id.rangeId',
+        productId: '$_id.productId',
+        categoryName: 1,
+        rangeName: 1,
+        productName: 1,
+        count: 1,
+        previews: { $slice: ['$previews', 3] }
+      }
+    },
+    { $sort: { count: -1, categoryName: 1, rangeName: 1, productName: 1 } }
+  ]);
+}
+
 async function getCurrentNonCompliantSellerSet(optionalSellerId) {
   const { windowStart, calculationEnd } = getCurrentAccountHealthWindow();
   const sellerMatch = optionalSellerId ? { seller: new mongoose.Types.ObjectId(optionalSellerId) } : {};
@@ -159,6 +557,36 @@ async function getCurrentNonCompliantSellerSet(optionalSellerId) {
   return nonCompliant;
 }
 
+/**
+ * @swagger
+ * tags:
+ *   name: Orders
+ *   description: Order analytics, dashboard summaries, and reporting
+ */
+
+/**
+ * @swagger
+ * /orders/dashboard/monthly-delta:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Monthly order delta — current vs previous month comparison
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns aggregated order metrics for the current and previous month side-by-side,
+ *       allowing the dashboard to show delta (change) values.
+ *       Supports optional `sellerId` and `excludeLowValue` filters.
+ *       **Requires OrdersDashboard page access.**
+ *     parameters:
+ *       - { in: query, name: month, schema: { type: string, example: "2026-05" }, description: "YYYY-MM (defaults to current PT month)" }
+ *       - { in: query, name: sellerId, schema: { type: string }, description: MongoDB ObjectId of seller }
+ *       - { in: query, name: excludeLowValue, schema: { type: string, enum: ['true','false'], default: 'false' } }
+ *     responses:
+ *       200:
+ *         description: Monthly delta data
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/dashboard/monthly-delta', requireAuth, requirePageAccess('OrdersDashboard'), async (req, res) => {
   try {
     const month = req.query.month || getPtDateString(new Date()).slice(0, 7);
@@ -229,6 +657,28 @@ router.get('/dashboard/monthly-delta', requireAuth, requirePageAccess('OrdersDas
   }
 });
 
+/**
+ * @swagger
+ * /orders/dashboard/overview:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Daily orders dashboard overview
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns today's order counts, revenue totals, and a seller breakdown for the given date.
+ *       Used by the OrdersDepartmentDashboard page.
+ *       **Requires OrdersDashboard page access.**
+ *     parameters:
+ *       - { in: query, name: date, schema: { type: string, format: date, example: "2026-05-17" }, description: "PT date (defaults to today)" }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: excludeLowValue, schema: { type: string, enum: ['true','false'], default: 'false' } }
+ *     responses:
+ *       200:
+ *         description: Dashboard overview data
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboard'), async (req, res) => {
   try {
     const date = req.query.date || getPtDateString(new Date());
@@ -410,9 +860,33 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
 });
 
 // Get daily order statistics for all sellers
+/**
+ * @swagger
+ * /orders/daily-statistics:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Day-by-day order statistics across a date range
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns per-day order counts and revenue for use in the Order Analytics charts.
+ *       Supports seller, marketplace, date range, and low-value exclusion filters.
+ *       **Requires OrderAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: marketplace, schema: { type: string } }
+ *       - { in: query, name: excludeLowValue, schema: { type: string, enum: ['true','false'] } }
+ *     responses:
+ *       200:
+ *         description: Array of daily stat objects
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, marketplace } = req.query;
+    const { startDate, endDate, sellerId, marketplace, excludeClient } = req.query;
 
     // Build the query - NO CANCELSTATE FILTER (matches FulfillmentDashboard)
     const query = {};
@@ -434,6 +908,15 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
     // Add seller filter if provided
     if (sellerId) {
       query.seller = new mongoose.Types.ObjectId(sellerId);
+    }
+
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        query.seller = query.seller
+          ? { $in: [query.seller].filter((sellerObjectId) => !excludedSellerIds.some((excludedId) => excludedId.equals(sellerObjectId))) }
+          : { $nin: excludedSellerIds };
+      }
     }
 
     if (marketplace) {
@@ -537,26 +1020,357 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
   }
 });
 
+/**
+ * @swagger
+ * /orders/legacy-item-seller-summary:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Per-seller summary for legacy item orders
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Aggregates order counts and issue flags per seller for the LegacyItemAnalytics page.
+ *       **Requires LegacyItemAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Array of per-seller summary objects
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
+router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('LegacyItemAnalytics'), async (req, res) => {
+  try {
+    const {
+      legacyItemId,
+      startDate,
+      endDate,
+      sellerId,
+      paymentStatus,
+      cancelledFilter,
+      ebayMotors = 'false',
+      excludeClient = 'true',
+      excludeLowValue = 'false'
+    } = req.query;
+
+    if (!startDate && !endDate) {
+      return res.status(400).json({ error: 'Select a single date or a date range first' });
+    }
+
+    const normalizedLegacyItemId = String(legacyItemId || '').trim();
+    const match = await buildOrdersCrpMatch({
+      startDate,
+      endDate,
+      sellerId,
+      excludeClient,
+      excludeLowValue
+    });
+
+    if (paymentStatus) {
+      match.orderPaymentStatus = paymentStatus;
+    }
+
+    if (cancelledFilter === 'cancelled') {
+      match.$and = match.$and || [];
+      match.$and.push({
+        $or: [
+          { cancelState: { $in: FINAL_CANCELLED_STATES } },
+          { 'cancelStatus.cancelState': { $in: FINAL_CANCELLED_STATES } }
+        ]
+      });
+    } else if (cancelledFilter === 'not_cancelled') {
+      match.$and = match.$and || [];
+      match.$and.push(
+        {
+          $or: [
+            { cancelState: { $exists: false } },
+            { cancelState: null },
+            { cancelState: { $nin: FINAL_CANCELLED_STATES } }
+          ]
+        },
+        {
+          $or: [
+            { 'cancelStatus.cancelState': { $exists: false } },
+            { 'cancelStatus.cancelState': null },
+            { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
+          ]
+        }
+      );
+    }
+
+    const itemMatch = {
+      'lineItems.legacyItemId': { $nin: [null, ''] }
+    };
+
+    if (normalizedLegacyItemId) {
+      itemMatch['lineItems.legacyItemId'] = normalizedLegacyItemId;
+    }
+
+    if (ebayMotors === 'true') {
+      itemMatch['lineItems.listingMarketplaceId'] = 'EBAY_MOTORS_US';
+    }
+
+    const [groupedRows, overallOrderCounts] = await Promise.all([
+      Order.aggregate([
+        { $match: match },
+        { $unwind: '$lineItems' },
+        { $match: itemMatch },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: 'seller',
+            foreignField: '_id',
+            as: 'sellerInfo'
+          }
+        },
+        {
+          $unwind: {
+            path: '$sellerInfo',
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'sellerInfo.user',
+            foreignField: '_id',
+            as: 'userInfo'
+          }
+        },
+        {
+          $unwind: {
+            path: '$userInfo',
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $project: {
+            orderId: '$orderId',
+            legacyItemId: '$lineItems.legacyItemId',
+            productTitle: { $ifNull: ['$lineItems.title', '$productName'] },
+            sellerId: '$seller',
+            sellerUsername: { $ifNull: ['$userInfo.username', 'Unknown Seller'] },
+            isCancelled: {
+              $or: [
+                { $in: ['$cancelState', FINAL_CANCELLED_STATES] },
+                { $in: ['$cancelStatus.cancelState', FINAL_CANCELLED_STATES] }
+              ]
+            },
+            isPartiallyRefunded: { $eq: ['$orderPaymentStatus', 'PARTIALLY_REFUNDED'] },
+            isFullyRefunded: { $eq: ['$orderPaymentStatus', 'FULLY_REFUNDED'] }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              orderId: '$orderId',
+              legacyItemId: '$legacyItemId',
+              sellerId: '$sellerId',
+              sellerUsername: '$sellerUsername'
+            },
+            productTitle: {
+              $first: '$productTitle'
+            },
+            isCancelled: {
+              $max: { $cond: ['$isCancelled', 1, 0] }
+            },
+            isPartiallyRefunded: {
+              $max: { $cond: ['$isPartiallyRefunded', 1, 0] }
+            },
+            isFullyRefunded: {
+              $max: { $cond: ['$isFullyRefunded', 1, 0] }
+            }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              legacyItemId: '$_id.legacyItemId',
+              sellerId: '$_id.sellerId',
+              sellerUsername: '$_id.sellerUsername'
+            },
+            totalOrders: { $sum: 1 },
+            cancelledOrders: { $sum: '$isCancelled' },
+            partiallyRefundedOrders: { $sum: '$isPartiallyRefunded' },
+            fullyRefundedOrders: { $sum: '$isFullyRefunded' },
+            productTitles: { $push: '$productTitle' }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            legacyItemId: '$_id.legacyItemId',
+            sellerId: '$_id.sellerId',
+            sellerUsername: '$_id.sellerUsername',
+            totalOrders: 1,
+            cancelledOrders: 1,
+            partiallyRefundedOrders: 1,
+            fullyRefundedOrders: 1,
+            productTitle: {
+              $let: {
+                vars: {
+                  titles: {
+                    $filter: {
+                      input: '$productTitles',
+                      as: 'title',
+                      cond: {
+                        $and: [
+                          { $ne: ['$$title', null] },
+                          { $ne: ['$$title', ''] }
+                        ]
+                      }
+                    }
+                  }
+                },
+                in: {
+                  $ifNull: [
+                    { $arrayElemAt: ['$$titles', 0] },
+                    ''
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          $sort: {
+            legacyItemId: 1,
+            totalOrders: -1,
+            sellerUsername: 1
+          }
+        }
+      ]),
+      Order.aggregate([
+        { $match: match },
+        { $unwind: '$lineItems' },
+        { $match: itemMatch },
+        {
+          $group: {
+            _id: '$orderId'
+          }
+        },
+        {
+          $count: 'totalOrders'
+        }
+      ])
+    ]);
+
+    const itemMap = new Map();
+    const overallTotals = {
+      totalOrders: overallOrderCounts[0]?.totalOrders || 0,
+      cancelledOrders: 0,
+      partiallyRefundedOrders: 0,
+      fullyRefundedOrders: 0,
+    };
+
+    groupedRows.forEach((row) => {
+      overallTotals.cancelledOrders += row.cancelledOrders || 0;
+      overallTotals.partiallyRefundedOrders += row.partiallyRefundedOrders || 0;
+      overallTotals.fullyRefundedOrders += row.fullyRefundedOrders || 0;
+
+      const existingItem = itemMap.get(row.legacyItemId) || {
+        legacyItemId: row.legacyItemId,
+        productTitle: row.productTitle || '',
+        totalOrders: 0,
+        cancelledOrders: 0,
+        partiallyRefundedOrders: 0,
+        fullyRefundedOrders: 0,
+        sellerCount: 0,
+        sellers: []
+      };
+
+      existingItem.totalOrders += row.totalOrders || 0;
+      existingItem.cancelledOrders += row.cancelledOrders || 0;
+      existingItem.partiallyRefundedOrders += row.partiallyRefundedOrders || 0;
+      existingItem.fullyRefundedOrders += row.fullyRefundedOrders || 0;
+      if (!existingItem.productTitle && row.productTitle) {
+        existingItem.productTitle = row.productTitle;
+      }
+      existingItem.sellers.push(row);
+      existingItem.sellerCount = existingItem.sellers.length;
+
+      itemMap.set(row.legacyItemId, existingItem);
+    });
+
+    const items = Array.from(itemMap.values()).sort((left, right) => {
+      if (right.totalOrders !== left.totalOrders) {
+        return right.totalOrders - left.totalOrders;
+      }
+
+      return left.legacyItemId.localeCompare(right.legacyItemId);
+    });
+
+    res.json({
+      filters: {
+        startDate: startDate || null,
+        endDate: endDate || null,
+        sellerId: sellerId || null,
+        legacyItemId: normalizedLegacyItemId || null,
+        paymentStatus: paymentStatus || null,
+        cancelledFilter: cancelledFilter || null,
+        ebayMotors: ebayMotors === 'true',
+      },
+      itemCount: items.length,
+      ...overallTotals,
+      items
+    });
+  } catch (error) {
+    console.error('Error fetching legacy item seller summary:', error);
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to fetch legacy item seller summary' });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CRP Analytics  GET /orders/crp-analytics
 // Groups orders by Category, Range, or Product and returns counts.
-// Query params: startDate, endDate, sellerId, groupBy (category|range|product),
-//               excludeLowValue (true/false)
+// Query params: startDate, endDate, sellerId, marketplace, groupBy (category|range|product),
+//               excludeClient, excludeLowValue (true/false)
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /orders/crp-analytics:
+ *   get:
+ *     tags: [Orders]
+ *     summary: CRP (Category / Range / Product) order analytics
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Groups orders by Category, Range, or Product and returns counts and revenue.
+ *       **Requires CRPAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: marketplace, schema: { type: string } }
+ *       - { in: query, name: groupBy, schema: { type: string, enum: [category, range, product], default: category } }
+ *       - { in: query, name: excludeClient, schema: { type: string, enum: ['true','false'] } }
+ *       - { in: query, name: excludeLowValue, schema: { type: string, enum: ['true','false'] } }
+ *     responses:
+ *       200:
+ *         description: Grouped CRP analytics data
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, groupBy = 'category', excludeLowValue } = req.query;
+    const { startDate, endDate, sellerId, marketplace, groupBy = 'category', excludeClient, excludeLowValue, categoryId, rangeId } = req.query;
 
-    const match = {};
+    const match = await buildOrdersCrpMatch({
+      startDate,
+      endDate,
+      sellerId,
+      marketplace,
+      excludeClient,
+      excludeLowValue,
+    });
 
-    if (startDate || endDate) {
-      match.dateSold = {};
-      if (startDate) match.dateSold.$gte = getPTDayBoundsUTC(startDate).start;
-      if (endDate) match.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
-    }
-
-    if (sellerId) match.seller = new mongoose.Types.ObjectId(sellerId);
-    if (excludeLowValue === 'true') match.$or = [{ subtotalUSD: { $gte: 3 } }, { subtotal: { $gte: 3 } }];
+    // Drill-down filters: narrow to orders within a specific category or range
+    const categoryObjId = normalizeObjectIdOrNull(categoryId, 'categoryId');
+    if (categoryObjId) match.orderCategoryId = categoryObjId;
+    const rangeObjId = normalizeObjectIdOrNull(rangeId, 'rangeId');
+    if (rangeObjId) match.orderRangeId = rangeObjId;
 
     // Determine which field and lookup collection to use
     const groupFieldMap = {
@@ -566,52 +1380,422 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
     };
     const { field, from } = groupFieldMap[groupBy] || groupFieldMap.category;
 
+    const effectiveSubtotal = { $ifNull: ['$subtotalUSD', '$subtotal'] };
+
     const pipeline = [
       { $match: match },
       {
-        $group: {
-          _id: { $ifNull: [`$${field}`, null] },
-          count: { $sum: 1 },
-        }
-      },
-      {
-        $lookup: {
-          from,
-          localField: '_id',
-          foreignField: '_id',
-          as: 'taxDoc'
-        }
-      },
-      {
-        $project: {
-          _id: 1,
-          count: 1,
-          name: {
-            $cond: {
-              if: { $eq: ['$_id', null] },
-              then: 'Unassigned',
-              else: { $arrayElemAt: ['$taxDoc.name', 0] }
+        $facet: {
+          grouped: [
+            {
+              $group: {
+                _id: { $ifNull: [`$${field}`, null] },
+                count: { $sum: 1 },
+              }
+            },
+            {
+              $lookup: {
+                from,
+                localField: '_id',
+                foreignField: '_id',
+                as: 'taxDoc'
+              }
+            },
+            {
+              $project: {
+                _id: 1,
+                count: 1,
+                name: {
+                  $cond: {
+                    if: { $eq: ['$_id', null] },
+                    then: 'Unassigned',
+                    else: { $arrayElemAt: ['$taxDoc.name', 0] }
+                  }
+                }
+              }
+            },
+            { $sort: { count: -1 } }
+          ],
+          ticketTiers: [
+            {
+              $group: {
+                _id: {
+                  $switch: {
+                    branches: [
+                      { case: { $lt: [effectiveSubtotal, 30] }, then: 'low' },
+                      { case: { $lt: [effectiveSubtotal, 60] }, then: 'mid' },
+                      { case: { $lt: [effectiveSubtotal, 100] }, then: 'high' },
+                    ],
+                    default: 'extra_high',
+                  },
+                },
+                count: { $sum: 1 },
+              }
             }
-          }
+          ],
         }
-      },
-      { $sort: { count: -1 } }
+      }
     ];
 
-    const results = await Order.aggregate(pipeline);
+    const [facetResult] = await Order.aggregate(pipeline);
+    const grouped = facetResult?.grouped ?? [];
+    const tierMap = Object.fromEntries((facetResult?.ticketTiers ?? []).map(t => [t._id, t.count]));
 
-    res.json(results.map(r => ({
-      id: r._id ? r._id.toString() : null,
-      name: r.name || 'Unassigned',
-      count: r.count,
-    })));
+    const ticketTiers = {
+      low: tierMap.low ?? 0,
+      mid: tierMap.mid ?? 0,
+      high: tierMap.high ?? 0,
+      extra_high: tierMap.extra_high ?? 0,
+    };
+
+    res.json({
+      items: grouped.map(r => ({
+        id: r._id ? r._id.toString() : null,
+        name: r.name || 'Unassigned',
+        count: r.count,
+      })),
+      ticketTiers,
+    });
   } catch (error) {
     console.error('Error fetching CRP analytics:', error);
     res.status(500).json({ error: 'Failed to fetch CRP analytics' });
   }
 });
 
+// CRP comparison summary for listings vs orders
+/**
+ * @swagger
+ * /orders/crp-comparison:
+ *   get:
+ *     tags: [Orders]
+ *     summary: CRP comparison — listings vs orders summary
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns a side-by-side summary of listing counts vs order counts grouped by CRP path.
+ *       Used by the CRPComparisonPage.
+ *       **Requires CRPComparison page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: CRP comparison summary
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
+router.get('/crp-comparison', requireAuth, requirePageAccess('CRPComparison'), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      ordersStartDate,
+      ordersEndDate,
+      listingsStartDate,
+      listingsEndDate,
+      excludeClient,
+      excludeLowValue,
+      chartLevel = 'category'
+    } = req.query;
+
+    const safeChartLevel = ['category', 'range', 'product'].includes(chartLevel)
+      ? chartLevel
+      : 'category';
+
+    const orderMatch = await buildOrdersCrpMatch({
+      startDate: ordersStartDate,
+      endDate: ordersEndDate,
+      sellerId,
+      excludeClient,
+      excludeLowValue,
+    });
+
+    const listingMatch = await buildListingsCrpMatch({
+      startDate: listingsStartDate,
+      endDate: listingsEndDate,
+      sellerId,
+      excludeClient,
+    });
+
+    const [listingRows, orderRows] = await Promise.all([
+      getListingComparisonRows(listingMatch),
+      getOrderComparisonRows(orderMatch),
+    ]);
+
+    const rows = mergeComparisonRows(listingRows, orderRows);
+    const listingCrps = rows.filter((row) => row.listings.count > 0).length;
+    const orderCrps = rows.filter((row) => row.orders.count > 0).length;
+    const matchedCrps = rows.filter((row) => row.listings.count > 0 && row.orders.count > 0).length;
+    const listingOnlyCrps = rows.filter((row) => row.listings.count > 0 && row.orders.count === 0).length;
+    const orderOnlyCrps = rows.filter((row) => row.orders.count > 0 && row.listings.count === 0).length;
+    const largestGapRow = rows[0] || null;
+
+    res.json({
+      summary: {
+        listingsTotal: rows.reduce((sum, row) => sum + row.listings.count, 0),
+        ordersTotal: rows.reduce((sum, row) => sum + row.orders.count, 0),
+        listingCrps,
+        orderCrps,
+        matchedCrps,
+        listingOnlyCrps,
+        orderOnlyCrps,
+        largestGap: largestGapRow
+          ? {
+            count: largestGapRow.absGap,
+            categoryName: largestGapRow.categoryName,
+            rangeName: largestGapRow.rangeName,
+            productName: largestGapRow.productName,
+          }
+          : null,
+      },
+      rows,
+      chartLevel: safeChartLevel,
+      listingsChart: buildChartData(rows, 'listings', safeChartLevel),
+      ordersChart: buildChartData(rows, 'orders', safeChartLevel),
+    });
+  } catch (error) {
+    console.error('Error fetching CRP comparison summary:', error);
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to fetch CRP comparison summary' });
+  }
+});
+
+// CRP comparison detail drill-down for one side and one CRP path
+/**
+ * @swagger
+ * /orders/crp-comparison-details:
+ *   get:
+ *     tags: [Orders]
+ *     summary: CRP comparison detail drill-down
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns the individual orders or listings for a specific CRP path (category/range/product).
+ *       Used when the user clicks a row in the CRPComparisonPage.
+ *       **Requires CRPComparison page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: side, schema: { type: string, enum: [orders, listings] } }
+ *       - { in: query, name: category, schema: { type: string } }
+ *       - { in: query, name: range, schema: { type: string } }
+ *       - { in: query, name: product, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Drill-down detail records
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
+router.get('/crp-comparison-details', requireAuth, requirePageAccess('CRPComparison'), async (req, res) => {
+  try {
+    const {
+      side,
+      sellerId,
+      ordersStartDate,
+      ordersEndDate,
+      listingsStartDate,
+      listingsEndDate,
+      excludeClient,
+      excludeLowValue,
+      categoryId,
+      rangeId,
+      productId,
+      page = 1,
+      limit = 10,
+    } = req.query;
+
+    const safePage = Math.max(parseInt(page, 10) || 1, 1);
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 50);
+    const skip = (safePage - 1) * safeLimit;
+
+    const pathMatch = {
+      categoryId: normalizeObjectIdOrNull(categoryId, 'categoryId'),
+      rangeId: normalizeObjectIdOrNull(rangeId, 'rangeId'),
+      productId: normalizeObjectIdOrNull(productId, 'productId'),
+    };
+
+    if (side === 'orders') {
+      const match = await buildOrdersCrpMatch({
+        startDate: ordersStartDate,
+        endDate: ordersEndDate,
+        sellerId,
+        excludeClient,
+        excludeLowValue,
+      });
+
+      match.orderCategoryId = pathMatch.categoryId;
+      match.orderRangeId = pathMatch.rangeId;
+      match.orderProductId = pathMatch.productId;
+
+      const result = await Order.aggregate([
+        { $match: match },
+        { $sort: { dateSold: -1 } },
+        {
+          $facet: {
+            items: [
+              { $skip: skip },
+              { $limit: safeLimit },
+              {
+                $project: {
+                  _id: 1,
+                  orderId: 1,
+                  dateSold: 1,
+                  productName: 1,
+                  amount: { $ifNull: ['$subtotalUSD', '$subtotal'] }
+                }
+              }
+            ],
+            total: [{ $count: 'count' }]
+          }
+        }
+      ]);
+
+      const payload = result[0] || { items: [], total: [] };
+      const total = payload.total[0]?.count || 0;
+
+      return res.json({
+        side,
+        items: payload.items,
+        pagination: {
+          page: safePage,
+          limit: safeLimit,
+          total,
+          pages: Math.ceil(total / safeLimit)
+        }
+      });
+    }
+
+    if (side === 'listings') {
+      const match = await buildListingsCrpMatch({
+        startDate: listingsStartDate,
+        endDate: listingsEndDate,
+        sellerId,
+        excludeClient,
+      });
+
+      const result = await TemplateListing.aggregate([
+        { $match: match },
+        {
+          $lookup: {
+            from: 'listingtemplates',
+            localField: 'templateId',
+            foreignField: '_id',
+            as: 'templateDoc'
+          }
+        },
+        { $unwind: { path: '$templateDoc', preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: 'asinlistproducts',
+            localField: 'templateDoc.listProductId',
+            foreignField: '_id',
+            as: 'productDoc'
+          }
+        },
+        {
+          $addFields: {
+            productDocObj: { $arrayElemAt: ['$productDoc', 0] },
+            derivedProductId: { $ifNull: ['$templateDoc.listProductId', null] }
+          }
+        },
+        {
+          $addFields: {
+            derivedRangeId: { $ifNull: ['$productDocObj.rangeId', '$templateDoc.rangeId'] }
+          }
+        },
+        {
+          $lookup: {
+            from: 'asinlistranges',
+            localField: 'derivedRangeId',
+            foreignField: '_id',
+            as: 'rangeDoc'
+          }
+        },
+        {
+          $addFields: {
+            rangeDocObj: { $arrayElemAt: ['$rangeDoc', 0] },
+            derivedCategoryId: {
+              $ifNull: ['$productDocObj.categoryId', { $arrayElemAt: ['$rangeDoc.categoryId', 0] }]
+            }
+          }
+        },
+        {
+          $match: {
+            derivedCategoryId: pathMatch.categoryId,
+            derivedRangeId: pathMatch.rangeId,
+            derivedProductId: pathMatch.productId,
+          }
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $facet: {
+            items: [
+              { $skip: skip },
+              { $limit: safeLimit },
+              {
+                $project: {
+                  _id: 1,
+                  customLabel: 1,
+                  asin: '$_asinReference',
+                  title: 1,
+                  createdAt: 1,
+                  status: 1,
+                }
+              }
+            ],
+            total: [{ $count: 'count' }]
+          }
+        }
+      ]);
+
+      const payload = result[0] || { items: [], total: [] };
+      const total = payload.total[0]?.count || 0;
+
+      return res.json({
+        side,
+        items: payload.items,
+        pagination: {
+          page: safePage,
+          limit: safeLimit,
+          total,
+          pages: Math.ceil(total / safeLimit)
+        }
+      });
+    }
+
+    return res.status(400).json({ error: 'side must be either orders or listings' });
+  } catch (error) {
+    console.error('Error fetching CRP comparison details:', error);
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to fetch CRP comparison details' });
+  }
+});
+
 // Get worksheet statistics for cancellations, returns, INR/disputes, and inquiries
+/**
+ * @swagger
+ * /orders/worksheet-statistics:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Worksheet statistics — cancellations, returns, INR, disputes, inquiries
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns detailed per-order worksheet records for the given date range and filters.
+ *       Used by the WorksheetPage table.
+ *       **Requires OrderAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: marketplace, schema: { type: string } }
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 50 } }
+ *     responses:
+ *       200:
+ *         description: Paginated worksheet records
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/worksheet-statistics', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId } = req.query;
@@ -841,6 +2025,30 @@ router.get('/worksheet-statistics', requireAuth, requirePageAccess('OrderAnalyti
 });
 
 // Worksheet summary for cards (totals + open counts + totalOrders) based on the same filter as worksheet-statistics
+/**
+ * @swagger
+ * /orders/worksheet-summary:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Worksheet summary card totals
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns aggregated totals for the worksheet summary cards: total orders,
+ *       cancellation count, return count, INR/dispute count, and open counts.
+ *       Uses the same filters as `/orders/worksheet-statistics`.
+ *       **Requires OrderAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: marketplace, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Summary card totals
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/worksheet-summary', requireAuth, requirePageAccess('OrderAnalytics'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId } = req.query;
@@ -1035,6 +2243,170 @@ router.get('/worksheet-summary', requireAuth, requirePageAccess('OrderAnalytics'
   } catch (error) {
     console.error('Error fetching worksheet summary:', error);
     res.status(500).json({ error: 'Failed to fetch worksheet summary' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy Item Order Drill-Down  GET /orders/legacy-item-orders
+// Returns individual orders for a specific legacyItemId + optional sellerId,
+// enriched with convoCategory, convoCaseStatus, and issue flags.
+// type: all | cancelled | partiallyRefunded | fullyRefunded
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /orders/legacy-item-orders:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Legacy item order drill-down
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns individual orders for a specific `legacyItemId`, enriched with
+ *       conversation category, case status, and issue flags (cancelled, refunded, etc.).
+ *       **Requires LegacyItemAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: legacyItemId, required: true, schema: { type: string } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: type, schema: { type: string, enum: [all, cancelled, partiallyRefunded, fullyRefunded], default: all } }
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *     responses:
+ *       200:
+ *         description: Array of enriched order records
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
+router.get('/legacy-item-orders', requireAuth, requirePageAccess('LegacyItemAnalytics'), async (req, res) => {
+  try {
+    const {
+      legacyItemId,
+      sellerId,
+      type = 'all',
+      startDate,
+      endDate,
+      ebayMotors = 'false',
+      excludeClient = 'true',
+      excludeLowValue = 'false',
+    } = req.query;
+
+    if (!legacyItemId) {
+      return res.status(400).json({ error: 'legacyItemId is required' });
+    }
+
+    const match = await buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeClient, excludeLowValue });
+
+    if (type === 'cancelled') {
+      match.$and = match.$and || [];
+      match.$and.push({
+        $or: [
+          { cancelState: { $in: FINAL_CANCELLED_STATES } },
+          { 'cancelStatus.cancelState': { $in: FINAL_CANCELLED_STATES } },
+        ],
+      });
+    } else if (type === 'partiallyRefunded') {
+      match.orderPaymentStatus = 'PARTIALLY_REFUNDED';
+    } else if (type === 'fullyRefunded') {
+      match.orderPaymentStatus = 'FULLY_REFUNDED';
+    }
+
+    const itemMatch = { 'lineItems.legacyItemId': legacyItemId };
+    if (ebayMotors === 'true') {
+      itemMatch['lineItems.listingMarketplaceId'] = 'EBAY_MOTORS_US';
+    }
+
+    const orders = await Order.aggregate([
+      { $match: match },
+      { $unwind: '$lineItems' },
+      { $match: itemMatch },
+      {
+        $group: {
+          _id: '$orderId',
+          buyerUsername: { $first: '$buyer.username' },
+          buyerName: { $first: '$buyer.buyerRegistrationAddress.fullName' },
+          shippingFullName: { $first: '$shippingFullName' },
+          legacyItemId: { $first: '$lineItems.legacyItemId' },
+          fulfillmentNotes: { $first: '$fulfillmentNotes' },
+          remark: { $first: '$remark' },
+          isCancelled: {
+            $max: {
+              $cond: [
+                {
+                  $or: [
+                    { $in: ['$cancelState', FINAL_CANCELLED_STATES] },
+                    { $in: ['$cancelStatus.cancelState', FINAL_CANCELLED_STATES] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          isPartiallyRefunded: { $max: { $cond: [{ $eq: ['$orderPaymentStatus', 'PARTIALLY_REFUNDED'] }, 1, 0] } },
+          isFullyRefunded: { $max: { $cond: [{ $eq: ['$orderPaymentStatus', 'FULLY_REFUNDED'] }, 1, 0] } },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          orderId: '$_id',
+          buyerUsername: 1,
+          buyerName: 1,
+          shippingFullName: 1,
+          legacyItemId: 1,
+          fulfillmentNotes: 1,
+          remark: 1,
+          isCancelled: 1,
+          isPartiallyRefunded: 1,
+          isFullyRefunded: 1,
+        },
+      },
+      { $sort: { orderId: 1 } },
+    ]);
+
+    const orderIds = orders.map((o) => o.orderId).filter(Boolean);
+
+    const [convMetas, cases, returns, disputes] = await Promise.all([
+      ConversationMeta.find({ orderId: { $in: orderIds } }, { orderId: 1, category: 1, caseStatus: 1, _id: 0 }).lean(),
+      Case.find({ orderId: { $in: orderIds } }, { orderId: 1, caseType: 1, status: 1, _id: 0 }).lean(),
+      Return.find({ orderId: { $in: orderIds } }, { orderId: 1, returnStatus: 1, _id: 0 }).lean(),
+      PaymentDispute.find({ orderId: { $in: orderIds } }, { orderId: 1, paymentDisputeStatus: 1, reason: 1, _id: 0 }).lean(),
+    ]);
+
+    const convoMetaMap = new Map(convMetas.map((m) => [m.orderId, m]));
+
+    const issuesMap = {};
+    cases.forEach((c) => {
+      if (!c.orderId) return;
+      issuesMap[c.orderId] = issuesMap[c.orderId] || [];
+      issuesMap[c.orderId].push({ type: c.caseType || 'INR', status: c.status });
+    });
+    returns.forEach((r) => {
+      if (!r.orderId) return;
+      issuesMap[r.orderId] = issuesMap[r.orderId] || [];
+      issuesMap[r.orderId].push({ type: 'Return', status: r.returnStatus });
+    });
+    disputes.forEach((d) => {
+      if (!d.orderId) return;
+      issuesMap[d.orderId] = issuesMap[d.orderId] || [];
+      issuesMap[d.orderId].push({ type: 'Dispute', status: d.paymentDisputeStatus, reason: d.reason });
+    });
+
+    const enriched = orders.map((order) => {
+      const convoMeta = convoMetaMap.get(order.orderId);
+      const rawIssues = issuesMap[order.orderId] || [];
+      const convoCaseStatus = convoMeta?.caseStatus || null;
+      return {
+        ...order,
+        convoCategory: convoMeta?.category || null,
+        convoCaseStatus,
+        issues: rawIssues.map((i) => ({ ...i, caseStatus: convoCaseStatus || 'Case Not Opened' })),
+      };
+    });
+
+    res.json({ orders: enriched, total: enriched.length });
+  } catch (error) {
+    console.error('Error fetching legacy item orders:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch legacy item orders' });
   }
 });
 

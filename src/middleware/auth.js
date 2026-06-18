@@ -7,7 +7,9 @@ export const PAGE_DEFAULT_ROLES = {
   // Order Fulfilment
   'OrdersDashboard': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'OrderAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'LegacyItemAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'CRPAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'CRPComparison': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'Fulfillment': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'AwaitingShipment': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'AwaitingSheet': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
@@ -29,6 +31,7 @@ export const PAGE_DEFAULT_ROLES = {
   'ManageTemplates': ['superadmin'],
   'ListingsDatabase': ['superadmin'],
   'SelectSeller': ['superadmin', 'lister', 'advancelister', 'trainee'],
+  'AsinPrecheck': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'SellerTemplates': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'TemplateListings': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'ListingDirectory': ['superadmin', 'lister', 'advancelister', 'trainee'],
@@ -38,10 +41,15 @@ export const PAGE_DEFAULT_ROLES = {
   'AsinLists': ['superadmin', 'productadmin'],
   'FeedUpload': ['superadmin', 'listingadmin', 'lister'],
   'FeedUploadStats': ['superadmin', 'listingadmin'],
+  'DailyListingComparison': ['superadmin', 'listingadmin'],
+  'ManualEndListing': ['superadmin', 'listingadmin'],
+  'SkuSellerOrderProfit': ['superadmin', 'listingadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'SellerUploadLimits': ['superadmin', 'listingadmin'],
   'CsvStorage': ['superadmin', 'listingadmin', 'lister'],
   'ProductResearch': ['superadmin', 'productadmin'],
 
   // Finance & Cash Flow
+  'MicroOrders': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'Payoneer': ['superadmin'],
   'BankAccounts': ['superadmin'],
   'Transactions': ['superadmin'],
@@ -65,6 +73,7 @@ export const PAGE_DEFAULT_ROLES = {
   'SellingPrivileges': ['superadmin', 'listingadmin'],
   'EbayApiUsage': ['superadmin', 'listingadmin'],
   'SellerFunds': ['superadmin', 'listingadmin'],
+  'SkuIndexSync': ['superadmin', 'listingadmin'],
 
   // HR & Management
   'IdeasAndIssues': ['superadmin', 'hradmin', 'operationhead', 'listingadmin'],
@@ -73,6 +82,9 @@ export const PAGE_DEFAULT_ROLES = {
   'EmployeeManagement': ['superadmin', 'hradmin'],
   'AddUser': ['superadmin', 'listingadmin', 'hradmin', 'operationhead'],
   'UserSellerAssignments': ['superadmin', 'hradmin', 'hr'],
+  'UserCategoryTargets': ['superadmin', 'hradmin', 'hr'],
+  'UserListingPerformance': ['superadmin', 'hradmin', 'hr'],
+  'Meetings': ['superadmin', 'productadmin', 'listingadmin', 'lister', 'advancelister', 'compatibilityadmin', 'compatibilityeditor', 'fulfillmentadmin', 'hradmin', 'hr', 'operationhead', 'trainee', 'hoc', 'compliancemanager'],
   'ViewAllMessages': ['superadmin'],
   'Attendance': ['superadmin'],
   'PageAccessManagement': ['superadmin'],
@@ -92,9 +104,6 @@ export const PAGE_DEFAULT_ROLES = {
   'StoreDailyTasks': ['superadmin', 'listingadmin'],
   'ListerInfo': ['superadmin', 'listingadmin'],
   'RangeAnalyzer': ['superadmin', 'listingadmin'],
-  'AmazonLookup': ['superadmin'],
-  'ProductUmbrellas': ['superadmin'],
-  'AsinStorage': ['superadmin', 'productadmin'],
   'ColumnCreator': ['superadmin', 'productadmin'],
   'ManageRanges': ['superadmin', 'productadmin'],
   'UserCredentials': ['superadmin'],
@@ -119,28 +128,28 @@ export async function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    
+
     // Validate token version and permissions version against database
     const user = await User.findById(payload.userId).select('tokenVersion permissionsVersion').lean();
     if (!user) {
       return res.status(401).json({ error: 'User not found' });
     }
-    
+
     const userTokenVersion = user.tokenVersion || 1;
     const payloadTokenVersion = payload.tokenVersion || 1;
-    
+
     if (payloadTokenVersion !== userTokenVersion) {
       return res.status(401).json({ error: 'Token expired. Please login again.' });
     }
-    
+
     // Check if permissions have been modified by admin
     const userPermissionsVersion = user.permissionsVersion || 1;
     const payloadPermissionsVersion = payload.permissionsVersion || 1;
-    
+
     if (payloadPermissionsVersion !== userPermissionsVersion) {
       return res.status(401).json({ error: 'Your access permissions have been updated. Please login again.' });
     }
-    
+
     req.user = payload; // { userId, role, tokenVersion, permissionsVersion }
     return next();
   } catch (e) {
@@ -228,7 +237,7 @@ export function requireRole(...roles) {
 export function requirePageAccess(pageId, defaultRoles) {
   // Normalize to array for consistent handling
   const pageIds = Array.isArray(pageId) ? pageId : [pageId];
-  
+
   // Collect fallback roles from all pages (if defaultRoles not provided)
   let fallbackRoles = defaultRoles;
   if (!fallbackRoles) {

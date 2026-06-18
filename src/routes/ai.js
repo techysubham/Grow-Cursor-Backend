@@ -25,6 +25,39 @@ function getOpenAI() {
 // Body: { title: string, description: string }
 // Returns: { make, model, startYear, endYear, allFitments }
 // ============================================
+/**
+ * @swagger
+ * /ai/suggest-fitment:
+ *   post:
+ *     tags: [AI]
+ *     summary: Suggest vehicle fitments from a product listing
+ *     description: "Sends the product title and description to GPT-4o-mini and extracts all vehicle make/model/year/trim/engine fitments. Tracks usage in AiFitmentUsage."
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               title:
+ *                 type: string
+ *               description:
+ *                 type: string
+ *                 description: Raw HTML or plain text product description
+ *     responses:
+ *       200:
+ *         description: Best fitment plus full array
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AiFitmentSuggestion'
+ *       400:
+ *         description: title or description is required
+ *       500:
+ *         description: AI request failed or parse error
+ */
 router.post('/suggest-fitment', requireAuth, async (req, res) => {
     try {
         const { title = '', description = '' } = req.body;
@@ -64,6 +97,10 @@ Return ONLY a valid JSON array (no markdown, no explanation) where each object h
 - "model": string (e.g. "Camry")
 - "startYear": string or null (e.g. "2010")
 - "endYear": string or null (same as startYear if only one year)
+- "suggestedTrims": array of strings (e.g. ["XLE", "XSE"]). Specific trim levels explicitly mentioned as COMPATIBLE in the title and description. Do NOT include trims that are explicitly excluded.
+- "excludedTrims": array of strings (e.g. ["LE", "Limited"]). Specific trim levels explicitly mentioned as NOT COMPATIBLE or EXCLUDED (e.g., using words like "except", "not", "exclude", "does not fit").
+- "suggestedEngines": array of strings (e.g. ["2.0L", "2.5L", "3.3L"]). Specific engines explicitly mentioned as COMPATIBLE in the title and description. Do NOT include engines that are explicitly excluded.
+- "excludedEngines": array of strings (e.g. ["1.6L"]). Specific engines explicitly mentioned as NOT COMPATIBLE or EXCLUDED.
 
 Rules:
 - If a year range is EXPLICITLY stated like "2008-2013", use startYear="2008" endYear="2013"
@@ -74,13 +111,13 @@ Rules:
 - Use the most specific model name mentioned (e.g. "F-150" not just "F-Series")
 - If the description lists a compatibility/fitment table, extract all entries from it
 
-Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013"},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null}]`;
+Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013","suggestedTrims":[],"excludedTrims":[],"suggestedEngines":[],"excludedEngines":[]},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null,"suggestedTrims":["XLE"],"excludedTrims":["LE"],"suggestedEngines":["2.5L"],"excludedEngines":["3.5L"]}]`;
 
         const completion = await getOpenAI().chat.completions.create({
             model: 'gpt-4o-mini',
             messages: [{ role: 'user', content: prompt }],
             temperature: 0,
-            max_tokens: 500
+            max_tokens: 1000
         });
 
         const raw = completion.choices[0]?.message?.content?.trim() || '[]';
@@ -88,7 +125,14 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
         let allFitments = [];
         try {
             // Strip any accidental markdown code fences
-            const cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+            let cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+
+            // In case the model accidentally outputs extra characters at the end
+            const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+            if (arrayMatch) {
+                cleaned = arrayMatch[0];
+            }
+
             allFitments = JSON.parse(cleaned);
             if (!Array.isArray(allFitments)) allFitments = [];
         } catch (parseErr) {
@@ -111,7 +155,17 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
         }).catch(err => console.error('[AI Usage Track] Error:', err.message));
 
         if (allFitments.length === 0) {
-            return res.json({ make: null, model: null, startYear: null, endYear: null, allFitments: [] });
+                return res.json({
+                    make: null,
+                    model: null,
+                    startYear: null,
+                    endYear: null,
+                    suggestedTrims: [],
+                    excludedTrims: [],
+                    suggestedEngines: [],
+                    excludedEngines: [],
+                    allFitments: []
+                });
         }
 
         // Pick the fitment with the longest year gap
@@ -126,6 +180,10 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
             model: best.model,
             startYear: best.startYear,
             endYear: best.endYear,
+            suggestedTrims: best.suggestedTrims || [],
+            excludedTrims: best.excludedTrims || [],
+            suggestedEngines: best.suggestedEngines || [],
+            excludedEngines: best.excludedEngines || [],
             allFitments
         });
 
@@ -140,6 +198,38 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
 // POST /api/ai/track-save-next
 // Body: { hadData: boolean }
 // ============================================
+/**
+ * @swagger
+ * /ai/track-save-next:
+ *   post:
+ *     tags: [AI]
+ *     summary: Track a "save and move to next" action
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hadData:
+ *                 type: boolean
+ *                 description: Whether the fitment had data when saved
+ *                 default: false
+ *     responses:
+ *       200:
+ *         description: Tracked
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok:
+ *                   type: boolean
+ *       500:
+ *         description: Failed to track action
+ */
 router.post('/track-save-next', requireAuth, async (req, res) => {
     try {
         const { hadData = false } = req.body;
@@ -168,25 +258,75 @@ router.post('/track-save-next', requireAuth, async (req, res) => {
 // Body: { currentTitle, sourceTitle, brand, color, compatibility }
 // Returns: { rephrasedTitle }
 // ============================================
+/**
+ * @swagger
+ * /ai/rephrase-title:
+ *   post:
+ *     tags: [AI]
+ *     summary: Rephrase an eBay product title for SEO
+ *     description: "Uses GPT-4o-mini to rephrase the title to 75–80 characters while retaining meaning. Optionally injects verified vehicle compatibility."
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [currentTitle]
+ *             properties:
+ *               currentTitle:
+ *                 type: string
+ *               sourceTitle:
+ *                 type: string
+ *                 description: Amazon source title for context
+ *               brand:
+ *                 type: string
+ *               color:
+ *                 type: string
+ *               compatibility:
+ *                 type: string
+ *               vehicleMentions:
+ *                 type: string
+ *                 description: Verified vehicle models from reviews to include
+ *     responses:
+ *       200:
+ *         description: Rephrased title
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 rephrasedTitle:
+ *                   type: string
+ *       400:
+ *         description: currentTitle is required
+ *       500:
+ *         description: AI request failed
+ */
 router.post('/rephrase-title', requireAuth, async (req, res) => {
     try {
-        const { currentTitle = '', sourceTitle = '', brand = '', color = '', compatibility = '' } = req.body;
+        const { currentTitle = '', sourceTitle = '', brand = '', color = '', compatibility = '', vehicleMentions = '' } = req.body;
 
         if (!currentTitle) {
             return res.status(400).json({ error: 'currentTitle is required' });
         }
 
+        const vehicleSection = vehicleMentions
+            ? `\nVerified vehicle compatibility (from customer reviews): ${vehicleMentions}\nYou MUST include 1–2 of these models/years in the rephrased title. Shorten other parts of the title if needed to stay within the character limit.`
+            : '';
+
         const prompt = `You are an eBay listing SEO expert.
 Rephrase the following eBay product title. The rephrased title must:
 - Convey the same product and key attributes
 - Use different word order or synonyms compared to the original
-- Be strictly under 80 characters
+- Be strictly between 75 and 80 characters (including spaces) — not shorter, not longer
 - Contain no markdown, quotes, or extra commentary — return only the plain title text
 
 Amazon product title (context only): ${sourceTitle}
 Brand: ${brand}
 Color: ${color}
-Compatibility: ${compatibility}
+Compatibility: ${compatibility}${vehicleSection}
 
 eBay title to rephrase: ${currentTitle}`;
 
@@ -217,6 +357,39 @@ eBay title to rephrase: ${currentTitle}`;
 // GET /api/ai/fitment-usage-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
 // Returns day-wise, user-wise stats
 // ============================================
+/**
+ * @swagger
+ * /ai/fitment-usage-stats:
+ *   get:
+ *     tags: [AI]
+ *     summary: Get AI fitment usage stats (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         example: '2024-06-01'
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         example: '2024-06-30'
+ *     responses:
+ *       200:
+ *         description: Per-user per-day action counts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/AiFitmentUsageStat'
+ *       500:
+ *         description: Failed to fetch usage stats
+ */
 router.get('/fitment-usage-stats', requireAuth, requirePageAccess('AiFitmentUsage'), async (req, res) => {
     try {
         const { startDate, endDate } = req.query;

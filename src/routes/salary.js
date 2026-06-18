@@ -6,6 +6,31 @@ import Salary from '../models/Salary.js';
 
 const router = Router();
 
+/**
+ * @swagger
+ * tags:
+ *   name: Salary
+ *   description: Employee salary records management
+ */
+
+/**
+ * @swagger
+ * /salary:
+ *   get:
+ *     tags: [Salary]
+ *     summary: List salary records for a given year
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns all salary records for the specified year (defaults to current year).
+ *       **Requires Salary page access.**
+ *     parameters:
+ *       - { in: query, name: year, schema: { type: integer, example: 2026 } }
+ *     responses:
+ *       200: { description: Array of salary records }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 // GET /api/salary - Fetch all salaries for a specific year
 router.get('/', requireAuth, requirePageAccess('Salary'), async (req, res) => {
     try {
@@ -44,6 +69,36 @@ router.get('/', requireAuth, requirePageAccess('Salary'), async (req, res) => {
 });
 
 // POST /api/salary - Create a new empty salary row
+/**
+ * @swagger
+ * /salary:
+ *   post:
+ *     tags: [Salary]
+ *     summary: Create a salary record
+ *     security:
+ *       - bearerAuth: []
+ *     description: Creates a new salary record for an employee month. **Requires Salary page access.**
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId, year, month, baseSalary]
+ *             properties:
+ *               userId: { type: string }
+ *               year: { type: integer }
+ *               month: { type: integer, minimum: 1, maximum: 12 }
+ *               baseSalary: { type: number }
+ *               bonuses: { type: number }
+ *               deductions: { type: number }
+ *               notes: { type: string }
+ *     responses:
+ *       201: { description: Created salary record }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.post('/', requireAuth, requirePageAccess('Salary'), validate(createSalarySchema), async (req, res) => {
     try {
         const { year, name, designation } = req.body;
@@ -67,6 +122,28 @@ router.post('/', requireAuth, requirePageAccess('Salary'), validate(createSalary
 });
 
 // PUT /api/salary/:id - Update salary for an existing row
+/**
+ * @swagger
+ * /salary/{id}:
+ *   put:
+ *     tags: [Salary]
+ *     summary: Update a salary record
+ *     security:
+ *       - bearerAuth: []
+ *     description: Updates fields on an existing salary record. **Requires Salary page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *     responses:
+ *       200: { description: Updated salary record }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Salary record not found }
+ */
 router.put('/:id', requireAuth, requirePageAccess('Salary'), async (req, res) => {
     try {
         const { id } = req.params;
@@ -94,6 +171,23 @@ router.put('/:id', requireAuth, requirePageAccess('Salary'), async (req, res) =>
 });
 
 // DELETE /api/salary/:id - Delete a salary row
+/**
+ * @swagger
+ * /salary/{id}:
+ *   delete:
+ *     tags: [Salary]
+ *     summary: Delete a salary record
+ *     security:
+ *       - bearerAuth: []
+ *     description: Permanently deletes the salary record. **Requires Salary page access.**
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Deletion confirmation }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Salary record not found }
+ */
 router.delete('/:id', requireAuth, requirePageAccess('Salary'), async (req, res) => {
     try {
         const { id } = req.params;
