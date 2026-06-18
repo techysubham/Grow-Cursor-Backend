@@ -80,19 +80,19 @@ export function initializeScheduledJobs() {
     }
 
     if (IS_RENDER_RUNNER) {
-        // Poll All Sellers at 1:00 AM IST daily.
+        // Poll All Sellers at 12:05 AM IST daily.
         // Syncs eBay listings from lastListingPolledAt up to "now" for every seller.
         // After this runs, the DB will contain the previous day's listings ready for auto-compat.
-        cron.schedule('0 1 * * *', async () => {
+        cron.schedule('5 0 * * *', async () => {
             try {
-                console.log('[CRON] Scheduled Poll All Sellers starting at 1:00 AM IST...');
+                console.log('[CRON] Scheduled Poll All Sellers starting at 12:05 AM IST...');
                 await scheduledSyncAllSellers();
             } catch (err) {
                 console.error('[CRON] Scheduled Poll All Sellers error:', err.message);
             }
         }, { timezone: 'Asia/Kolkata' });
 
-        console.log(`[CRON] Scheduled job initialized: Poll All Sellers at 1:00 AM IST (runner: ${RUNNER_ID})`);
+        console.log(`[CRON] Scheduled job initialized: Poll All Sellers at 12:05 AM IST (runner: ${RUNNER_ID})`);
     } else {
         console.log(`[CRON] Skipping Poll All Sellers cron initialization for runner: ${RUNNER_ID}. Set RUNNER_ID=render to enable automatic runs.`);
     }
