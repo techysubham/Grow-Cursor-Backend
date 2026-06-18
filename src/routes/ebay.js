@@ -673,6 +673,7 @@ function extractBaseSku(sku) {
 const skuSyncStatus = new Map();
 const skuSyncDismissed = new Set();
 const SKU_SYNC_CONCURRENCY = 3;
+const SKU_SYNC_PAGE_RETRY_DELAYS_MS = [60_000, 180_000, 300_000];
 let activeSkuSyncRunId = null;
 let skuSyncStopRequested = false;
 
@@ -688,6 +689,45 @@ function throwIfSkuSyncDismissed(sellerId) {
   }
   if (skuSyncStopRequested) {
     throw new Error('SKU index sync stopped');
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isTransientSkuSyncError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  const code = String(error?.code || '').toUpperCase();
+  const status = error?.response?.status;
+
+  if (['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED'].includes(code)) return true;
+  if (status === 408 || status === 429 || (status >= 500 && status < 600)) return true;
+  return (
+    message.includes('system error') ||
+    message.includes('try again later') ||
+    message.includes('temporarily unavailable') ||
+    message.includes('timeout') ||
+    message.includes('socket hang up')
+  );
+}
+
+async function withSkuSyncPageRetry({ sellerId, page, action }) {
+  for (let attempt = 0; attempt <= SKU_SYNC_PAGE_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await action();
+    } catch (error) {
+      const canRetry = attempt < SKU_SYNC_PAGE_RETRY_DELAYS_MS.length && isTransientSkuSyncError(error);
+      if (!canRetry) throw error;
+
+      const delayMs = SKU_SYNC_PAGE_RETRY_DELAYS_MS[attempt];
+      console.warn(
+        `[sync-sku-index] seller=${sellerId} page=${page} transient error: ${error.message}. ` +
+        `Retrying in ${Math.round(delayMs / 1000)}s (${attempt + 1}/${SKU_SYNC_PAGE_RETRY_DELAYS_MS.length})`
+      );
+      await sleep(delayMs);
+      throwIfSkuSyncDismissed(sellerId);
+    }
   }
 }
 
@@ -772,23 +812,31 @@ async function runSkuIndexSync(seller, send = null, options = {}) {
   <OutputSelector>PaginationResult</OutputSelector>
 </GetSellerListRequest>`;
 
-    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-      headers: {
-        'X-EBAY-API-CALL-NAME': 'GetSellerList',
-        'X-EBAY-API-SITEID': '0',
-        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-        'Content-Type': 'text/xml',
+    const resp = await withSkuSyncPageRetry({
+      sellerId,
+      page,
+      action: async () => {
+        const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+          headers: {
+            'X-EBAY-API-CALL-NAME': 'GetSellerList',
+            'X-EBAY-API-SITEID': '0',
+            'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+            'Content-Type': 'text/xml',
+          },
+        });
+
+        const result = await parseStringPromise(response.data);
+        const parsedResp = result.GetSellerListResponse;
+
+        if (parsedResp?.Ack?.[0] === 'Failure') {
+          const errMsg = parsedResp.Errors?.[0]?.LongMessage?.[0] || parsedResp.Errors?.[0]?.ShortMessage?.[0] || 'eBay API failure';
+          console.error(`[sync-sku-index] eBay Failure on page ${page}:`, JSON.stringify(parsedResp.Errors));
+          throw new Error(`eBay error on page ${page}: ${errMsg}`);
+        }
+
+        return parsedResp;
       },
     });
-
-    const result = await parseStringPromise(response.data);
-    const resp = result.GetSellerListResponse;
-
-    if (resp?.Ack?.[0] === 'Failure') {
-      const errMsg = resp.Errors?.[0]?.LongMessage?.[0] || resp.Errors?.[0]?.ShortMessage?.[0] || 'eBay API failure';
-      console.error(`[sync-sku-index] eBay Failure on page ${page}:`, JSON.stringify(resp.Errors));
-      throw new Error(`eBay error on page ${page}: ${errMsg}`);
-    }
 
     const pagination = resp?.PaginationResult?.[0];
     totalPages = parseInt(pagination?.TotalNumberOfPages?.[0] || '1', 10);
@@ -949,7 +997,11 @@ router.get('/sync-sku-index/status/:sellerId', requireAuth, async (req, res) => 
       .select('status runnerId source sellers startedAt completedAt stoppedAt interruptedAt requestedStop')
       .lean();
     const latestRunSeller = latestRun?.sellers?.find(s => String(s.seller) === String(sellerId));
-    if (latestRunSeller && ['queued', 'running', 'dismissed', 'interrupted'].includes(latestRunSeller.status)) {
+    const shouldUseLatestRunStatus = latestRunSeller
+      && ['queued', 'running', 'dismissed', 'interrupted', 'failed'].includes(latestRunSeller.status)
+      && !(latestRunSeller.status === 'failed' && mem.status === 'completed');
+
+    if (shouldUseLatestRunStatus) {
       mem = {
         ...mem,
         status: latestRunSeller.status,
