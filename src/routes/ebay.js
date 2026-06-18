@@ -9027,7 +9027,7 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
 // 4. GET THREADS (With Pagination & Search)
 router.get('/chat/threads', requireAuth, async (req, res) => {
   try {
-    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false', dateFrom = '', dateTo = '', excludeClient = 'false' } = req.query;
+    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false', buyerUnrepliedOnly = 'false', dateFrom = '', dateTo = '', excludeClient = 'false' } = req.query;
 
 
     const pageNum = parseInt(page);
@@ -9077,6 +9077,9 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         messageType: { $first: "$messageType" },
         unreadCount: {
           $sum: { $cond: [{ $and: [{ $eq: ["$read", false] }, { $eq: ["$sender", "BUYER"] }] }, 1, 0] }
+        },
+        buyerMessageCount: {
+          $sum: { $cond: [{ $eq: ["$sender", "BUYER"] }, 1, 0] }
         }
       }
     });
@@ -9104,6 +9107,7 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         itemTitle: 1,
         messageType: 1,
         unreadCount: 1,
+        buyerMessageCount: 1,
         buyerName: { $arrayElemAt: ["$orderDetails.buyer.buyerRegistrationAddress.fullName", 0] },
         // NEW: Get Marketplace ID from Order
         orderMarketplaceId: { $arrayElemAt: ["$orderDetails.purchaseMarketplaceId", 0] },
@@ -9242,6 +9246,16 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       pipeline.push({ $match: { unreadCount: { $gt: 0 } } });
     } else if (showUnreadOnly === 'readOnly') {
       pipeline.push({ $match: { unreadCount: 0 } });
+    }
+
+    // 5.4.1 FILTER BUYER MESSAGED AFTER THE SELLER'S MOST RECENT REPLY
+    if (buyerUnrepliedOnly === 'true') {
+      pipeline.push({
+        $match: {
+          buyerMessageCount: { $gt: 0 },
+          sender: 'BUYER'
+        }
+      });
     }
 
     // 5.5 FILTER OUT RESOLVED CONVERSATIONS (Lookup ConversationMeta)
