@@ -21,6 +21,8 @@ const tenMinuteJobState = {
     buyerChatCheckNew: false,
 };
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function runTenMinuteJob(key, label, job) {
     if (tenMinuteJobState[key]) {
         console.log(`[CRON] ${label} already running, skipping this 10-minute tick.`);
@@ -114,10 +116,9 @@ export function initializeScheduledJobs() {
         // - Buyer Chat: Check New
         cron.schedule('*/10 * * * *', async () => {
             await runTenMinuteJob('pollNewOrders', 'Poll New Orders', scheduledPollNewOrders);
+            await sleep(15_000);
             await runTenMinuteJob('pollOrderUpdates', 'Poll Order Updates', scheduledPollOrderUpdates);
-        }, { timezone: 'Asia/Kolkata' });
-
-        cron.schedule('*/10 * * * *', async () => {
+            await sleep(15_000);
             await runTenMinuteJob('buyerChatCheckNew', 'Buyer Chat Check New', scheduledSyncBuyerInbox);
         }, { timezone: 'Asia/Kolkata' });
 
