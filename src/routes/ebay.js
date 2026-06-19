@@ -34,6 +34,7 @@ import ItemCategoryMap from '../models/ItemCategoryMap.js';
 import AutoCompatibilityBatch from '../models/AutoCompatibilityBatch.js';
 import AutoCompatibilityBatchItem from '../models/AutoCompatibilityBatchItem.js';
 import SkuIndexSyncRun from '../models/SkuIndexSyncRun.js';
+import EbayPollRun from '../models/EbayPollRun.js';
 import AsinListCategory from '../models/AsinListCategory.js';
 import EndListingLog from '../models/EndListingLog.js';
 import ManualEndListingAdjustment from '../models/ManualEndListingAdjustment.js';
@@ -54,10 +55,138 @@ import {
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
 const activeAutoCompatBatchRuns = new Set();
+const activeEbayPollJobs = new Set();
 
 // Identifies which server instance owns/resumes batches.
 // Set RUNNER_ID=render in Render's env vars, leave unset (defaults to 'local') locally.
 const RUNNER_ID = process.env.RUNNER_ID || 'local';
+
+function getPollTotals(jobType, payload = {}) {
+  if (jobType === 'poll-new-orders') {
+    return {
+      totalPolled: payload.totalPolled || 0,
+      totalNewOrders: payload.totalNewOrders || 0,
+      results: payload.pollResults || []
+    };
+  }
+  if (jobType === 'poll-order-updates') {
+    return {
+      totalPolled: payload.totalPolled || 0,
+      totalUpdatedOrders: payload.totalUpdatedOrders || 0,
+      results: payload.pollResults || []
+    };
+  }
+  if (jobType === 'buyer-chat-check-new') {
+    return {
+      totalNewMessages: payload.totalNewMessages || 0,
+      totalUpdatedMessages: payload.totalUpdatedMessages || 0,
+      results: payload.syncResults || payload.results || []
+    };
+  }
+  return {};
+}
+
+async function withEbayPollRun(jobType, req, res, runJob) {
+  const source = req?.pollSource === 'cron' ? 'cron' : 'manual';
+  const activeKey = jobType;
+
+  if (activeEbayPollJobs.has(activeKey)) {
+    const skippedRun = await EbayPollRun.create({
+      jobType,
+      source,
+      status: 'skipped',
+      startedAt: new Date(),
+      completedAt: new Date(),
+      triggeredBy: req?.user?._id || null,
+      runnerId: RUNNER_ID,
+      error: 'Another run is already active.'
+    });
+    return res.status(409).json({
+      error: 'This poll is already running. Please wait for it to finish.',
+      runId: skippedRun._id,
+      status: 'skipped'
+    });
+  }
+
+  activeEbayPollJobs.add(activeKey);
+  const staleBefore = new Date(Date.now() - 45 * 60 * 1000);
+  await EbayPollRun.updateMany(
+    { jobType, status: 'running', startedAt: { $lt: staleBefore } },
+    {
+      $set: {
+        status: 'failed',
+        completedAt: new Date(),
+        error: 'Marked failed because the running poll became stale.'
+      }
+    }
+  );
+
+  let run;
+  try {
+    run = await EbayPollRun.create({
+      jobType,
+      source,
+      status: 'running',
+      startedAt: new Date(),
+      triggeredBy: req?.user?._id || null,
+      runnerId: RUNNER_ID
+    });
+  } catch (err) {
+    activeEbayPollJobs.delete(activeKey);
+    if (err?.code === 11000) {
+      const skippedRun = await EbayPollRun.create({
+        jobType,
+        source,
+        status: 'skipped',
+        startedAt: new Date(),
+        completedAt: new Date(),
+        triggeredBy: req?.user?._id || null,
+        runnerId: RUNNER_ID,
+        error: 'Another run is already active on another server.'
+      });
+      return res.status(409).json({
+        error: 'This poll is already running on another server. Please wait for it to finish.',
+        runId: skippedRun._id,
+        status: 'skipped'
+      });
+    }
+    throw err;
+  }
+
+  const originalJson = res.json.bind(res);
+  res.json = async (payload) => {
+    const statusCode = res.statusCode || 200;
+    if (statusCode < 400) {
+      await EbayPollRun.findByIdAndUpdate(run._id, {
+        status: 'completed',
+        completedAt: new Date(),
+        ...getPollTotals(jobType, payload)
+      });
+      payload = { ...payload, runId: run._id, runSource: source, runStartedAt: run.startedAt };
+    } else {
+      await EbayPollRun.findByIdAndUpdate(run._id, {
+        status: 'failed',
+        completedAt: new Date(),
+        error: payload?.error || `HTTP ${statusCode}`
+      });
+      payload = { ...payload, runId: run._id, runSource: source, runStartedAt: run.startedAt };
+    }
+    return originalJson(payload);
+  };
+
+  try {
+    return await runJob();
+  } catch (err) {
+    await EbayPollRun.findByIdAndUpdate(run._id, {
+      status: 'failed',
+      completedAt: new Date(),
+      error: err.message
+    });
+    throw err;
+  } finally {
+    activeEbayPollJobs.delete(activeKey);
+  }
+}
 
 const DEFAULT_NEW_SELLER_SYNC_START = new Date(Date.UTC(2026, 2, 1, 0, 0, 0, 0));
 const EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS = 120;
@@ -5708,6 +5837,31 @@ router.post('/orders/:orderId/upload-tracking-multiple', requireAuth, async (req
 });
 
 
+router.get('/poll-runs/latest', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  try {
+    const jobTypes = ['poll-new-orders', 'poll-order-updates', 'buyer-chat-check-new'];
+    const runs = await EbayPollRun.find({
+      jobType: { $in: jobTypes },
+      status: { $in: ['completed', 'failed', 'skipped'] }
+    })
+      .sort({ startedAt: -1 })
+      .limit(100)
+      .lean();
+
+    const latest = {};
+    for (const run of runs) {
+      latest[run.jobType] ||= {};
+      if (!latest[run.jobType][run.source]) {
+        latest[run.jobType][run.source] = run;
+      }
+    }
+
+    res.json({ latest });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Poll all sellers for NEW ORDERS ONLY (Phase 1)
 /**
  * @swagger
@@ -5723,7 +5877,8 @@ router.post('/orders/:orderId/upload-tracking-multiple', requireAuth, async (req
  *       500:
  *         description: Internal server error
  */
-router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+export const pollNewOrdersHandler = async (req, res) => {
+  return withEbayPollRun('poll-new-orders', req, res, async () => {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true, $ne: null } })
       .populate('user', 'username email');
@@ -5888,7 +6043,10 @@ router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), a
     console.error('Error polling new orders:', err);
     res.status(500).json({ error: err.message });
   }
-});
+  });
+};
+
+router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), pollNewOrdersHandler);
 
 
 
@@ -5907,7 +6065,8 @@ router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), a
  *       500:
  *         description: Internal server error
  */
-router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+export const pollOrderUpdatesHandler = async (req, res) => {
+  return withEbayPollRun('poll-order-updates', req, res, async () => {
   try {
     // Helper function to normalize dates for comparison (ignore milliseconds/format)
     function normalizeDateForComparison(date) {
@@ -6249,7 +6408,10 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
     console.error('Error polling order updates:', err);
     res.status(500).json({ error: err.message });
   }
-});
+  });
+};
+
+router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment'), pollOrderUpdatesHandler);
 
 // Resync recent orders (last 10 days) - catches silent eBay changes where lastModifiedDate wasn't updated
 /**
@@ -8643,7 +8805,8 @@ router.get('/issues-by-order', requireAuth, async (req, res) => {
 
 // 1. HEAVY SYNC: Fetch Inbox (Manual Trigger)
 // 1. HEAVY SYNC: Fetch Inbox (Smart Polling)
-router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
+export const syncInboxHandler = async (req, res) => {
+  return withEbayPollRun('buyer-chat-check-new', req, res, async () => {
   try {
     console.log('[Sync Inbox] Starting smart message sync...');
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } }).populate('user', 'username email');
@@ -8739,7 +8902,10 @@ router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), asyn
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+  });
+};
+
+router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), syncInboxHandler);
 
 
 
@@ -17882,6 +18048,41 @@ export async function scheduledSkuIndexSyncAllSellers() {
     activeSkuSyncRunId = null;
     skuSyncStopRequested = false;
   }
+}
+
+async function runHandlerForCron(handler, label) {
+  let statusCode = 200;
+  let payload = null;
+  const res = {
+    statusCode: 200,
+    status(code) {
+      statusCode = code;
+      this.statusCode = code;
+      return this;
+    },
+    json(data) {
+      payload = data;
+      return data;
+    }
+  };
+
+  await handler({ pollSource: 'cron' }, res);
+  if (statusCode >= 400) {
+    throw new Error(payload?.error || `${label} failed with HTTP ${statusCode}`);
+  }
+  return payload;
+}
+
+export async function scheduledPollNewOrders() {
+  return runHandlerForCron(pollNewOrdersHandler, 'Poll New Orders');
+}
+
+export async function scheduledPollOrderUpdates() {
+  return runHandlerForCron(pollOrderUpdatesHandler, 'Poll Order Updates');
+}
+
+export async function scheduledSyncBuyerInbox() {
+  return runHandlerForCron(syncInboxHandler, 'Buyer Chat Check New');
 }
 
 // Core logic for "Run All Sellers for Date".

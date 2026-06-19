@@ -5,12 +5,39 @@ import {
     scheduledSyncAllSellers,
     scheduledRunAutoCompatForDate,
     scheduledSkuIndexSyncAllSellers,
-    initializeSkuIndexSyncState
+    initializeSkuIndexSyncState,
+    scheduledPollNewOrders,
+    scheduledPollOrderUpdates,
+    scheduledSyncBuyerInbox
 } from './routes/ebay.js';
 
 const RUNNER_ID = (process.env.RUNNER_ID || 'local').trim().toLowerCase();
 const IS_RENDER_RUNNER = RUNNER_ID === 'render';
 const IS_SKU_INDEX_RUNNER = RUNNER_ID === 'render';
+
+const tenMinuteJobState = {
+    pollNewOrders: false,
+    pollOrderUpdates: false,
+    buyerChatCheckNew: false,
+};
+
+async function runTenMinuteJob(key, label, job) {
+    if (tenMinuteJobState[key]) {
+        console.log(`[CRON] ${label} already running, skipping this 10-minute tick.`);
+        return;
+    }
+
+    tenMinuteJobState[key] = true;
+    try {
+        console.log(`[CRON] ${label} starting...`);
+        await job();
+        console.log(`[CRON] ${label} completed.`);
+    } catch (error) {
+        console.error(`[CRON] ${label} error:`, error.message);
+    } finally {
+        tenMinuteJobState[key] = false;
+    }
+}
 
 export function initializeScheduledJobs() {
     initializeSkuIndexSyncState();
@@ -80,6 +107,25 @@ export function initializeScheduledJobs() {
     }
 
     if (IS_RENDER_RUNNER) {
+        // Fulfillment + Buyer Chat polling every 10 minutes.
+        // These mirror the manual buttons:
+        // - Fulfillment Dashboard: Poll New Orders
+        // - Fulfillment Dashboard: Poll Order Updates
+        // - Buyer Chat: Check New
+        cron.schedule('*/10 * * * *', async () => {
+            await runTenMinuteJob('pollNewOrders', 'Poll New Orders', scheduledPollNewOrders);
+        }, { timezone: 'Asia/Kolkata' });
+
+        cron.schedule('*/10 * * * *', async () => {
+            await runTenMinuteJob('pollOrderUpdates', 'Poll Order Updates', scheduledPollOrderUpdates);
+        }, { timezone: 'Asia/Kolkata' });
+
+        cron.schedule('*/10 * * * *', async () => {
+            await runTenMinuteJob('buyerChatCheckNew', 'Buyer Chat Check New', scheduledSyncBuyerInbox);
+        }, { timezone: 'Asia/Kolkata' });
+
+        console.log(`[CRON] Scheduled job initialized: Fulfillment and Buyer Chat polling every 10 minutes (runner: ${RUNNER_ID})`);
+
         // Poll All Sellers at 12:05 AM IST daily.
         // Syncs eBay listings from lastListingPolledAt up to "now" for every seller.
         // After this runs, the DB will contain the previous day's listings ready for auto-compat.
