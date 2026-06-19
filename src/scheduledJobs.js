@@ -114,9 +114,6 @@ export function initializeScheduledJobs() {
         // - Buyer Chat: Check New
         cron.schedule('*/10 * * * *', async () => {
             await runTenMinuteJob('pollNewOrders', 'Poll New Orders', scheduledPollNewOrders);
-        }, { timezone: 'Asia/Kolkata' });
-
-        cron.schedule('*/10 * * * *', async () => {
             await runTenMinuteJob('pollOrderUpdates', 'Poll Order Updates', scheduledPollOrderUpdates);
         }, { timezone: 'Asia/Kolkata' });
 

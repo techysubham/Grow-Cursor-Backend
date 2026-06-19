@@ -188,6 +188,17 @@ async function withEbayPollRun(jobType, req, res, runJob) {
   }
 }
 
+async function requirePrasannaUser(req, res, next) {
+  try {
+    const user = await User.findById(req.user?.userId).select('username').lean();
+    if (user?.username === 'prasanna') return next();
+    return res.status(403).json({ error: 'Only prasanna can run this manual sync.' });
+  } catch (err) {
+    console.error('requirePrasannaUser error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
 const DEFAULT_NEW_SELLER_SYNC_START = new Date(Date.UTC(2026, 2, 1, 0, 0, 0, 0));
 const EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS = 120;
 
@@ -6046,7 +6057,7 @@ export const pollNewOrdersHandler = async (req, res) => {
   });
 };
 
-router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), pollNewOrdersHandler);
+router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), requirePrasannaUser, pollNewOrdersHandler);
 
 
 
@@ -6411,7 +6422,7 @@ export const pollOrderUpdatesHandler = async (req, res) => {
   });
 };
 
-router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment'), pollOrderUpdatesHandler);
+router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment'), requirePrasannaUser, pollOrderUpdatesHandler);
 
 // Resync recent orders (last 10 days) - catches silent eBay changes where lastModifiedDate wasn't updated
 /**
@@ -8905,7 +8916,7 @@ export const syncInboxHandler = async (req, res) => {
   });
 };
 
-router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), syncInboxHandler);
+router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), requirePrasannaUser, syncInboxHandler);
 
 
 
