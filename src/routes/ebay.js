@@ -1055,7 +1055,12 @@ router.get('/sync-sku-index/status/:sellerId', requireAuth, async (req, res) => 
     const dbCount = await SellerSkuIndex.countDocuments({ seller: sellerId });
     // Get the syncedAt from the most recent record for this seller
     const latest = await SellerSkuIndex.findOne({ seller: sellerId }).sort({ syncedAt: -1 }).select('syncedAt').lean();
-    return res.json({ ...mem, dbCount, syncedAt: latest?.syncedAt || null });
+    return res.json({
+      ...mem,
+      dbCount,
+      syncedAt: latest?.syncedAt || null,
+      completedAt: latestRunSeller?.completedAt || null,
+    });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch sync status', details: error.message });
   }
