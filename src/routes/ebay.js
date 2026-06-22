@@ -4895,6 +4895,33 @@ router.patch('/orders/:orderId/order-total', requireAuth, requirePageAccess('All
   }
 });
 
+router.patch('/orders/:orderId/all-orders-usd-remark', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { allOrdersUsdRemark } = req.body;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    order.allOrdersUsdRemark = allOrdersUsdRemark == null ? '' : String(allOrdersUsdRemark);
+    await order.save();
+
+    res.json({
+      success: true,
+      order: {
+        _id: order._id,
+        orderId: order.orderId,
+        allOrdersUsdRemark: order.allOrdersUsdRemark
+      }
+    });
+  } catch (err) {
+    console.error('Error updating All Orders USD remark:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Handle Amazon refund received - zero out Amazon costs
 /**
  * @swagger
