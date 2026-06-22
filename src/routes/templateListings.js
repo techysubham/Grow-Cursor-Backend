@@ -273,12 +273,78 @@ function parseNumericPrice(value) {
   return Number.isFinite(price) ? price : null;
 }
 
-function getPrecheckEnrichment(amazonData = {}) {
+const MARKETPLACE_TIMEZONES = {
+  US: 'America/Los_Angeles',
+  UK: 'Europe/London',
+  CA: 'America/Toronto',
+  AU: 'Australia/Sydney'
+};
+
+const MONTH_INDEX = {
+  january: 0,
+  february: 1,
+  march: 2,
+  april: 3,
+  may: 4,
+  june: 5,
+  july: 6,
+  august: 7,
+  september: 8,
+  october: 9,
+  november: 10,
+  december: 11
+};
+
+function getMarketplaceLocalDateParts(date, timezone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric'
+  }).formatToParts(date);
+
+  return {
+    year: Number(parts.find(part => part.type === 'year')?.value),
+    month: Number(parts.find(part => part.type === 'month')?.value) - 1,
+    day: Number(parts.find(part => part.type === 'day')?.value)
+  };
+}
+
+function parseShippingDate(shippingValue, scrapedAt, timezone) {
+  const raw = String(shippingValue || '').trim();
+  const match = raw.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:,\s*(\d{4}))?/i);
+  if (!match) return { deliveryDate: null, deliveryDays: null };
+
+  const scrapedLocal = getMarketplaceLocalDateParts(scrapedAt, timezone);
+  const month = MONTH_INDEX[match[1].toLowerCase()];
+  const day = Number(match[2]);
+  let year = match[3] ? Number(match[3]) : scrapedLocal.year;
+
+  let deliveryUtc = Date.UTC(year, month, day);
+  const scrapedUtc = Date.UTC(scrapedLocal.year, scrapedLocal.month, scrapedLocal.day);
+
+  if (!match[3] && deliveryUtc < scrapedUtc) {
+    year += 1;
+    deliveryUtc = Date.UTC(year, month, day);
+  }
+
+  const deliveryDays = Math.round((deliveryUtc - scrapedUtc) / 86400000);
+  return {
+    deliveryDate: `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+    deliveryDays: Number.isFinite(deliveryDays) ? deliveryDays : null
+  };
+}
+
+function getPrecheckEnrichment(amazonData = {}, region = 'US', scrapedAt = new Date()) {
   const rawData = amazonData.rawData?.rawData || amazonData.rawData || {};
   const customerReviews = rawData.product_information?.customer_reviews || {};
   const rating = Number(rawData.average_rating ?? customerReviews.stars ?? 0);
   const reviewCount = Number(rawData.total_reviews ?? rawData.total_ratings ?? customerReviews.ratings_count ?? 0);
   const availabilityStatus = String(rawData.availability_status || '').trim();
+  const shippingTime = String(rawData.shipping_time || '').trim();
+  const shippingCondition = String(rawData.shipping_condition || '').trim();
+  const marketplaceTimezone = MARKETPLACE_TIMEZONES[region] || MARKETPLACE_TIMEZONES.US;
+  const delivery = parseShippingDate(shippingTime || shippingCondition, scrapedAt, marketplaceTimezone);
   const availabilityLower = availabilityStatus.toLowerCase();
   let inStock = null;
   if (availabilityStatus) {
@@ -295,7 +361,13 @@ function getPrecheckEnrichment(amazonData = {}) {
     availabilityStatus,
     inStock,
     rating: Number.isFinite(rating) && rating > 0 ? rating : null,
-    reviewCount: Number.isFinite(reviewCount) && reviewCount > 0 ? reviewCount : null
+    reviewCount: Number.isFinite(reviewCount) && reviewCount > 0 ? reviewCount : null,
+    shippingTime,
+    shippingCondition,
+    marketplaceTimezone,
+    scrapedAt: scrapedAt.toISOString(),
+    deliveryDate: delivery.deliveryDate,
+    deliveryDays: delivery.deliveryDays
   };
 }
 
@@ -462,10 +534,11 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
           progressStage: 'fetching'
         });
 
+        const scrapedAt = new Date();
         const amazonData = await fetchAmazonData(asin, region);
         const sourceData = buildAmazonSourceData(amazonData);
         const active = activeSkuSet.has(generated.sku) || activeSkuSet.has(generated.baseSku);
-        const enrichment = getPrecheckEnrichment(amazonData);
+        const enrichment = getPrecheckEnrichment(amazonData, region, scrapedAt);
 
         sendSse({
           type: 'item',
@@ -508,6 +581,12 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
             inStock: null,
             rating: null,
             reviewCount: null,
+            shippingTime: '',
+            shippingCondition: '',
+            marketplaceTimezone: MARKETPLACE_TIMEZONES[region] || MARKETPLACE_TIMEZONES.US,
+            scrapedAt: new Date().toISOString(),
+            deliveryDate: null,
+            deliveryDays: null,
             sourceData: null,
             status: 'error',
             progressStage: 'complete',
