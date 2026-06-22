@@ -268,6 +268,37 @@ function getBaseSku(sku = '') {
   return cleanSku.replace(/-\d+$/, '');
 }
 
+function parseNumericPrice(value) {
+  const price = parseFloat(String(value || '').replace(/[^0-9.]/g, ''));
+  return Number.isFinite(price) ? price : null;
+}
+
+function getPrecheckEnrichment(amazonData = {}) {
+  const rawData = amazonData.rawData?.rawData || amazonData.rawData || {};
+  const customerReviews = rawData.product_information?.customer_reviews || {};
+  const rating = Number(rawData.average_rating ?? customerReviews.stars ?? 0);
+  const reviewCount = Number(rawData.total_reviews ?? rawData.total_ratings ?? customerReviews.ratings_count ?? 0);
+  const availabilityStatus = String(rawData.availability_status || '').trim();
+  const availabilityLower = availabilityStatus.toLowerCase();
+  let inStock = null;
+  if (availabilityStatus) {
+    if (availabilityLower.includes('out of stock') || availabilityLower.includes('unavailable')) {
+      inStock = false;
+    } else if (availabilityLower.includes('in stock') || availabilityLower.includes('available')) {
+      inStock = true;
+    }
+  }
+
+  return {
+    price: amazonData.price || '',
+    priceNumber: parseNumericPrice(amazonData.price),
+    availabilityStatus,
+    inStock,
+    rating: Number.isFinite(rating) && rating > 0 ? rating : null,
+    reviewCount: Number.isFinite(reviewCount) && reviewCount > 0 ? reviewCount : null
+  };
+}
+
 function getSkuLookupValues(sku = '') {
   return [...new Set([String(sku || '').trim(), getBaseSku(sku)].filter(Boolean))];
 }
@@ -434,6 +465,7 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
         const amazonData = await fetchAmazonData(asin, region);
         const sourceData = buildAmazonSourceData(amazonData);
         const active = activeSkuSet.has(generated.sku) || activeSkuSet.has(generated.baseSku);
+        const enrichment = getPrecheckEnrichment(amazonData);
 
         sendSse({
           type: 'item',
@@ -446,6 +478,7 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
             activeStatus: active ? 'active' : 'inactive',
             title: amazonData.title || '',
             image: Array.isArray(amazonData.images) ? amazonData.images[0] || '' : '',
+            ...enrichment,
             sourceData,
             status: 'success',
             progressStage: 'complete',
@@ -469,6 +502,12 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
             activeStatus: active ? 'active' : 'inactive',
             title: '',
             image: '',
+            price: '',
+            priceNumber: null,
+            availabilityStatus: '',
+            inStock: null,
+            rating: null,
+            reviewCount: null,
             sourceData: null,
             status: 'error',
             progressStage: 'complete',
