@@ -424,14 +424,13 @@ You are checking if an Amazon product title is suitable for an eBay Motors listi
 
 Pass rule:
 - eligible=true if the title contains BOTH a vehicle model name and a year/year range.
-- eligible=true if the title clearly describes a universal vehicle product.
 - Otherwise eligible=false.
 
 Definitions:
 - eBay Motors includes cars, trucks, motorcycles, powersports, ATV/UTV, and their parts.
 - A vehicle model name can be a real vehicle make/model/trim/platform/family such as Silverado, Colorado, F-150, Civic, Wrangler, X5, G05, Camry, Tacoma, Harley Davidson Sportster, Dyna, Softail, Yamaha YZF, Polaris Ranger, etc.
 - A year/year range means a model year like 2024, or a range like 2019-2024, 2023 2024 2025, 1999-06.
-- Universal means the title clearly says Universal, Universal Fit, Fits Most Cars, or equivalent.
+- Universal fit does NOT pass by itself. Universal products must still be excluded unless the title also has BOTH a vehicle model name and a year/year range.
 - Do not require the exact word "model"; detect actual vehicle model names from the title.
 - Engine sizes or product part numbers alone are not vehicle model names.
 
@@ -453,8 +452,8 @@ Return only valid JSON:
 
 Examples:
 - "27490-96 Carburetor for Harley Davidson Sportster 883 Sportster 1200 1988-2007" => eligible=true, hasModel=true, hasYear=true.
-- "Universal Mud Flaps for Cars Trucks SUV" => eligible=true, isUniversal=true.
-- "Carburetor for Predator 4000 Champion Honda 3500 Generator" => eligible=false unless a vehicle model/year or universal fit is present.
+- "Universal Mud Flaps for Cars Trucks SUV" => eligible=false, isUniversal=true, because model and year are missing.
+- "Carburetor for Predator 4000 Champion Honda 3500 Generator" => eligible=false because vehicle model and year are missing.
 
 Title: ${cleanTitle}
 `.trim();
@@ -483,16 +482,23 @@ Title: ${cleanTitle}
     const hasModel = Boolean(signals.hasModel) || modelNames.length > 0 || Boolean(fallbackModelPhrase);
     const hasYear = Boolean(signals.hasYear) || years.length > 0 || fallbackYears.length > 0;
     const isUniversal = Boolean(signals.isUniversal) || Boolean(universalPhrase) || Boolean(fallbackUniversalPhrase);
-    const eligible = Boolean(parsed.eligible) || isUniversal || (hasModel && hasYear);
+    const eligible = hasModel && hasYear;
     const normalizedDetected = {
       modelNames: modelNames.length > 0 ? modelNames : (fallbackModelPhrase ? [fallbackModelPhrase] : []),
       years: years.length > 0 ? years : fallbackYears,
       universalPhrase: universalPhrase || fallbackUniversalPhrase
     };
+    const reason = eligible
+      ? String(parsed.reason || 'Contains vehicle model and year fitment').slice(0, 180)
+      : String(
+          isUniversal
+            ? 'Universal product excluded; model name and year are required'
+            : parsed.reason || 'Missing vehicle model name or year'
+        ).slice(0, 180);
 
     return {
       eligible,
-      reason: String(parsed.reason || (eligible ? 'Eligible for eBay Motors' : 'Missing vehicle fitment signal')).slice(0, 180),
+      reason,
       signals: {
         hasModel,
         hasYear,
