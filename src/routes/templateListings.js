@@ -8,6 +8,7 @@ import Order from '../models/Order.js';
 import SellerPricingConfig from '../models/SellerPricingConfig.js';
 import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
 import { calculateStartPrice } from '../utils/pricingCalculator.js';
+import { generateWithGemini } from '../utils/gemini.js';
 import { generateSKUFromASIN, generateSKUWithCount } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
@@ -371,6 +372,145 @@ function getPrecheckEnrichment(amazonData = {}, region = 'US', scrapedAt = new D
   };
 }
 
+function parseJsonObject(text = '') {
+  const raw = String(text || '').trim();
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(item => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function detectVehicleYearText(title = '') {
+  const yearPattern = /\b(?:19[5-9]\d|20[0-4]\d)(?:\s*[-–/]\s*(?:\d{2}|19[5-9]\d|20[0-4]\d))?\b/g;
+  return [...new Set(String(title || '').match(yearPattern) || [])].slice(0, 8);
+}
+
+function detectUniversalPhrase(title = '') {
+  const match = String(title || '').match(/\b(universal(?:\s+fit)?|fits\s+most\s+(?:cars|vehicles|trucks|motorcycles)|for\s+most\s+(?:cars|vehicles|trucks|motorcycles))\b/i);
+  return match ? match[0] : '';
+}
+
+function detectKnownVehicleModelPhrase(title = '') {
+  const text = String(title || '');
+  const knownModelPattern = /\b(?:Harley\s+Davidson|Sportster|Softail|Dyna|Electra\s+Glide|Road\s+King|Fatboy|Touring|Chevy|Chevrolet|Silverado|Colorado|Ford|F-?150|F-?250|F-?350|Ram|Dodge|Jeep|Wrangler|Toyota|Tacoma|Tundra|Camry|Corolla|Honda|Civic|Accord|BMW|Mercedes|Audi|Nissan|Altima|Sentra|Subaru|Outback|Forester|Yamaha|Kawasaki|Suzuki|Polaris|Can-Am)\b/i;
+  const match = text.match(knownModelPattern);
+  return match ? match[0] : '';
+}
+
+async function classifyEbayMotorsTitle(title, asin, usageContext = {}) {
+  const cleanTitle = String(title || '').trim();
+  if (!cleanTitle) {
+    return {
+      eligible: false,
+      reason: 'No title found',
+      signals: { hasModel: false, hasYear: false, isUniversal: false },
+      detected: { modelNames: [], years: [], universalPhrase: '' }
+    };
+  }
+
+  const prompt = `
+You are checking if an Amazon product title is suitable for an eBay Motors listing precheck.
+
+Pass rule:
+- eligible=true if the title contains BOTH a vehicle model name and a year/year range.
+- eligible=true if the title clearly describes a universal vehicle product.
+- Otherwise eligible=false.
+
+Definitions:
+- eBay Motors includes cars, trucks, motorcycles, powersports, ATV/UTV, and their parts.
+- A vehicle model name can be a real vehicle make/model/trim/platform/family such as Silverado, Colorado, F-150, Civic, Wrangler, X5, G05, Camry, Tacoma, Harley Davidson Sportster, Dyna, Softail, Yamaha YZF, Polaris Ranger, etc.
+- A year/year range means a model year like 2024, or a range like 2019-2024, 2023 2024 2025, 1999-06.
+- Universal means the title clearly says Universal, Universal Fit, Fits Most Cars, or equivalent.
+- Do not require the exact word "model"; detect actual vehicle model names from the title.
+- Engine sizes or product part numbers alone are not vehicle model names.
+
+Return only valid JSON:
+{
+  "eligible": boolean,
+  "reason": "short reason",
+  "signals": {
+    "hasModel": boolean,
+    "hasYear": boolean,
+    "isUniversal": boolean
+  },
+  "detected": {
+    "modelNames": ["detected vehicle model names"],
+    "years": ["detected years or year ranges"],
+    "universalPhrase": "detected universal phrase or empty string"
+  }
+}
+
+Examples:
+- "27490-96 Carburetor for Harley Davidson Sportster 883 Sportster 1200 1988-2007" => eligible=true, hasModel=true, hasYear=true.
+- "Universal Mud Flaps for Cars Trucks SUV" => eligible=true, isUniversal=true.
+- "Carburetor for Predator 4000 Champion Honda 3500 Generator" => eligible=false unless a vehicle model/year or universal fit is present.
+
+Title: ${cleanTitle}
+`.trim();
+
+  try {
+    const response = await generateWithGemini(prompt, {
+      maxTokens: 180,
+      asin,
+      fieldName: 'ebay_motors_title_eligibility',
+      fieldType: 'precheck',
+      ...usageContext
+    });
+    const parsed = parseJsonObject(response);
+    if (!parsed || typeof parsed.eligible !== 'boolean') {
+      throw new Error('Invalid eligibility response');
+    }
+
+    const signals = parsed.signals || {};
+    const detected = parsed.detected || {};
+    const modelNames = normalizeStringArray(detected.modelNames);
+    const years = normalizeStringArray(detected.years);
+    const universalPhrase = String(detected.universalPhrase || '').trim();
+    const fallbackYears = detectVehicleYearText(cleanTitle);
+    const fallbackUniversalPhrase = detectUniversalPhrase(cleanTitle);
+    const fallbackModelPhrase = detectKnownVehicleModelPhrase(cleanTitle);
+    const hasModel = Boolean(signals.hasModel) || modelNames.length > 0 || Boolean(fallbackModelPhrase);
+    const hasYear = Boolean(signals.hasYear) || years.length > 0 || fallbackYears.length > 0;
+    const isUniversal = Boolean(signals.isUniversal) || Boolean(universalPhrase) || Boolean(fallbackUniversalPhrase);
+    const eligible = Boolean(parsed.eligible) || isUniversal || (hasModel && hasYear);
+    const normalizedDetected = {
+      modelNames: modelNames.length > 0 ? modelNames : (fallbackModelPhrase ? [fallbackModelPhrase] : []),
+      years: years.length > 0 ? years : fallbackYears,
+      universalPhrase: universalPhrase || fallbackUniversalPhrase
+    };
+
+    return {
+      eligible,
+      reason: String(parsed.reason || (eligible ? 'Eligible for eBay Motors' : 'Missing vehicle fitment signal')).slice(0, 180),
+      signals: {
+        hasModel,
+        hasYear,
+        isUniversal
+      },
+      detected: normalizedDetected
+    };
+  } catch (error) {
+    console.warn(`[ASIN Precheck] eBay Motors title check failed for ${asin}:`, error.message);
+    return {
+      eligible: false,
+      reason: 'Could not verify eBay Motors fitment from title',
+      signals: { hasModel: false, hasYear: false, isUniversal: false },
+      detected: { modelNames: [], years: [], universalPhrase: '' }
+    };
+  }
+}
+
 function getSkuLookupValues(sku = '') {
   return [...new Set([String(sku || '').trim(), getBaseSku(sku)].filter(Boolean))];
 }
@@ -426,6 +566,7 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
 
   try {
     const { templateId, sellerId, asins: asinsParam, region = 'US' } = req.query;
+    const ebayMotorsMode = String(req.query.ebayMotorsMode || '').toLowerCase() === 'true';
 
     if (!templateId || !sellerId || !asinsParam) {
       return res.status(400).json({ error: 'Template ID, Seller ID, and ASINs are required' });
@@ -516,7 +657,14 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
     const rowByAsin = new Map(generatedRows.map(row => [row.asin, row]));
     let completed = 0;
 
-    sendSse({ type: 'started', total: asins.length, concurrency: Math.min(streamConcurrency, asins.length) });
+    const usageContext = buildAiUsageContext(req, templateId, sellerId);
+
+    sendSse({
+      type: 'started',
+      total: asins.length,
+      concurrency: Math.min(streamConcurrency, asins.length),
+      ebayMotorsMode
+    });
 
     await runWithConcurrency(asins, streamConcurrency, async (asin) => {
       if (streamClosed) return;
@@ -539,6 +687,9 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
         const sourceData = buildAmazonSourceData(amazonData);
         const active = activeSkuSet.has(generated.sku) || activeSkuSet.has(generated.baseSku);
         const enrichment = getPrecheckEnrichment(amazonData, region, scrapedAt);
+        const ebayMotorsEligibility = ebayMotorsMode
+          ? await classifyEbayMotorsTitle(amazonData.title || '', asin, usageContext)
+          : null;
 
         sendSse({
           type: 'item',
@@ -552,6 +703,12 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
             title: amazonData.title || '',
             image: Array.isArray(amazonData.images) ? amazonData.images[0] || '' : '',
             ...enrichment,
+            ebayMotorsMode,
+            ebayMotorsEligible: ebayMotorsEligibility?.eligible ?? null,
+            ebayMotorsReason: ebayMotorsEligibility?.reason || '',
+            ebayMotorsSignals: ebayMotorsEligibility?.signals || null,
+            ebayMotorsDetected: ebayMotorsEligibility?.detected || null,
+            intent: ebayMotorsEligibility && !ebayMotorsEligibility.eligible ? 'excluded' : 'neutral',
             sourceData,
             status: 'success',
             progressStage: 'complete',
@@ -587,6 +744,12 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
             scrapedAt: new Date().toISOString(),
             deliveryDate: null,
             deliveryDays: null,
+            ebayMotorsMode,
+            ebayMotorsEligible: ebayMotorsMode ? false : null,
+            ebayMotorsReason: ebayMotorsMode ? 'Could not check title eligibility' : '',
+            ebayMotorsSignals: ebayMotorsMode ? { hasModel: false, hasYear: false, isUniversal: false } : null,
+            ebayMotorsDetected: ebayMotorsMode ? { modelNames: [], years: [], universalPhrase: '' } : null,
+            intent: ebayMotorsMode ? 'excluded' : 'neutral',
             sourceData: null,
             status: 'error',
             progressStage: 'complete',
