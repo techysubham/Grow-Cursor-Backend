@@ -307,7 +307,7 @@ router.get('/sku-duplicates', requireAuth, requirePageAccess('DuplicateSkus'), a
 // Summarizes the SellerSkuIndex collection by currency-derived country.
 // A SKU that appears once contributes 1 unique SKU and 0 extra duplicates.
 // A SKU that appears twice contributes 1 unique SKU and 1 extra duplicate.
-router.get('/sku-duplicates-by-country', requireAuth, requirePageAccess('DuplicateSkus'), async (req, res) => {
+router.get('/sku-duplicates-by-country', requireAuth, requirePageAccess(['DuplicateSkus', 'SkuIndexDashboard']), async (req, res) => {
   try {
     const sellerSkuRows = await SellerSkuIndex.aggregate([
       { $match: { sku: { $nin: ['', null] } } },
@@ -449,7 +449,7 @@ router.get('/sku-duplicates-by-country', requireAuth, requirePageAccess('Duplica
 
 // GET /sellers/skus-in-multiple-currencies
 // Finds SKU names that appear in more than one normalized currency group.
-router.get('/skus-in-multiple-currencies', requireAuth, requirePageAccess('DuplicateSkus'), async (req, res) => {
+router.get('/skus-in-multiple-currencies', requireAuth, requirePageAccess(['DuplicateSkus', 'SkuIndexDashboard']), async (req, res) => {
   try {
     const rows = await SellerSkuIndex.aggregate([
       { $match: { sku: { $nin: ['', null] } } },
