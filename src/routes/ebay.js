@@ -1349,7 +1349,45 @@ router.get('/check-sku-active', requireAuth, async (req, res) => {
       ? await SellerSkuIndex.countDocuments({ seller: sellerId, baseSku: sku })
       : 0;
 
-    return res.json({ active, _debug: { sku, source: 'db', found: active, count } });
+    const otherSellerRecords = await SellerSkuIndex.find({
+      seller: { $ne: sellerId },
+      baseSku: sku
+    })
+      .select('seller sku baseSku itemId title price currency syncedAt')
+      .sort({ syncedAt: -1 })
+      .limit(50)
+      .lean();
+
+    const sellerIds = [...new Set(otherSellerRecords.map(record => String(record.seller)).filter(Boolean))];
+    const sellerDocs = sellerIds.length > 0
+      ? await Seller.find({ _id: { $in: sellerIds } })
+          .populate('user', 'username email')
+          .select('name user')
+          .lean()
+      : [];
+    const sellerNameById = new Map(sellerDocs.map(seller => [
+      String(seller._id),
+      seller.user?.username || seller.user?.email || seller.name || 'Unknown Seller'
+    ]));
+
+    const otherSellerMatches = otherSellerRecords.map(record => ({
+      sellerId: String(record.seller),
+      sellerName: sellerNameById.get(String(record.seller)) || 'Unknown Seller',
+      sku: record.sku || '',
+      baseSku: record.baseSku || '',
+      itemId: record.itemId || '',
+      title: record.title || '',
+      price: record.price,
+      currency: record.currency || '',
+      syncedAt: record.syncedAt
+    }));
+
+    return res.json({
+      active,
+      otherSellerMatches,
+      otherSellerCount: otherSellerMatches.length,
+      _debug: { sku, source: 'db', found: active, count }
+    });
   } catch (error) {
     console.error('[check-sku-active] Error:', error.message);
     res.status(500).json({ error: 'Failed to check SKU status', details: error.message });
