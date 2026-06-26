@@ -74,6 +74,7 @@ export const PAGE_DEFAULT_ROLES = {
   'EbayApiUsage': ['superadmin', 'listingadmin'],
   'SellerFunds': ['superadmin', 'listingadmin'],
   'SkuIndexSync': ['superadmin', 'listingadmin'],
+  'SkuIndexDashboard': ['superadmin', 'listingadmin'],
 
   // HR & Management
   'IdeasAndIssues': ['superadmin', 'hradmin', 'operationhead', 'listingadmin'],
