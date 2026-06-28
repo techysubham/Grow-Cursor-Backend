@@ -1341,8 +1341,15 @@ router.get('/check-sku-active', requireAuth, async (req, res) => {
     // Query the locally synced SellerSkuIndex collection.
     // We match on baseSku so that GRW25N4VFV finds listings stored as GRW25N4VFV-1, -2, etc.
     // The index also stores exact-SKU listings (baseSku === sku when there's no suffix).
-    const record = await SellerSkuIndex.findOne({ seller: sellerId, baseSku: sku });
-    const active = !!record;
+    const currentSellerRecords = await SellerSkuIndex.find({
+      seller: sellerId,
+      baseSku: sku
+    })
+      .select('seller sku baseSku itemId title price currency syncedAt')
+      .sort({ syncedAt: -1 })
+      .limit(50)
+      .lean();
+    const active = currentSellerRecords.length > 0;
 
     // Count all listings for this baseSku (there may be multiple lines with different itemIds)
     const count = active
@@ -1358,7 +1365,13 @@ router.get('/check-sku-active', requireAuth, async (req, res) => {
       .limit(50)
       .lean();
 
-    const sellerIds = [...new Set(otherSellerRecords.map(record => String(record.seller)).filter(Boolean))];
+    const sellerIds = [
+      ...new Set(
+        [...currentSellerRecords, ...otherSellerRecords]
+          .map(record => String(record.seller))
+          .filter(Boolean)
+      )
+    ];
     const sellerDocs = sellerIds.length > 0
       ? await Seller.find({ _id: { $in: sellerIds } })
           .populate('user', 'username email')
@@ -1370,9 +1383,10 @@ router.get('/check-sku-active', requireAuth, async (req, res) => {
       seller.user?.username || seller.user?.email || seller.name || 'Unknown Seller'
     ]));
 
-    const otherSellerMatches = otherSellerRecords.map(record => ({
+    const mapSkuRecord = (record, scope) => ({
       sellerId: String(record.seller),
       sellerName: sellerNameById.get(String(record.seller)) || 'Unknown Seller',
+      scope,
       sku: record.sku || '',
       baseSku: record.baseSku || '',
       itemId: record.itemId || '',
@@ -1380,10 +1394,15 @@ router.get('/check-sku-active', requireAuth, async (req, res) => {
       price: record.price,
       currency: record.currency || '',
       syncedAt: record.syncedAt
-    }));
+    });
+
+    const currentSellerMatches = currentSellerRecords.map(record => mapSkuRecord(record, 'current'));
+    const otherSellerMatches = otherSellerRecords.map(record => mapSkuRecord(record, 'other'));
 
     return res.json({
       active,
+      currentSellerMatches,
+      currentSellerCount: currentSellerMatches.length,
       otherSellerMatches,
       otherSellerCount: otherSellerMatches.length,
       _debug: { sku, source: 'db', found: active, count }
