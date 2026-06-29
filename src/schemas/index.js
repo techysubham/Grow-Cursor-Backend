@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+const objectIdSchema = z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid ObjectId');
+const optionalObjectIdSchema = z.union([objectIdSchema, z.literal('')]).optional();
+const optionalDateStringSchema = z.string().optional();
+const booleanStringSchema = z.enum(['true', 'false']).optional();
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 export const loginSchema = z.object({
@@ -284,6 +289,80 @@ export const sellerUploadLimitCheckQuerySchema = z.object({
   sellerId: z.string().min(1, 'sellerId is required'),
   country: z.enum(UPLOAD_LIMIT_COUNTRIES, {
     errorMap: () => ({ message: 'country must be one of: US, UK, AU, Canada' }),
+  }),
+});
+
+// ── End listing logs ─────────────────────────────────────────────────────────
+
+export const endListingStatsQuerySchema = z.object({
+  sellerId: optionalObjectIdSchema,
+  startDate: optionalDateStringSchema,
+  endDate: optionalDateStringSchema,
+});
+
+// ── Price change logs ────────────────────────────────────────────────────────
+
+export const priceChangeLogsQuerySchema = z.object({
+  legacyItemId: z.string().optional(),
+  orderId: z.string().optional(),
+  userId: optionalObjectIdSchema,
+  sellerId: optionalObjectIdSchema,
+  startDate: optionalDateStringSchema,
+  endDate: optionalDateStringSchema,
+  successOnly: booleanStringSchema,
+  failedOnly: booleanStringSchema,
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).optional(),
+});
+
+// ── Micro orders ─────────────────────────────────────────────────────────────
+
+export const microOrdersQuerySchema = z.object({
+  seller: optionalObjectIdSchema,
+  dateMode: z.enum(['none', 'single', 'range']).optional(),
+  date: optionalDateStringSchema,
+  dateFrom: optionalDateStringSchema,
+  dateTo: optionalDateStringSchema,
+  excludeClient: booleanStringSchema,
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+// ── Item category map ────────────────────────────────────────────────────────
+
+export const itemNumberParamsSchema = z.object({
+  itemNumber: z.string().trim().min(1, 'itemNumber is required'),
+});
+
+export const itemCategoryLookupSchema = z.object({
+  itemNumbers: z.array(z.string().trim().min(1)).min(1, 'itemNumbers array is required'),
+});
+
+export const updateItemCategoryMapSchema = z.object({
+  categoryId: objectIdSchema,
+  rangeId: optionalObjectIdSchema.nullable(),
+  productId: optionalObjectIdSchema.nullable(),
+});
+
+// ── User seller assignments ──────────────────────────────────────────────────
+
+export const idParamsSchema = z.object({
+  id: objectIdSchema,
+});
+
+export const createUserSellerAssignmentSchema = z.object({
+  userId: objectIdSchema,
+  sellerId: objectIdSchema,
+  dailyTarget: z.coerce.number().optional(),
+});
+
+export const updateUserSellerTargetSchema = z.object({
+  dailyTarget: z.coerce.number({ invalid_type_error: 'Valid daily target is required' }),
+});
+
+export const updatePerformanceRemarksSchema = z.object({
+  remarks: z.enum(['Good', 'Average', 'Need for improvement', ''], {
+    errorMap: () => ({ message: 'Invalid remark value' }),
   }),
 });
 

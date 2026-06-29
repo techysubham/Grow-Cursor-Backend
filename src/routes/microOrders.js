@@ -3,6 +3,8 @@ import mongoose from 'mongoose';
 import Order from '../models/Order.js';
 import Seller from '../models/Seller.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { microOrdersQuerySchema } from '../schemas/index.js';
 
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
 
@@ -97,7 +99,7 @@ const IGST_FACTOR   = 90 * 0.04 * 0.18;  // 0.648 — subtotal → INR IGST
  *       500:
  *         description: Internal server error
  */
-router.get('/', requireAuth, requirePageAccess('MicroOrders'), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess('MicroOrders'), validate(microOrdersQuerySchema, 'query'), async (req, res) => {
   try {
     const {
       seller,

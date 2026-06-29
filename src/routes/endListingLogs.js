@@ -2,6 +2,8 @@ import express from 'express';
 import mongoose from 'mongoose';
 import { requireAuth } from '../middleware/auth.js';
 import EndListingLog from '../models/EndListingLog.js';
+import { validate } from '../utils/validate.js';
+import { endListingStatsQuerySchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -15,7 +17,7 @@ const router = express.Router();
  *   startDate  - optional, YYYY-MM-DD (IST)
  *   endDate    - optional, YYYY-MM-DD (IST)
  */
-router.get('/stats', requireAuth, async (req, res) => {
+router.get('/stats', requireAuth, validate(endListingStatsQuerySchema, 'query'), async (req, res) => {
   try {
     const { sellerId, startDate, endDate } = req.query;
 
