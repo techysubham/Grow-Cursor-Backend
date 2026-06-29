@@ -230,9 +230,9 @@ async function getSellerNameMap(sellerIds) {
   ]));
 }
 
-async function attachOrdersToSellerItems(sellerItems) {
-  const itemIds = sellerItems.map((row) => row.itemId).filter(Boolean);
-  if (!itemIds.length) return sellerItems;
+async function buildOrderSummaryMapForSellerItems(sellerItems) {
+  const itemIds = [...new Set(sellerItems.map((row) => row.itemId).filter(Boolean))];
+  if (!itemIds.length) return new Map();
 
   const startedAt = Date.now();
   const orders = await Order.aggregate([
@@ -254,15 +254,12 @@ async function attachOrdersToSellerItems(sellerItems) {
       }
     }
   ]);
-  const elapsedMs = getElapsedMs(startedAt);
-  if (elapsedMs > 2000) {
-    stockCheckWarn('Slow order enrichment query', {
-      elapsedMs,
-      sellerItemCount: sellerItems.length,
-      itemIdCount: itemIds.length,
-      orderCount: orders.length
-    });
-  }
+  stockCheckLog('enrichCandidates:orderLookupComplete', {
+    sellerItemCount: sellerItems.length,
+    itemIdCount: itemIds.length,
+    orderCount: orders.length,
+    elapsedMs: getElapsedMs(startedAt)
+  });
 
   const orderMap = new Map();
   for (const order of orders) {
@@ -283,6 +280,10 @@ async function attachOrdersToSellerItems(sellerItems) {
     }
   }
 
+  return orderMap;
+}
+
+function attachOrderSummariesFromMap(sellerItems, orderMap) {
   return sellerItems.map((row) => {
     const summary = orderMap.get(`${String(row.sellerId)}:${row.itemId}`);
     return {
@@ -390,12 +391,13 @@ async function enrichCandidates(candidates) {
   });
 
   const sellerItemsByKey = new Map();
+  const allSellerItems = [];
   for (const row of skuIndexRows) {
     const sku = cleanSku(row.sku);
     const currency = normalizeCurrency(row.currency);
     const key = `${currency}:${sku}`;
     const arr = sellerItemsByKey.get(key) || [];
-    arr.push({
+    const sellerItem = {
       sellerId: row.seller,
       sellerName: sellerNameMap.get(String(row.seller)) || String(row.seller),
       itemId: row.itemId,
@@ -404,23 +406,25 @@ async function enrichCandidates(candidates) {
       currency,
       quantityZeroStatus: 'not_needed',
       quantityZeroError: ''
-    });
+    };
+    arr.push(sellerItem);
+    allSellerItems.push(sellerItem);
     sellerItemsByKey.set(key, arr);
   }
 
+  const orderSummaryMap = await buildOrderSummaryMapForSellerItems(allSellerItems);
+
   const enriched = [];
-  let orderEnrichmentCount = 0;
   for (const row of candidates) {
     const baseSku = cleanSku(row.baseSku);
     const asin = baseSku ? (asinByLabel.get(baseSku.toUpperCase()) || '') : '';
-    const sellerItems = await attachOrdersToSellerItems(sellerItemsByKey.get(`${row.currency}:${row.sku}`) || []);
-    orderEnrichmentCount += 1;
+    const sellerItems = attachOrderSummariesFromMap(sellerItemsByKey.get(`${row.currency}:${row.sku}`) || [], orderSummaryMap);
     enriched.push({ ...row, asin, sellerItems });
   }
   stockCheckLog('enrichCandidates:complete', {
     enrichedCount: enriched.length,
     asinFoundCount: enriched.filter((row) => row.asin).length,
-    orderEnrichmentCount,
+    sellerItemCount: allSellerItems.length,
     elapsedMs: getElapsedMs(startedAt)
   });
   return enriched;
