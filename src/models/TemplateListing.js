@@ -213,6 +213,15 @@ templateListingSchema.index({ sellerId: 1, deletedAt: 1, customLabel: 1 });
 templateListingSchema.index({ sellerId: 1, deletedAt: 1, createdAt: -1, customLabel: 1 });
 templateListingSchema.index({ deletedAt: 1, createdAt: -1, customLabel: 1, sellerId: 1 });
 
+// Supports Amazon Stock Check SKU -> ASIN lookup with case-insensitive customLabel matching.
+templateListingSchema.index(
+  { customLabel: 1, _asinReference: 1 },
+  {
+    name: 'customLabel_asin_ci_lookup',
+    collation: { locale: 'en', strength: 2 }
+  }
+);
+
 // Text index for fast full-text search on title and SKU (customLabel)
 // _asinReference is handled separately via exact/prefix match
 templateListingSchema.index({ title: 'text', customLabel: 'text' }, { weights: { title: 2, customLabel: 10 }, name: 'listing_text_search' });

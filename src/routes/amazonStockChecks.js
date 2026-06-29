@@ -33,6 +33,24 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function stockCheckLog(stage, details = {}) {
+  console.log(`[Amazon Stock Check] ${stage}`, {
+    timestamp: new Date().toISOString(),
+    ...details
+  });
+}
+
+function stockCheckWarn(stage, details = {}) {
+  console.warn(`[Amazon Stock Check] ${stage}`, {
+    timestamp: new Date().toISOString(),
+    ...details
+  });
+}
+
+function getElapsedMs(startedAt) {
+  return Date.now() - startedAt;
+}
+
 function isTransientMongoError(error) {
   const message = String(error?.message || '').toLowerCase();
   const name = String(error?.name || '').toLowerCase();
@@ -216,6 +234,7 @@ async function attachOrdersToSellerItems(sellerItems) {
   const itemIds = sellerItems.map((row) => row.itemId).filter(Boolean);
   if (!itemIds.length) return sellerItems;
 
+  const startedAt = Date.now();
   const orders = await Order.aggregate([
     {
       $match: {
@@ -235,6 +254,15 @@ async function attachOrdersToSellerItems(sellerItems) {
       }
     }
   ]);
+  const elapsedMs = getElapsedMs(startedAt);
+  if (elapsedMs > 2000) {
+    stockCheckWarn('Slow order enrichment query', {
+      elapsedMs,
+      sellerItemCount: sellerItems.length,
+      itemIdCount: itemIds.length,
+      orderCount: orders.length
+    });
+  }
 
   const orderMap = new Map();
   for (const order of orders) {
@@ -266,6 +294,8 @@ async function attachOrdersToSellerItems(sellerItems) {
 }
 
 async function buildCandidates({ currencies, mode, limit }) {
+  const startedAt = Date.now();
+  stockCheckLog('buildCandidates:start', { currencies, mode, limit: limit || null });
   const candidates = [];
   for (const currency of currencies) {
     const config = getConfig(currency);
@@ -274,6 +304,7 @@ async function buildCandidates({ currencies, mode, limit }) {
       ? PILOT_OPTION_B_LIMITS[config.currency]
       : Number.parseInt(limit, 10) || null;
 
+    const currencyStartedAt = Date.now();
     const rows = await SellerSkuIndex.aggregate([
       { $match: { currency: config.currency, sku: { $ne: '' } } },
       { $sort: { sku: 1, syncedAt: -1 } },
@@ -290,6 +321,12 @@ async function buildCandidates({ currencies, mode, limit }) {
       { $sort: { sku: 1 } },
       ...(runLimit ? [{ $limit: runLimit }] : [])
     ]);
+    stockCheckLog('buildCandidates:currencyComplete', {
+      currency: config.currency,
+      runLimit,
+      rowCount: rows.length,
+      elapsedMs: getElapsedMs(currencyStartedAt)
+    });
 
     for (const row of rows) {
       candidates.push({
@@ -301,16 +338,32 @@ async function buildCandidates({ currencies, mode, limit }) {
       });
     }
   }
+  stockCheckLog('buildCandidates:complete', {
+    candidateCount: candidates.length,
+    elapsedMs: getElapsedMs(startedAt)
+  });
   return candidates;
 }
 
 async function enrichCandidates(candidates) {
+  const startedAt = Date.now();
   const skus = [...new Set(candidates.map((row) => row.sku).filter(Boolean))];
   const lookupLabels = [...new Set(candidates.map((row) => row.baseSku).map(cleanSku).filter(Boolean))];
+  stockCheckLog('enrichCandidates:start', {
+    candidateCount: candidates.length,
+    skuCount: skus.length,
+    lookupLabelCount: lookupLabels.length
+  });
+
+  const templateStartedAt = Date.now();
   const templateRows = await TemplateListing.find({
     customLabel: { $in: lookupLabels },
     _asinReference: { $exists: true, $ne: '' }
   }).select('customLabel +_asinReference').collation({ locale: 'en', strength: 2 }).lean();
+  stockCheckLog('enrichCandidates:templateLookupComplete', {
+    templateRowCount: templateRows.length,
+    elapsedMs: getElapsedMs(templateStartedAt)
+  });
 
   const asinByLabel = new Map();
   for (const row of templateRows) {
@@ -319,11 +372,22 @@ async function enrichCandidates(candidates) {
     if (!asinByLabel.has(label)) asinByLabel.set(label, asin);
   }
 
+  const skuIndexStartedAt = Date.now();
   const skuIndexRows = await SellerSkuIndex.find({
     sku: { $in: skus },
     currency: { $in: [...new Set(candidates.map((row) => row.currency))] }
   }).lean();
+  stockCheckLog('enrichCandidates:skuIndexLookupComplete', {
+    skuIndexRowCount: skuIndexRows.length,
+    elapsedMs: getElapsedMs(skuIndexStartedAt)
+  });
+
+  const sellerNameStartedAt = Date.now();
   const sellerNameMap = await getSellerNameMap([...new Set(skuIndexRows.map((row) => row.seller).filter(Boolean))]);
+  stockCheckLog('enrichCandidates:sellerLookupComplete', {
+    sellerCount: sellerNameMap.size,
+    elapsedMs: getElapsedMs(sellerNameStartedAt)
+  });
 
   const sellerItemsByKey = new Map();
   for (const row of skuIndexRows) {
@@ -345,12 +409,20 @@ async function enrichCandidates(candidates) {
   }
 
   const enriched = [];
+  let orderEnrichmentCount = 0;
   for (const row of candidates) {
     const baseSku = cleanSku(row.baseSku);
     const asin = baseSku ? (asinByLabel.get(baseSku.toUpperCase()) || '') : '';
     const sellerItems = await attachOrdersToSellerItems(sellerItemsByKey.get(`${row.currency}:${row.sku}`) || []);
+    orderEnrichmentCount += 1;
     enriched.push({ ...row, asin, sellerItems });
   }
+  stockCheckLog('enrichCandidates:complete', {
+    enrichedCount: enriched.length,
+    asinFoundCount: enriched.filter((row) => row.asin).length,
+    orderEnrichmentCount,
+    elapsedMs: getElapsedMs(startedAt)
+  });
   return enriched;
 }
 
@@ -520,14 +592,30 @@ async function processRun(runId) {
 }
 
 router.get('/estimate', requireAuth, requirePageAccess(['AmazonStockCheck']), async (req, res) => {
+  const requestStartedAt = Date.now();
   try {
     const mode = req.query.mode === 'pilot_option_b' ? 'pilot_option_b' : 'custom';
     const currencies = mode === 'pilot_option_b'
       ? Object.keys(PILOT_OPTION_B_LIMITS)
       : String(req.query.currencies || 'USD').split(',').map(normalizeCurrency).filter((cur) => getConfig(cur));
+    stockCheckLog('estimate:start', {
+      mode,
+      currencies,
+      limit: req.query.limit || null,
+      userId: req.user?.userId || null
+    });
     const candidates = await buildCandidates({ currencies, mode, limit: req.query.limit });
     const enriched = await enrichCandidates(candidates);
     const withAsin = enriched.filter((row) => row.asin);
+    stockCheckLog('estimate:complete', {
+      mode,
+      currencies,
+      totalSkus: enriched.length,
+      asinFoundCount: withAsin.length,
+      noAsinCount: enriched.length - withAsin.length,
+      creditsEstimated: estimateCredits(withAsin),
+      elapsedMs: getElapsedMs(requestStartedAt)
+    });
 
     res.json({
       mode,
@@ -543,6 +631,13 @@ router.get('/estimate', requireAuth, requirePageAccess(['AmazonStockCheck']), as
       }))
     });
   } catch (error) {
+    stockCheckWarn('estimate:failed', {
+      elapsedMs: getElapsedMs(requestStartedAt),
+      errorName: error?.name || '',
+      errorMessage: error?.message || 'Failed to estimate stock check',
+      errorCode: error?.code || '',
+      isTransientMongoError: isTransientMongoError(error)
+    });
     res.status(500).json({ error: error.message || 'Failed to estimate stock check' });
   }
 });
