@@ -346,14 +346,15 @@ async function buildCandidates({ currencies, mode, limit }) {
   return candidates;
 }
 
-async function enrichCandidates(candidates) {
+async function enrichCandidates(candidates, { includeSellerItems = true } = {}) {
   const startedAt = Date.now();
   const skus = [...new Set(candidates.map((row) => row.sku).filter(Boolean))];
   const lookupLabels = [...new Set(candidates.map((row) => row.baseSku).map(cleanSku).filter(Boolean))];
   stockCheckLog('enrichCandidates:start', {
     candidateCount: candidates.length,
     skuCount: skus.length,
-    lookupLabelCount: lookupLabels.length
+    lookupLabelCount: lookupLabels.length,
+    includeSellerItems
   });
 
   const templateStartedAt = Date.now();
@@ -371,6 +372,22 @@ async function enrichCandidates(candidates) {
     const label = cleanSku(row.customLabel).toUpperCase();
     const asin = cleanAsin(row._asinReference);
     if (!asinByLabel.has(label)) asinByLabel.set(label, asin);
+  }
+
+  if (!includeSellerItems) {
+    const enriched = candidates.map((row) => {
+      const baseSku = cleanSku(row.baseSku);
+      const asin = baseSku ? (asinByLabel.get(baseSku.toUpperCase()) || '') : '';
+      return { ...row, asin, sellerItems: [] };
+    });
+    stockCheckLog('enrichCandidates:complete', {
+      enrichedCount: enriched.length,
+      asinFoundCount: enriched.filter((row) => row.asin).length,
+      sellerItemCount: 0,
+      skippedSellerItems: true,
+      elapsedMs: getElapsedMs(startedAt)
+    });
+    return enriched;
   }
 
   const skuIndexStartedAt = Date.now();
@@ -609,7 +626,7 @@ router.get('/estimate', requireAuth, requirePageAccess(['AmazonStockCheck']), as
       userId: req.user?.userId || null
     });
     const candidates = await buildCandidates({ currencies, mode, limit: req.query.limit });
-    const enriched = await enrichCandidates(candidates);
+    const enriched = await enrichCandidates(candidates, { includeSellerItems: false });
     const withAsin = enriched.filter((row) => row.asin);
     stockCheckLog('estimate:complete', {
       mode,
