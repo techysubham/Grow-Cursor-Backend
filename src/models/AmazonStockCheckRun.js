@@ -1,0 +1,43 @@
+import mongoose from 'mongoose';
+
+const AmazonStockCheckRunSchema = new mongoose.Schema(
+  {
+    countries: [{ type: String, required: true }],
+    currencies: [{ type: String, required: true }],
+    status: {
+      type: String,
+      enum: ['queued', 'running', 'completed', 'failed', 'cancelled'],
+      default: 'queued',
+      index: true
+    },
+    mode: {
+      type: String,
+      enum: ['pilot_option_b', 'custom', 'full'],
+      default: 'custom'
+    },
+    threshold: { type: Number, default: 10 },
+    autoZeroQuantity: { type: Boolean, default: false },
+    requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    totalSkus: { type: Number, default: 0 },
+    asinFoundCount: { type: Number, default: 0 },
+    noAsinCount: { type: Number, default: 0 },
+    checkedCount: { type: Number, default: 0 },
+    inStockCount: { type: Number, default: 0 },
+    lowStockCount: { type: Number, default: 0 },
+    outOfStockCount: { type: Number, default: 0 },
+    errorCount: { type: Number, default: 0 },
+    becameAvailableCount: { type: Number, default: 0 },
+    quantityZeroAttemptedCount: { type: Number, default: 0 },
+    quantityZeroSuccessCount: { type: Number, default: 0 },
+    creditsEstimated: { type: Number, default: 0 },
+    creditsUsed: { type: Number, default: 0 },
+    error: { type: String, default: '' },
+    startedAt: { type: Date, default: null },
+    completedAt: { type: Date, default: null }
+  },
+  { timestamps: true }
+);
+
+AmazonStockCheckRunSchema.index({ createdAt: -1 });
+
+export default mongoose.model('AmazonStockCheckRun', AmazonStockCheckRunSchema);

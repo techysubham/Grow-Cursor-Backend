@@ -12,7 +12,7 @@ const CONNECTION_OPTIONS = {
   autoIndex: true,
   maxPoolSize: readPoolSizeEnv('MONGO_MAX_POOL_SIZE', DEFAULT_MAX_POOL_SIZE),
   minPoolSize: readPoolSizeEnv('MONGO_MIN_POOL_SIZE', DEFAULT_MIN_POOL_SIZE),
-  serverSelectionTimeoutMS: 5000,
+  serverSelectionTimeoutMS: 10000,
   heartbeatFrequencyMS: 10000,
   socketTimeoutMS: 45000,
 };

@@ -1,0 +1,618 @@
+import express from 'express';
+import axios from 'axios';
+import { parseStringPromise } from 'xml2js';
+import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import SellerSkuIndex from '../models/SellerSkuIndex.js';
+import TemplateListing from '../models/TemplateListing.js';
+import Seller from '../models/Seller.js';
+import Order from '../models/Order.js';
+import AmazonStockCheckRun from '../models/AmazonStockCheckRun.js';
+import AmazonStockCheckItem from '../models/AmazonStockCheckItem.js';
+import AmazonStockSkuState from '../models/AmazonStockSkuState.js';
+import AmazonStockActionLog from '../models/AmazonStockActionLog.js';
+import { ensureValidToken } from './ebay.js';
+
+const router = express.Router();
+const activeRuns = new Set();
+
+const COUNTRY_CONFIG = {
+  USD: { currency: 'USD', country: 'United States', domain: 'com', scrapingdogCountry: 'us', credits: 1 },
+  AUD: { currency: 'AUD', country: 'Australia', domain: 'com.au', scrapingdogCountry: 'au', credits: 5 },
+  CAD: { currency: 'CAD', country: 'Canada', domain: 'ca', scrapingdogCountry: 'ca', credits: 5 },
+  GBP: { currency: 'GBP', country: 'United Kingdom', domain: 'co.uk', scrapingdogCountry: 'gb', credits: 5 }
+};
+
+const PILOT_OPTION_B_LIMITS = {
+  USD: 100,
+  AUD: 10,
+  CAD: 5,
+  GBP: 4
+};
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientMongoError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  const name = String(error?.name || '').toLowerCase();
+  return (
+    name.includes('mongonetwork') ||
+    name.includes('mongoserverselection') ||
+    message.includes('timed out') ||
+    message.includes('etimedout') ||
+    message.includes('server selection') ||
+    message.includes('replicasetnoprimary') ||
+    message.includes('topology')
+  );
+}
+
+async function withMongoRetry(label, operation, attempts = 4) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientMongoError(error) || attempt === attempts) break;
+      const delayMs = attempt * 5000;
+      console.warn(`[Amazon Stock Check] ${label} failed on attempt ${attempt}/${attempts}: ${error.message}. Retrying in ${delayMs}ms.`);
+      await sleep(delayMs);
+    }
+  }
+  throw lastError;
+}
+
+function normalizeCurrency(value) {
+  const cur = String(value || '').trim().toUpperCase();
+  if (cur === 'GB') return 'GBP';
+  return cur;
+}
+
+function getConfig(currency) {
+  return COUNTRY_CONFIG[normalizeCurrency(currency)] || null;
+}
+
+function cleanSku(value) {
+  return String(value || '').trim();
+}
+
+function cleanAsin(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function estimateCredits(candidates) {
+  return candidates.reduce((sum, row) => sum + (getConfig(row.currency)?.credits || 0), 0);
+}
+
+function parseStockStatus(payload, threshold = 10) {
+  const singleOffer = payload?.purchase_options?.single_offer || {};
+  const text = String(singleOffer.stock || payload?.availability_status || '').trim();
+  const normalized = text.toLowerCase();
+  const qtyMatch = normalized.match(/only\s+(\d+)\s+left/);
+  const stockQuantity = qtyMatch ? Number.parseInt(qtyMatch[1], 10) : null;
+
+  if (stockQuantity != null) {
+    return {
+      status: stockQuantity < threshold ? 'low_stock' : 'in_stock',
+      stockQuantity,
+      availabilityText: text || `Only ${stockQuantity} left`
+    };
+  }
+
+  if (
+    normalized.includes('currently unavailable') ||
+    normalized.includes('out of stock') ||
+    normalized.includes('unavailable')
+  ) {
+    return { status: 'out_of_stock', stockQuantity: null, availabilityText: text || 'Unavailable' };
+  }
+
+  if (normalized.includes('in stock')) {
+    return { status: 'in_stock', stockQuantity: null, availabilityText: text || 'In Stock' };
+  }
+
+  return {
+    status: text ? 'in_stock' : 'out_of_stock',
+    stockQuantity: null,
+    availabilityText: text || 'No stock availability text found'
+  };
+}
+
+async function fetchScrapingdogProduct({ asin, currency }) {
+  const config = getConfig(currency);
+  const apiKey = process.env.SCRAPINGDOG_API_KEY;
+  if (!apiKey) {
+    throw new Error('SCRAPINGDOG_API_KEY is not configured');
+  }
+
+  const response = await axios.get('https://api.scrapingdog.com/amazon/product', {
+    params: {
+      api_key: apiKey,
+      domain: config.domain,
+      country: config.scrapingdogCountry,
+      asin
+    },
+    timeout: 45000
+  });
+
+  return {
+    statusCode: response.status,
+    data: response.data
+  };
+}
+
+async function reviseInventoryQuantity({ sellerId, itemId, quantity, runId, itemDocId, sku, asin, requestedBy }) {
+  const log = await AmazonStockActionLog.create({
+    run: runId,
+    item: itemDocId,
+    sku,
+    asin,
+    seller: sellerId,
+    itemId,
+    actionType: 'set_quantity_zero',
+    requestedBy,
+    status: 'pending',
+    requestPayload: { quantity }
+  });
+
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller) throw new Error('Seller not found');
+
+    const accessToken = await ensureValidToken(seller);
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>${accessToken}</eBayAuthToken>
+  </RequesterCredentials>
+  <InventoryStatus>
+    <ItemID>${itemId}</ItemID>
+    <Quantity>${quantity}</Quantity>
+  </InventoryStatus>
+</ReviseInventoryStatusRequest>`;
+
+    const tradingRes = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+      headers: {
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1271',
+        'X-EBAY-API-CALL-NAME': 'ReviseInventoryStatus',
+        'X-EBAY-API-IAF-TOKEN': accessToken,
+        'Content-Type': 'text/xml'
+      },
+      timeout: 45000
+    });
+
+    const parsed = await parseStringPromise(tradingRes.data, { explicitArray: false });
+    const ack = parsed?.ReviseInventoryStatusResponse?.Ack;
+    if (ack !== 'Success' && ack !== 'Warning') {
+      const errorMsg = parsed?.ReviseInventoryStatusResponse?.Errors?.ShortMessage || 'Unknown eBay quantity update error';
+      throw new Error(errorMsg);
+    }
+
+    await AmazonStockActionLog.findByIdAndUpdate(log._id, {
+      status: 'success',
+      responseSummary: { ack }
+    });
+    return { ok: true };
+  } catch (error) {
+    await AmazonStockActionLog.findByIdAndUpdate(log._id, {
+      status: 'failed',
+      error: error.message || 'Quantity update failed'
+    });
+    return { ok: false, error: error.message || 'Quantity update failed' };
+  }
+}
+
+async function getSellerNameMap(sellerIds) {
+  const sellers = await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username name email').lean();
+  return new Map(sellers.map((seller) => [
+    String(seller._id),
+    seller.user?.username || seller.user?.name || seller.user?.email || String(seller._id)
+  ]));
+}
+
+async function attachOrdersToSellerItems(sellerItems) {
+  const itemIds = sellerItems.map((row) => row.itemId).filter(Boolean);
+  if (!itemIds.length) return sellerItems;
+
+  const orders = await Order.aggregate([
+    {
+      $match: {
+        $or: [
+          { itemNumber: { $in: itemIds } },
+          { 'lineItems.legacyItemId': { $in: itemIds } }
+        ]
+      }
+    },
+    {
+      $project: {
+        seller: 1,
+        dateSold: 1,
+        creationDate: 1,
+        itemNumber: 1,
+        lineItems: 1
+      }
+    }
+  ]);
+
+  const orderMap = new Map();
+  for (const order of orders) {
+    const ids = new Set();
+    if (order.itemNumber) ids.add(order.itemNumber);
+    for (const lineItem of order.lineItems || []) {
+      if (lineItem?.legacyItemId) ids.add(lineItem.legacyItemId);
+    }
+    for (const itemId of ids) {
+      const key = `${String(order.seller)}:${itemId}`;
+      const current = orderMap.get(key) || { count: 0, lastOrderDate: null };
+      const orderDate = order.dateSold || order.creationDate || null;
+      current.count += 1;
+      if (orderDate && (!current.lastOrderDate || new Date(orderDate) > new Date(current.lastOrderDate))) {
+        current.lastOrderDate = orderDate;
+      }
+      orderMap.set(key, current);
+    }
+  }
+
+  return sellerItems.map((row) => {
+    const summary = orderMap.get(`${String(row.sellerId)}:${row.itemId}`);
+    return {
+      ...row,
+      orderCount: summary?.count || 0,
+      lastOrderDate: summary?.lastOrderDate || null
+    };
+  });
+}
+
+async function buildCandidates({ currencies, mode, limit }) {
+  const candidates = [];
+  for (const currency of currencies) {
+    const config = getConfig(currency);
+    if (!config) continue;
+    const runLimit = mode === 'pilot_option_b'
+      ? PILOT_OPTION_B_LIMITS[config.currency]
+      : Number.parseInt(limit, 10) || null;
+
+    const rows = await SellerSkuIndex.aggregate([
+      { $match: { currency: config.currency, sku: { $ne: '' } } },
+      { $sort: { sku: 1, syncedAt: -1 } },
+      {
+        $group: {
+          _id: '$sku',
+          sku: { $first: '$sku' },
+          baseSku: { $first: '$baseSku' },
+          currency: { $first: '$currency' },
+          sellers: { $addToSet: '$seller' },
+          itemCount: { $sum: 1 }
+        }
+      },
+      { $sort: { sku: 1 } },
+      ...(runLimit ? [{ $limit: runLimit }] : [])
+    ]);
+
+    for (const row of rows) {
+      candidates.push({
+        sku: cleanSku(row.sku),
+        baseSku: cleanSku(row.baseSku),
+        sellers: row.sellers || [],
+        currency: config.currency,
+        country: config.country
+      });
+    }
+  }
+  return candidates;
+}
+
+async function enrichCandidates(candidates) {
+  const skus = [...new Set(candidates.map((row) => row.sku).filter(Boolean))];
+  const lookupLabels = [...new Set(candidates.map((row) => row.baseSku).map(cleanSku).filter(Boolean))];
+  const templateRows = await TemplateListing.find({
+    customLabel: { $in: lookupLabels },
+    _asinReference: { $exists: true, $ne: '' }
+  }).select('customLabel +_asinReference').collation({ locale: 'en', strength: 2 }).lean();
+
+  const asinByLabel = new Map();
+  for (const row of templateRows) {
+    const label = cleanSku(row.customLabel).toUpperCase();
+    const asin = cleanAsin(row._asinReference);
+    if (!asinByLabel.has(label)) asinByLabel.set(label, asin);
+  }
+
+  const skuIndexRows = await SellerSkuIndex.find({
+    sku: { $in: skus },
+    currency: { $in: [...new Set(candidates.map((row) => row.currency))] }
+  }).lean();
+  const sellerNameMap = await getSellerNameMap([...new Set(skuIndexRows.map((row) => row.seller).filter(Boolean))]);
+
+  const sellerItemsByKey = new Map();
+  for (const row of skuIndexRows) {
+    const sku = cleanSku(row.sku);
+    const currency = normalizeCurrency(row.currency);
+    const key = `${currency}:${sku}`;
+    const arr = sellerItemsByKey.get(key) || [];
+    arr.push({
+      sellerId: row.seller,
+      sellerName: sellerNameMap.get(String(row.seller)) || String(row.seller),
+      itemId: row.itemId,
+      title: row.title || '',
+      price: row.price ?? null,
+      currency,
+      quantityZeroStatus: 'not_needed',
+      quantityZeroError: ''
+    });
+    sellerItemsByKey.set(key, arr);
+  }
+
+  const enriched = [];
+  for (const row of candidates) {
+    const baseSku = cleanSku(row.baseSku);
+    const asin = baseSku ? (asinByLabel.get(baseSku.toUpperCase()) || '') : '';
+    const sellerItems = await attachOrdersToSellerItems(sellerItemsByKey.get(`${row.currency}:${row.sku}`) || []);
+    enriched.push({ ...row, asin, sellerItems });
+  }
+  return enriched;
+}
+
+async function processRun(runId) {
+  if (activeRuns.has(String(runId))) return;
+  activeRuns.add(String(runId));
+
+  try {
+    const run = await AmazonStockCheckRun.findById(runId);
+    if (!run) return;
+
+    run.status = 'running';
+    run.startedAt = new Date();
+    await run.save();
+
+    const currencies = run.currencies.map(normalizeCurrency);
+    const candidates = await withMongoRetry('Build SKU candidate list', () => buildCandidates({ currencies, mode: run.mode }));
+    const enriched = await withMongoRetry('Map base SKUs to ASINs', () => enrichCandidates(candidates));
+    const withAsin = enriched.filter((row) => row.asin);
+    const noAsin = enriched.filter((row) => !row.asin);
+
+    await AmazonStockCheckRun.findByIdAndUpdate(runId, {
+      totalSkus: enriched.length,
+      asinFoundCount: withAsin.length,
+      noAsinCount: noAsin.length,
+      creditsEstimated: estimateCredits(withAsin)
+    });
+
+    if (noAsin.length) {
+      await AmazonStockCheckItem.insertMany(noAsin.map((row) => ({
+        run: runId,
+        sku: row.sku,
+        asin: '',
+        currency: row.currency,
+        country: row.country,
+        status: 'no_asin',
+        sellerItems: row.sellerItems,
+        error: 'No ASIN found from TemplateListing._asinReference',
+        checkedAt: new Date()
+      })));
+    }
+
+    for (const row of withAsin) {
+      const itemDoc = await AmazonStockCheckItem.create({
+        run: runId,
+        sku: row.sku,
+        asin: row.asin,
+        currency: row.currency,
+        country: row.country,
+        status: 'queued',
+        sellerItems: row.sellerItems
+      });
+
+      try {
+        const previous = await AmazonStockSkuState.findOne({
+          sku: row.sku,
+          asin: row.asin,
+          currency: row.currency
+        }).lean();
+
+        const scraper = await fetchScrapingdogProduct({ asin: row.asin, currency: row.currency });
+        const parsed = parseStockStatus(scraper.data, run.threshold);
+        const becameAvailable = ['low_stock', 'out_of_stock'].includes(previous?.lastStatus) && parsed.status === 'in_stock';
+        let sellerItems = row.sellerItems;
+
+        await AmazonStockCheckRun.findByIdAndUpdate(runId, {
+          $inc: {
+            checkedCount: 1,
+            creditsUsed: getConfig(row.currency)?.credits || 0,
+            inStockCount: parsed.status === 'in_stock' ? 1 : 0,
+            lowStockCount: parsed.status === 'low_stock' ? 1 : 0,
+            outOfStockCount: parsed.status === 'out_of_stock' ? 1 : 0,
+            becameAvailableCount: becameAvailable ? 1 : 0
+          }
+        });
+
+        const shouldZero = run.autoZeroQuantity && ['low_stock', 'out_of_stock'].includes(parsed.status);
+        if (shouldZero) {
+          const updatedSellerItems = [];
+          for (const sellerItem of sellerItems) {
+            if (!sellerItem.sellerId || !sellerItem.itemId) {
+              updatedSellerItems.push({ ...sellerItem, quantityZeroStatus: 'skipped' });
+              continue;
+            }
+            await AmazonStockCheckRun.findByIdAndUpdate(runId, { $inc: { quantityZeroAttemptedCount: 1 } });
+            const result = await reviseInventoryQuantity({
+              sellerId: sellerItem.sellerId,
+              itemId: sellerItem.itemId,
+              quantity: 0,
+              runId,
+              itemDocId: itemDoc._id,
+              sku: row.sku,
+              asin: row.asin,
+              requestedBy: run.requestedBy
+            });
+            if (result.ok) {
+              await AmazonStockCheckRun.findByIdAndUpdate(runId, { $inc: { quantityZeroSuccessCount: 1 } });
+            }
+            updatedSellerItems.push({
+              ...sellerItem,
+              quantityZeroStatus: result.ok ? 'success' : 'failed',
+              quantityZeroError: result.error || ''
+            });
+          }
+          sellerItems = updatedSellerItems;
+        }
+
+        await AmazonStockCheckItem.findByIdAndUpdate(itemDoc._id, {
+          status: parsed.status,
+          stockQuantity: parsed.stockQuantity,
+          availabilityText: parsed.availabilityText,
+          scraperStatusCode: scraper.statusCode,
+          scraperResponseSummary: {
+            title: scraper.data?.title || '',
+            availability_status: scraper.data?.availability_status || '',
+            stock: scraper.data?.purchase_options?.single_offer?.stock || ''
+          },
+          previousStatus: previous?.lastStatus || '',
+          becameAvailable,
+          sellerItems,
+          checkedAt: new Date()
+        });
+
+        await AmazonStockSkuState.findOneAndUpdate(
+          { sku: row.sku, asin: row.asin, currency: row.currency },
+          {
+            sku: row.sku,
+            asin: row.asin,
+            currency: row.currency,
+            country: row.country,
+            lastStatus: parsed.status,
+            lastStockQuantity: parsed.stockQuantity,
+            lastAvailabilityText: parsed.availabilityText,
+            lastRun: runId,
+            lastCheckedAt: new Date()
+          },
+          { upsert: true }
+        );
+      } catch (error) {
+        await AmazonStockCheckItem.findByIdAndUpdate(itemDoc._id, {
+          status: 'error',
+          error: error.message || 'Scrapingdog check failed',
+          checkedAt: new Date()
+        });
+        await AmazonStockCheckRun.findByIdAndUpdate(runId, {
+          $inc: { checkedCount: 1, errorCount: 1 }
+        });
+      }
+    }
+
+    await AmazonStockCheckRun.findByIdAndUpdate(runId, {
+      status: 'completed',
+      completedAt: new Date()
+    });
+  } catch (error) {
+    const dbHint = isTransientMongoError(error)
+      ? 'MongoDB connection timed out while preparing the run. No Scrapingdog credits were used before SKU preparation completed. '
+      : '';
+    await AmazonStockCheckRun.findByIdAndUpdate(runId, {
+      status: 'failed',
+      error: `${dbHint}${error.message || 'Run failed'}`,
+      completedAt: new Date()
+    });
+  } finally {
+    activeRuns.delete(String(runId));
+  }
+}
+
+router.get('/estimate', requireAuth, requirePageAccess(['AmazonStockCheck']), async (req, res) => {
+  try {
+    const mode = req.query.mode === 'pilot_option_b' ? 'pilot_option_b' : 'custom';
+    const currencies = mode === 'pilot_option_b'
+      ? Object.keys(PILOT_OPTION_B_LIMITS)
+      : String(req.query.currencies || 'USD').split(',').map(normalizeCurrency).filter((cur) => getConfig(cur));
+    const candidates = await buildCandidates({ currencies, mode, limit: req.query.limit });
+    const enriched = await enrichCandidates(candidates);
+    const withAsin = enriched.filter((row) => row.asin);
+
+    res.json({
+      mode,
+      currencies,
+      totalSkus: enriched.length,
+      asinFoundCount: withAsin.length,
+      noAsinCount: enriched.length - withAsin.length,
+      creditsEstimated: estimateCredits(withAsin),
+      plan: currencies.map((currency) => ({
+        ...getConfig(currency),
+        skuCount: enriched.filter((row) => row.currency === currency).length,
+        asinFoundCount: withAsin.filter((row) => row.currency === currency).length
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to estimate stock check' });
+  }
+});
+
+router.post('/runs', requireAuth, requirePageAccess(['AmazonStockCheck']), async (req, res) => {
+  try {
+    const mode = req.body?.mode === 'pilot_option_b' ? 'pilot_option_b' : (req.body?.mode === 'full' ? 'full' : 'custom');
+    const currencies = mode === 'pilot_option_b'
+      ? Object.keys(PILOT_OPTION_B_LIMITS)
+      : (req.body?.currencies || ['USD']).map(normalizeCurrency).filter((cur) => getConfig(cur));
+
+    if (!currencies.length) {
+      return res.status(400).json({ error: 'Select at least one supported currency.' });
+    }
+
+    const run = await AmazonStockCheckRun.create({
+      countries: currencies.map((currency) => getConfig(currency).country),
+      currencies,
+      status: 'queued',
+      mode,
+      threshold: Number.parseInt(req.body?.threshold, 10) || 10,
+      autoZeroQuantity: Boolean(req.body?.autoZeroQuantity),
+      requestedBy: req.user?.userId || null
+    });
+
+    setTimeout(() => processRun(run._id), 0);
+    res.status(201).json({ run });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to start stock check run' });
+  }
+});
+
+router.get('/runs', requireAuth, requirePageAccess(['AmazonStockCheck']), async (_req, res) => {
+  const runs = await AmazonStockCheckRun.find().sort({ createdAt: -1 }).limit(20).populate('requestedBy', 'username name email').lean();
+  res.json({ runs });
+});
+
+router.get('/runs/:runId', requireAuth, requirePageAccess(['AmazonStockCheck']), async (req, res) => {
+  const run = await AmazonStockCheckRun.findById(req.params.runId).populate('requestedBy', 'username name email').lean();
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+  res.json({ run });
+});
+
+router.get('/runs/:runId/items', requireAuth, requirePageAccess(['AmazonStockCheck']), async (req, res) => {
+  const status = String(req.query.status || '').trim();
+  const query = { run: req.params.runId };
+  if (status) query.status = status;
+  const items = await AmazonStockCheckItem.find(query).sort({ status: 1, sku: 1 }).limit(1000).lean();
+  res.json({ items });
+});
+
+router.post('/items/:itemId/set-quantity-zero', requireAuth, requirePageAccess(['AmazonStockCheck']), async (req, res) => {
+  const item = await AmazonStockCheckItem.findById(req.params.itemId).lean();
+  if (!item) return res.status(404).json({ error: 'Item result not found' });
+
+  const sellerItem = item.sellerItems.find((row) => String(row.itemId) === String(req.body?.itemId));
+  if (!sellerItem) return res.status(404).json({ error: 'Seller item not found on this result' });
+
+  const result = await reviseInventoryQuantity({
+    sellerId: sellerItem.sellerId,
+    itemId: sellerItem.itemId,
+    quantity: 0,
+    runId: item.run,
+    itemDocId: item._id,
+    sku: item.sku,
+    asin: item.asin,
+    requestedBy: req.user?.userId || null
+  });
+
+  res.status(result.ok ? 200 : 500).json(result);
+});
+
+export default router;
