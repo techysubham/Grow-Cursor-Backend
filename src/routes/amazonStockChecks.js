@@ -176,7 +176,7 @@ async function reviseInventoryQuantity({ sellerId, itemId, quantity, runId, item
     asin,
     seller: sellerId,
     itemId,
-    actionType: 'set_quantity_zero',
+    actionType: quantity === 0 ? 'set_quantity_zero' : 'set_quantity_one',
     requestedBy,
     status: 'pending',
     requestPayload: { quantity }
@@ -775,6 +775,44 @@ router.post('/items/:itemId/set-quantity-zero', requireAuth, requirePageAccess([
     message: result.ok
       ? `Quantity set to zero for item ${sellerItem.itemId}`
       : result.error || `Failed to set quantity to zero for item ${sellerItem.itemId}`
+  });
+});
+
+router.post('/items/:itemId/set-quantity-one', requireAuth, requirePageAccess(['AmazonStockCheck']), async (req, res) => {
+  const item = await AmazonStockCheckItem.findById(req.params.itemId).lean();
+  if (!item) return res.status(404).json({ error: 'Item result not found' });
+
+  const sellerItem = item.sellerItems.find((row) => String(row.itemId) === String(req.body?.itemId));
+  if (!sellerItem) return res.status(404).json({ error: 'Seller item not found on this result' });
+
+  const result = await reviseInventoryQuantity({
+    sellerId: sellerItem.sellerId,
+    itemId: sellerItem.itemId,
+    quantity: 1,
+    runId: item.run,
+    itemDocId: item._id,
+    sku: item.sku,
+    asin: item.asin,
+    requestedBy: req.user?.userId || null
+  });
+
+  if (result.ok) {
+    await AmazonStockCheckItem.updateOne(
+      { _id: item._id, 'sellerItems.itemId': sellerItem.itemId },
+      {
+        $set: {
+          'sellerItems.$.quantityZeroStatus': 'not_needed',
+          'sellerItems.$.quantityZeroError': ''
+        }
+      }
+    );
+  }
+
+  res.status(result.ok ? 200 : 500).json({
+    ...result,
+    message: result.ok
+      ? `Quantity set to one for item ${sellerItem.itemId}`
+      : result.error || `Failed to set quantity to one for item ${sellerItem.itemId}`
   });
 });
 

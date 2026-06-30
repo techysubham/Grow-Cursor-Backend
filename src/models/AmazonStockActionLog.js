@@ -10,7 +10,7 @@ const AmazonStockActionLogSchema = new mongoose.Schema(
     itemId: { type: String, default: '', index: true },
     actionType: {
       type: String,
-      enum: ['set_quantity_zero', 'revise_listing', 'end_item'],
+      enum: ['set_quantity_zero', 'set_quantity_one', 'revise_listing', 'end_item'],
       required: true
     },
     requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
