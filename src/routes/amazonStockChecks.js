@@ -95,8 +95,16 @@ function cleanSku(value) {
   return String(value || '').trim();
 }
 
+function getBaseLabel(value) {
+  return cleanSku(value).split('-')[0].trim();
+}
+
 function cleanAsin(value) {
   return String(value || '').trim().toUpperCase();
+}
+
+function isAmazonAsin(value) {
+  return /^[A-Z0-9]{10}$/.test(cleanAsin(value)) && cleanAsin(value).startsWith('B0');
 }
 
 function estimateCredits(candidates) {
@@ -349,7 +357,7 @@ async function buildCandidates({ currencies, mode, limit }) {
 async function enrichCandidates(candidates, { includeSellerItems = true } = {}) {
   const startedAt = Date.now();
   const skus = [...new Set(candidates.map((row) => row.sku).filter(Boolean))];
-  const lookupLabels = [...new Set(candidates.map((row) => row.baseSku).map(cleanSku).filter(Boolean))];
+  const lookupLabels = [...new Set(candidates.map((row) => row.baseSku).map(getBaseLabel).filter(Boolean))];
   stockCheckLog('enrichCandidates:start', {
     candidateCount: candidates.length,
     skuCount: skus.length,
@@ -358,10 +366,32 @@ async function enrichCandidates(candidates, { includeSellerItems = true } = {}) 
   });
 
   const templateStartedAt = Date.now();
-  const templateRows = await TemplateListing.find({
-    customLabel: { $in: lookupLabels },
-    _asinReference: { $exists: true, $ne: '' }
-  }).select('customLabel +_asinReference').collation({ locale: 'en', strength: 2 }).lean();
+  const templateRows = [];
+  const seenTemplateIds = new Set();
+  const addTemplateRows = (rows) => {
+    for (const row of rows) {
+      const id = String(row._id);
+      if (seenTemplateIds.has(id)) continue;
+      seenTemplateIds.add(id);
+      templateRows.push(row);
+    }
+  };
+
+  if (lookupLabels.length) {
+    const indexedLookupStartedAt = Date.now();
+    const indexedRows = await TemplateListing.find({
+      baseCustomLabel: { $in: lookupLabels },
+      _asinReference: { $exists: true, $ne: '' }
+    })
+      .select('customLabel baseCustomLabel +_asinReference')
+      .collation({ locale: 'en', strength: 2 })
+      .lean();
+    addTemplateRows(indexedRows);
+    stockCheckLog('enrichCandidates:templateIndexedLookupComplete', {
+      templateRowCount: indexedRows.length,
+      elapsedMs: getElapsedMs(indexedLookupStartedAt)
+    });
+  }
   stockCheckLog('enrichCandidates:templateLookupComplete', {
     templateRowCount: templateRows.length,
     elapsedMs: getElapsedMs(templateStartedAt)
@@ -369,15 +399,16 @@ async function enrichCandidates(candidates, { includeSellerItems = true } = {}) 
 
   const asinByLabel = new Map();
   for (const row of templateRows) {
-    const label = cleanSku(row.customLabel).toUpperCase();
+    const label = getBaseLabel(row.baseCustomLabel || row.customLabel).toUpperCase();
     const asin = cleanAsin(row._asinReference);
     if (!asinByLabel.has(label)) asinByLabel.set(label, asin);
   }
 
   if (!includeSellerItems) {
     const enriched = candidates.map((row) => {
-      const baseSku = cleanSku(row.baseSku);
-      const asin = baseSku ? (asinByLabel.get(baseSku.toUpperCase()) || '') : '';
+      const baseSku = getBaseLabel(row.baseSku);
+      const directAsin = isAmazonAsin(row.baseSku) ? cleanAsin(row.baseSku) : (isAmazonAsin(row.sku) ? cleanAsin(row.sku) : '');
+      const asin = directAsin || (baseSku ? (asinByLabel.get(baseSku.toUpperCase()) || '') : '');
       return { ...row, asin, sellerItems: [] };
     });
     stockCheckLog('enrichCandidates:complete', {
@@ -433,8 +464,9 @@ async function enrichCandidates(candidates, { includeSellerItems = true } = {}) 
 
   const enriched = [];
   for (const row of candidates) {
-    const baseSku = cleanSku(row.baseSku);
-    const asin = baseSku ? (asinByLabel.get(baseSku.toUpperCase()) || '') : '';
+    const baseSku = getBaseLabel(row.baseSku);
+    const directAsin = isAmazonAsin(row.baseSku) ? cleanAsin(row.baseSku) : (isAmazonAsin(row.sku) ? cleanAsin(row.sku) : '');
+    const asin = directAsin || (baseSku ? (asinByLabel.get(baseSku.toUpperCase()) || '') : '');
     const sellerItems = attachOrderSummariesFromMap(sellerItemsByKey.get(`${row.currency}:${row.sku}`) || [], orderSummaryMap);
     enriched.push({ ...row, asin, sellerItems });
   }

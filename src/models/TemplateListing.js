@@ -1,5 +1,9 @@
 import mongoose from 'mongoose';
 
+function extractBaseCustomLabel(value) {
+  return String(value || '').trim().split('-')[0].trim();
+}
+
 const templateListingSchema = new mongoose.Schema({
   templateId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -24,6 +28,11 @@ const templateListingSchema = new mongoose.Schema({
     type: String,
     required: true,
     trim: true
+  },
+  baseCustomLabel: {
+    type: String,
+    trim: true,
+    index: true
   },
   categoryId: Number,
   categoryName: String,
@@ -221,6 +230,13 @@ templateListingSchema.index(
     collation: { locale: 'en', strength: 2 }
   }
 );
+templateListingSchema.index(
+  { baseCustomLabel: 1, _asinReference: 1 },
+  {
+    name: 'baseCustomLabel_asin_ci_lookup',
+    collation: { locale: 'en', strength: 2 }
+  }
+);
 
 // Text index for fast full-text search on title and SKU (customLabel)
 // _asinReference is handled separately via exact/prefix match
@@ -229,6 +245,7 @@ templateListingSchema.index({ title: 'text', customLabel: 'text' }, { weights: {
 // Pre-save hook to auto-generate Amazon link and update timestamp
 templateListingSchema.pre('save', function (next) {
   this.updatedAt = Date.now();
+  this.baseCustomLabel = extractBaseCustomLabel(this.customLabel);
 
   // Auto-generate Amazon link from ASIN
   if (this._asinReference && !this.amazonLink) {
