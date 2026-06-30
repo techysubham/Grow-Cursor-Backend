@@ -29,7 +29,7 @@ const PILOT_OPTION_B_LIMITS = {
   CAD: 5,
   GBP: 4
 };
-const SCRAPINGDOG_CONCURRENT = Math.max(1, Number.parseInt(process.env.SCRAPINGDOG_CONCURRENT || '30', 10));
+const SCRAPINGDOG_CONCURRENT = Math.max(1, Number.parseInt(process.env.SCRAPINGDOG_CONCURRENT || '40', 10));
 const EBAY_QUANTITY_CONCURRENT = Math.max(1, Number.parseInt(process.env.EBAY_QUANTITY_CONCURRENT || '5', 10));
 const scrapingdogLimit = pLimit(SCRAPINGDOG_CONCURRENT);
 const ebayQuantityLimit = pLimit(EBAY_QUANTITY_CONCURRENT);
@@ -484,16 +484,13 @@ async function enrichCandidates(candidates, { includeSellerItems = true } = {}) 
   return enriched;
 }
 
-async function processStockRow({ row, run, runId }) {
-  const itemDoc = await AmazonStockCheckItem.create({
-    run: runId,
-    sku: row.sku,
-    asin: row.asin,
-    currency: row.currency,
-    country: row.country,
-    status: 'queued',
-    sellerItems: row.sellerItems
-  });
+async function processStockItem({ itemDoc, run, runId }) {
+  const row = itemDoc;
+  const claim = await AmazonStockCheckItem.updateOne(
+    { _id: row._id, status: 'queued' },
+    { $set: { status: 'processing' } }
+  );
+  if (claim.modifiedCount !== 1) return;
 
   try {
     const previous = await AmazonStockSkuState.findOne({
@@ -531,7 +528,7 @@ async function processStockRow({ row, run, runId }) {
             itemId: sellerItem.itemId,
             quantity: 0,
             runId,
-            itemDocId: itemDoc._id,
+            itemDocId: row._id,
             sku: row.sku,
             asin: row.asin,
             requestedBy: run.requestedBy
@@ -549,7 +546,7 @@ async function processStockRow({ row, run, runId }) {
       sellerItems = updatedSellerItems;
     }
 
-    await AmazonStockCheckItem.findByIdAndUpdate(itemDoc._id, {
+    await AmazonStockCheckItem.findByIdAndUpdate(row._id, {
       status: parsed.status,
       stockQuantity: parsed.stockQuantity,
       availabilityText: parsed.availabilityText,
@@ -581,7 +578,7 @@ async function processStockRow({ row, run, runId }) {
       { upsert: true }
     );
   } catch (error) {
-    await AmazonStockCheckItem.findByIdAndUpdate(itemDoc._id, {
+    await AmazonStockCheckItem.findByIdAndUpdate(row._id, {
       status: 'error',
       error: error.message || 'Scrapingdog check failed',
       checkedAt: new Date()
@@ -590,6 +587,88 @@ async function processStockRow({ row, run, runId }) {
       $inc: { checkedCount: 1, errorCount: 1 }
     });
   }
+}
+
+async function initializeRunItems(run) {
+  const runId = run._id;
+  const existingItemCount = await AmazonStockCheckItem.countDocuments({ run: runId });
+  if (existingItemCount > 0) {
+    const completedItemCount = await AmazonStockCheckItem.countDocuments({
+      run: runId,
+      status: { $nin: ['queued', 'no_asin'] }
+    });
+    if (run.totalSkus > 0 && existingItemCount < run.totalSkus && completedItemCount === 0) {
+      stockCheckWarn('processRun:partialInitializationRebuild', {
+        runId: String(runId),
+        existingItemCount,
+        expectedItemCount: run.totalSkus
+      });
+      await AmazonStockCheckItem.deleteMany({ run: runId });
+    } else {
+      stockCheckLog('processRun:itemsAlreadyInitialized', {
+        runId: String(runId),
+        existingItemCount,
+        completedItemCount
+      });
+      return;
+    }
+  }
+
+  const remainingItemCount = await AmazonStockCheckItem.countDocuments({ run: runId });
+  if (remainingItemCount > 0) {
+    stockCheckLog('processRun:itemsAlreadyInitialized', {
+      runId: String(runId),
+      existingItemCount: remainingItemCount
+    });
+    return;
+  }
+
+  const currencies = run.currencies.map(normalizeCurrency);
+  const candidates = await withMongoRetry('Build SKU candidate list', () => buildCandidates({ currencies, mode: run.mode }));
+  const enriched = await withMongoRetry('Map base SKUs to ASINs', () => enrichCandidates(candidates));
+  const withAsin = enriched.filter((row) => row.asin);
+  const noAsin = enriched.filter((row) => !row.asin);
+
+  await AmazonStockCheckRun.findByIdAndUpdate(runId, {
+    totalSkus: enriched.length,
+    asinFoundCount: withAsin.length,
+    noAsinCount: noAsin.length,
+    creditsEstimated: estimateCredits(withAsin)
+  });
+
+  const docs = [
+    ...noAsin.map((row) => ({
+      run: runId,
+      sku: row.sku,
+      asin: '',
+      currency: row.currency,
+      country: row.country,
+      status: 'no_asin',
+      sellerItems: row.sellerItems,
+      error: 'No ASIN found from TemplateListing._asinReference',
+      checkedAt: new Date()
+    })),
+    ...withAsin.map((row) => ({
+      run: runId,
+      sku: row.sku,
+      asin: row.asin,
+      currency: row.currency,
+      country: row.country,
+      status: 'queued',
+      sellerItems: row.sellerItems
+    }))
+  ];
+
+  if (docs.length) {
+    await AmazonStockCheckItem.insertMany(docs, { ordered: false });
+  }
+
+  stockCheckLog('processRun:itemsInitialized', {
+    runId: String(runId),
+    totalSkus: enriched.length,
+    asinFoundCount: withAsin.length,
+    noAsinCount: noAsin.length
+  });
 }
 
 async function processRun(runId) {
@@ -604,43 +683,23 @@ async function processRun(runId) {
     run.startedAt = new Date();
     await run.save();
 
-    const currencies = run.currencies.map(normalizeCurrency);
-    const candidates = await withMongoRetry('Build SKU candidate list', () => buildCandidates({ currencies, mode: run.mode }));
-    const enriched = await withMongoRetry('Map base SKUs to ASINs', () => enrichCandidates(candidates));
-    const withAsin = enriched.filter((row) => row.asin);
-    const noAsin = enriched.filter((row) => !row.asin);
-
-    await AmazonStockCheckRun.findByIdAndUpdate(runId, {
-      totalSkus: enriched.length,
-      asinFoundCount: withAsin.length,
-      noAsinCount: noAsin.length,
-      creditsEstimated: estimateCredits(withAsin)
-    });
-
-    if (noAsin.length) {
-      await AmazonStockCheckItem.insertMany(noAsin.map((row) => ({
-        run: runId,
-        sku: row.sku,
-        asin: '',
-        currency: row.currency,
-        country: row.country,
-        status: 'no_asin',
-        sellerItems: row.sellerItems,
-        error: 'No ASIN found from TemplateListing._asinReference',
-        checkedAt: new Date()
-      })));
-    }
+    await initializeRunItems(run);
+    const queuedItems = await AmazonStockCheckItem.find({
+      run: runId,
+      status: 'queued',
+      asin: { $exists: true, $ne: '' }
+    }).lean();
 
     stockCheckLog('processRun:stockChecksStart', {
       runId: String(runId),
-      asinCount: withAsin.length,
+      queuedCount: queuedItems.length,
       scrapingdogConcurrent: SCRAPINGDOG_CONCURRENT,
       ebayQuantityConcurrent: EBAY_QUANTITY_CONCURRENT
     });
-    await Promise.all(withAsin.map((row) => scrapingdogLimit(() => processStockRow({ row, run, runId }))));
+    await Promise.all(queuedItems.map((itemDoc) => scrapingdogLimit(() => processStockItem({ itemDoc, run, runId }))));
     stockCheckLog('processRun:stockChecksComplete', {
       runId: String(runId),
-      asinCount: withAsin.length
+      queuedCount: queuedItems.length
     });
 
     await AmazonStockCheckRun.findByIdAndUpdate(runId, {
@@ -661,18 +720,81 @@ async function processRun(runId) {
   }
 }
 
+export async function resumeRunningAmazonStockCheckRuns() {
+  const runs = await AmazonStockCheckRun.find({
+    status: { $in: ['queued', 'running'] }
+  }).sort({ createdAt: 1 }).lean();
+
+  for (const run of runs) {
+    await AmazonStockCheckItem.updateMany(
+      {
+        run: run._id,
+        status: 'processing',
+        asin: { $exists: true, $ne: '' }
+      },
+      { $set: { status: 'queued' } }
+    );
+
+    const queuedItemCount = await AmazonStockCheckItem.countDocuments({
+      run: run._id,
+      status: 'queued',
+      asin: { $exists: true, $ne: '' }
+    });
+    const totalItemCount = await AmazonStockCheckItem.countDocuments({ run: run._id });
+
+    if (totalItemCount > 0 && queuedItemCount === 0) {
+      await AmazonStockCheckRun.findByIdAndUpdate(run._id, {
+        status: 'completed',
+        completedAt: new Date(),
+        error: ''
+      });
+      continue;
+    }
+
+    stockCheckLog('resume:runQueued', {
+      runId: String(run._id),
+      status: run.status,
+      totalItemCount,
+      queuedItemCount
+    });
+    setTimeout(() => processRun(run._id), 0);
+  }
+
+  return runs.length;
+}
+
+function normalizeItemFilters(filter) {
+  return String(filter || 'actionable')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function getItemFilterCondition(filter) {
+  if (filter === 'low_stock') return { status: 'low_stock' };
+  if (filter === 'out_of_stock') return { status: 'out_of_stock' };
+  if (filter === 'errors') return { status: 'error' };
+  if (filter === 'no_asin') return { status: 'no_asin' };
+  if (filter === 'restocked') return { becameAvailable: true };
+  if (filter === 'qty_zero_success') return { 'sellerItems.quantityZeroStatus': 'success' };
+  if (filter === 'qty_zero_failed') return { 'sellerItems.quantityZeroStatus': 'failed' };
+  if (filter === 'has_orders') return { 'sellerItems.orderCount': { $gt: 0 } };
+  if (filter === 'checked') return { status: { $nin: ['queued', 'processing', 'no_asin'] } };
+  if (filter === 'actionable') return { status: { $in: ['low_stock', 'out_of_stock'] } };
+  return null;
+}
+
 function buildItemFilterQuery(runId, filter) {
   const query = { run: runId };
-  if (filter === 'low_stock') query.status = 'low_stock';
-  else if (filter === 'out_of_stock') query.status = 'out_of_stock';
-  else if (filter === 'errors') query.status = 'error';
-  else if (filter === 'no_asin') query.status = 'no_asin';
-  else if (filter === 'restocked') query.becameAvailable = true;
-  else if (filter === 'qty_zero_success') query['sellerItems.quantityZeroStatus'] = 'success';
-  else if (filter === 'qty_zero_failed') query['sellerItems.quantityZeroStatus'] = 'failed';
-  else if (filter === 'has_orders') query['sellerItems.orderCount'] = { $gt: 0 };
-  else if (filter === 'checked') query.status = { $nin: ['queued', 'no_asin'] };
-  else if (filter === 'actionable') query.status = { $in: ['low_stock', 'out_of_stock'] };
+  const conditions = normalizeItemFilters(filter)
+    .filter((value) => value !== 'all')
+    .map(getItemFilterCondition)
+    .filter(Boolean);
+  if (conditions.length === 1) {
+    Object.assign(query, conditions[0]);
+  } else if (conditions.length > 1) {
+    query.$and = conditions;
+  }
   return query;
 }
 
@@ -721,10 +843,12 @@ async function getItemFilterCounts(runId) {
 router.get('/estimate', requireAuth, requirePageAccess(['AmazonStockCheck']), async (req, res) => {
   const requestStartedAt = Date.now();
   try {
-    const mode = req.query.mode === 'pilot_option_b' ? 'pilot_option_b' : 'custom';
+    const mode = req.query.mode === 'pilot_option_b' ? 'pilot_option_b' : (req.query.mode === 'full' ? 'full' : 'custom');
     const currencies = mode === 'pilot_option_b'
       ? Object.keys(PILOT_OPTION_B_LIMITS)
-      : String(req.query.currencies || 'USD').split(',').map(normalizeCurrency).filter((cur) => getConfig(cur));
+      : (mode === 'full'
+        ? Object.keys(COUNTRY_CONFIG)
+        : String(req.query.currencies || 'USD').split(',').map(normalizeCurrency).filter((cur) => getConfig(cur)));
     stockCheckLog('estimate:start', {
       mode,
       currencies,
@@ -797,9 +921,28 @@ router.post('/runs', requireAuth, requirePageAccess(['AmazonStockCheck']), async
   }
 });
 
-router.get('/runs', requireAuth, requirePageAccess(['AmazonStockCheck']), async (_req, res) => {
-  const runs = await AmazonStockCheckRun.find().sort({ createdAt: -1 }).limit(20).populate('requestedBy', 'username name email').lean();
-  res.json({ runs });
+router.get('/runs', requireAuth, requirePageAccess(['AmazonStockCheck']), async (req, res) => {
+  const page = Math.max(1, Number.parseInt(req.query.page || '1', 10));
+  const limit = Math.min(50, Math.max(5, Number.parseInt(req.query.limit || '20', 10)));
+  const skip = (page - 1) * limit;
+  const [runs, total] = await Promise.all([
+    AmazonStockCheckRun.find()
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate('requestedBy', 'username name email')
+      .lean(),
+    AmazonStockCheckRun.countDocuments()
+  ]);
+  res.json({
+    runs,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit))
+    }
+  });
 });
 
 router.get('/runs/:runId', requireAuth, requirePageAccess(['AmazonStockCheck']), async (req, res) => {

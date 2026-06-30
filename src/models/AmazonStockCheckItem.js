@@ -29,7 +29,7 @@ const AmazonStockCheckItemSchema = new mongoose.Schema(
     country: { type: String, required: true },
     status: {
       type: String,
-      enum: ['queued', 'in_stock', 'low_stock', 'out_of_stock', 'no_asin', 'error'],
+      enum: ['queued', 'processing', 'in_stock', 'low_stock', 'out_of_stock', 'no_asin', 'error'],
       default: 'queued',
       index: true
     },
@@ -47,6 +47,7 @@ const AmazonStockCheckItemSchema = new mongoose.Schema(
 );
 
 AmazonStockCheckItemSchema.index({ run: 1, status: 1 });
+AmazonStockCheckItemSchema.index({ run: 1, status: 1, asin: 1 });
 AmazonStockCheckItemSchema.index({ run: 1, becameAvailable: 1 });
 AmazonStockCheckItemSchema.index({ run: 1, 'sellerItems.quantityZeroStatus': 1 });
 AmazonStockCheckItemSchema.index({ run: 1, 'sellerItems.orderCount': 1 });
