@@ -728,7 +728,22 @@ router.post('/items/:itemId/set-quantity-zero', requireAuth, requirePageAccess([
     requestedBy: req.user?.userId || null
   });
 
-  res.status(result.ok ? 200 : 500).json(result);
+  await AmazonStockCheckItem.updateOne(
+    { _id: item._id, 'sellerItems.itemId': sellerItem.itemId },
+    {
+      $set: {
+        'sellerItems.$.quantityZeroStatus': result.ok ? 'success' : 'failed',
+        'sellerItems.$.quantityZeroError': result.error || ''
+      }
+    }
+  );
+
+  res.status(result.ok ? 200 : 500).json({
+    ...result,
+    message: result.ok
+      ? `Quantity set to zero for item ${sellerItem.itemId}`
+      : result.error || `Failed to set quantity to zero for item ${sellerItem.itemId}`
+  });
 });
 
 export default router;
