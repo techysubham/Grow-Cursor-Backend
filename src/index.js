@@ -70,6 +70,7 @@ import affiliateOrdersRoutes from './routes/affiliateOrders.js';
 import listingStatsRoutes from './routes/listingStats.js';
 import itemCategoryMapRoutes from './routes/itemCategoryMap.js';
 import endListingLogsRoutes from './routes/endListingLogs.js';
+import amazonStockChecksRoutes, { resumeRunningAmazonStockCheckRuns } from './routes/amazonStockChecks.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
@@ -223,6 +224,7 @@ app.use('/api/affiliate-orders', affiliateOrdersRoutes);
 app.use('/api/listing-stats', listingStatsRoutes);
 app.use('/api/item-category-map', itemCategoryMapRoutes);
 app.use('/api/end-listing-logs', endListingLogsRoutes);
+app.use('/api/amazon-stock-checks', amazonStockChecksRoutes);
 
 // ── Sentry error handler ─────────────────────────────────────────────────────
 // Must be registered AFTER all routes but BEFORE the custom error handler.
@@ -280,6 +282,16 @@ connectToDatabase()
         })
         .catch((e) => {
           logger.error('[AutoCompat] Failed to resume running batches:', { error: e.message });
+        });
+
+      resumeRunningAmazonStockCheckRuns()
+        .then((resumedRunCount) => {
+          if (resumedRunCount > 0) {
+            logger.info(`[Amazon Stock Check] Resumed ${resumedRunCount} queued/running run(s) after server restart`);
+          }
+        })
+        .catch((e) => {
+          logger.error('[Amazon Stock Check] Failed to resume queued/running runs:', { error: e.message });
         });
     });
   })
