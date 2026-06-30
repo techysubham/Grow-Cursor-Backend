@@ -47,6 +47,9 @@ const AmazonStockCheckItemSchema = new mongoose.Schema(
 );
 
 AmazonStockCheckItemSchema.index({ run: 1, status: 1 });
+AmazonStockCheckItemSchema.index({ run: 1, becameAvailable: 1 });
+AmazonStockCheckItemSchema.index({ run: 1, 'sellerItems.quantityZeroStatus': 1 });
+AmazonStockCheckItemSchema.index({ run: 1, 'sellerItems.orderCount': 1 });
 AmazonStockCheckItemSchema.index({ currency: 1, sku: 1, asin: 1 });
 
 export default mongoose.model('AmazonStockCheckItem', AmazonStockCheckItemSchema);
