@@ -3,6 +3,12 @@ import { requireAuth, requireAuthFile } from '../middleware/auth.js';
 import EmployeeProfile from '../models/EmployeeProfile.js';
 import User from '../models/User.js';
 import multer from 'multer';
+import { validate } from '../utils/validate.js';
+import {
+  updateMyProfileSchema,
+  adminUpdateProfileSchema,
+  adminProfileFieldsSchema,
+} from '../schemas/index.js';
 
 const router = Router();
 
@@ -82,7 +88,25 @@ router.get('/me', requireAuth, async (req, res) => {
 });
 
 // PUT /api/employee-profiles/me - upsert my profile
-router.put('/me', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /employee-profiles/me:
+ *   put:
+ *     tags: [EmployeeProfiles]
+ *     summary: Update the current user's own profile
+ *     security:
+ *       - bearerAuth: []
+ *     description: Employees can update their own personal fields (contact info, bank details, etc.).
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *     responses:
+ *       200: { description: Updated profile }
+ *       401: { description: Unauthorized }
+ */
+router.put('/me', requireAuth, validate(updateMyProfileSchema), async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id || req.user.id;
     const data = pickProfile(req.body || {});
@@ -98,6 +122,19 @@ router.put('/me', requireAuth, async (req, res) => {
 });
 
 // GET /api/employee-profiles - list all (superadmin, hradmin, operationhead)
+/**
+ * @swagger
+ * /employee-profiles:
+ *   get:
+ *     tags: [EmployeeProfiles]
+ *     summary: List all employee profiles
+ *     security:
+ *       - bearerAuth: []
+ *     description: Returns all profiles (admin) or the caller's own profile (non-admin).
+ *     responses:
+ *       200: { description: Array of profile objects }
+ *       401: { description: Unauthorized }
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
@@ -131,7 +168,29 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // PUT /api/employee-profiles/:id - update user and profile fields (superadmin, hradmin, operationhead)
-router.put('/:id', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /employee-profiles/{id}:
+ *   put:
+ *     tags: [EmployeeProfiles]
+ *     summary: Update any employee's profile (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     description: Admins can update any employee profile fields. Non-admins can only update their own.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *     responses:
+ *       200: { description: Updated profile }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Profile not found }
+ */
+router.put('/:id', requireAuth, validate(adminUpdateProfileSchema), async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Forbidden' });
@@ -173,7 +232,31 @@ router.put('/:id', requireAuth, async (req, res) => {
 });
 
 // PUT /api/employee-profiles/:id/admin-fields - update workingMode and workingHours (superadmin, hradmin, operationhead only)
-router.put('/:id/admin-fields', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /employee-profiles/{id}/admin-fields:
+ *   put:
+ *     tags: [EmployeeProfiles]
+ *     summary: Update admin-only profile fields
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Restricted to superadmin. Updates fields such as salary, employee ID, joining date,
+ *       department, designation, and other HR-controlled fields.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *     responses:
+ *       200: { description: Updated profile }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Profile not found }
+ */
+router.put('/:id/admin-fields', requireAuth, validate(adminProfileFieldsSchema), async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Forbidden' });
@@ -201,6 +284,29 @@ router.put('/:id/admin-fields', requireAuth, async (req, res) => {
 // ===== FILE UPLOAD ENDPOINTS =====
 
 // POST /api/employee-profiles/me/upload/profile-pic - Upload profile picture
+/**
+ * @swagger
+ * /employee-profiles/me/upload/profile-pic:
+ *   post:
+ *     tags: [EmployeeProfiles]
+ *     summary: Upload own profile picture
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *     responses:
+ *       200: { description: Upload confirmation with file path }
+ *       400: { description: No file provided }
+ *       401: { description: Unauthorized }
+ */
 router.post('/me/upload/profile-pic', requireAuth, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -237,6 +343,27 @@ router.post('/me/upload/profile-pic', requireAuth, upload.single('file'), async 
 });
 
 // POST /api/employee-profiles/me/upload/aadhar - Upload Aadhaar document
+/**
+ * @swagger
+ * /employee-profiles/me/upload/aadhar:
+ *   post:
+ *     tags: [EmployeeProfiles]
+ *     summary: Upload own Aadhaar card document
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file: { type: string, format: binary }
+ *     responses:
+ *       200: { description: Upload confirmation }
+ *       400: { description: No file provided }
+ *       401: { description: Unauthorized }
+ */
 router.post('/me/upload/aadhar', requireAuth, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -273,6 +400,27 @@ router.post('/me/upload/aadhar', requireAuth, upload.single('file'), async (req,
 });
 
 // POST /api/employee-profiles/me/upload/pan - Upload PAN document
+/**
+ * @swagger
+ * /employee-profiles/me/upload/pan:
+ *   post:
+ *     tags: [EmployeeProfiles]
+ *     summary: Upload own PAN card document
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file: { type: string, format: binary }
+ *     responses:
+ *       200: { description: Upload confirmation }
+ *       400: { description: No file provided }
+ *       401: { description: Unauthorized }
+ */
 router.post('/me/upload/pan', requireAuth, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -311,6 +459,22 @@ router.post('/me/upload/pan', requireAuth, upload.single('file'), async (req, re
 // ===== FILE RETRIEVAL ENDPOINTS =====
 
 // GET /api/employee-profiles/me/file/profile-pic - Get my profile picture
+/**
+ * @swagger
+ * /employee-profiles/me/file/profile-pic:
+ *   get:
+ *     tags: [EmployeeProfiles]
+ *     summary: Serve own profile picture
+ *     security:
+ *       - bearerAuth: []
+ *     description: Returns the profile picture file. Auth token passed as query param `token`.
+ *     parameters:
+ *       - { in: query, name: token, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Image file stream }
+ *       401: { description: Unauthorized }
+ *       404: { description: File not found }
+ */
 router.get('/me/file/profile-pic', requireAuthFile, async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id || req.user.id;
@@ -335,6 +499,21 @@ router.get('/me/file/profile-pic', requireAuthFile, async (req, res) => {
 });
 
 // GET /api/employee-profiles/me/file/aadhar - Get my Aadhaar document
+/**
+ * @swagger
+ * /employee-profiles/me/file/aadhar:
+ *   get:
+ *     tags: [EmployeeProfiles]
+ *     summary: Serve own Aadhaar document
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: token, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Document file stream }
+ *       401: { description: Unauthorized }
+ *       404: { description: File not found }
+ */
 router.get('/me/file/aadhar', requireAuthFile, async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id || req.user.id;
@@ -356,6 +535,21 @@ router.get('/me/file/aadhar', requireAuthFile, async (req, res) => {
 });
 
 // GET /api/employee-profiles/me/file/pan - Get my PAN document
+/**
+ * @swagger
+ * /employee-profiles/me/file/pan:
+ *   get:
+ *     tags: [EmployeeProfiles]
+ *     summary: Serve own PAN document
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: token, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Document file stream }
+ *       401: { description: Unauthorized }
+ *       404: { description: File not found }
+ */
 router.get('/me/file/pan', requireAuthFile, async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id || req.user.id;
@@ -377,6 +571,23 @@ router.get('/me/file/pan', requireAuthFile, async (req, res) => {
 });
 
 // GET /api/employee-profiles/:id/file/profile-pic - Get employee's profile picture (admin access)
+/**
+ * @swagger
+ * /employee-profiles/{id}/file/profile-pic:
+ *   get:
+ *     tags: [EmployeeProfiles]
+ *     summary: Serve any employee's profile picture (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *       - { in: query, name: token, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Image file stream }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: File not found }
+ */
 router.get('/:id/file/profile-pic', requireAuthFile, async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
@@ -401,6 +612,23 @@ router.get('/:id/file/profile-pic', requireAuthFile, async (req, res) => {
 });
 
 // GET /api/employee-profiles/:id/file/aadhar - Get employee's Aadhaar document (admin access)
+/**
+ * @swagger
+ * /employee-profiles/{id}/file/aadhar:
+ *   get:
+ *     tags: [EmployeeProfiles]
+ *     summary: Serve any employee's Aadhaar document (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *       - { in: query, name: token, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Document file stream }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: File not found }
+ */
 router.get('/:id/file/aadhar', requireAuthFile, async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
@@ -425,6 +653,23 @@ router.get('/:id/file/aadhar', requireAuthFile, async (req, res) => {
 });
 
 // GET /api/employee-profiles/:id/file/pan - Get employee's PAN document (admin access)
+/**
+ * @swagger
+ * /employee-profiles/{id}/file/pan:
+ *   get:
+ *     tags: [EmployeeProfiles]
+ *     summary: Serve any employee's PAN document (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *       - { in: query, name: token, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Document file stream }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: File not found }
+ */
 router.get('/:id/file/pan', requireAuthFile, async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
@@ -449,6 +694,25 @@ router.get('/:id/file/pan', requireAuthFile, async (req, res) => {
 });
 
 // PATCH /api/employee-profiles/:id/toggle-hidden - Toggle hidden status (superadmin, hradmin only)
+/**
+ * @swagger
+ * /employee-profiles/{id}/toggle-hidden:
+ *   patch:
+ *     tags: [EmployeeProfiles]
+ *     summary: Toggle the hidden flag on an employee profile (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       When hidden is true, the employee is excluded from most list views.
+ *       Restricted to superadmin.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Updated profile with new hidden value }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Profile not found }
+ */
 router.patch('/:id/toggle-hidden', requireAuth, async (req, res) => {
   try {
     // Only superadmin and hradmin can hide/unhide profiles
@@ -489,6 +753,23 @@ router.patch('/:id/toggle-hidden', requireAuth, async (req, res) => {
 });
 
 // DELETE /api/employee-profiles/:id - Hard delete employee profile and user account (admin only)
+/**
+ * @swagger
+ * /employee-profiles/{id}:
+ *   delete:
+ *     tags: [EmployeeProfiles]
+ *     summary: Delete an employee profile (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     description: Permanently deletes the profile. Restricted to superadmin.
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Deletion confirmation }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Profile not found }
+ */
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {

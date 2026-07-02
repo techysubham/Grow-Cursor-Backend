@@ -6,7 +6,7 @@ const PriceChangeLogSchema = new mongoose.Schema(
     seller: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', required: true },
     order: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
     legacyItemId: { type: String, required: true, index: true },
-    orderId: { type: String },
+    orderId: { type: String, index: true },
     productTitle: { type: String },
     originalPrice: { type: Number, required: true },
     newPrice: { type: Number, required: true },
@@ -30,5 +30,8 @@ PriceChangeLogSchema.index({ createdAt: -1 });
 PriceChangeLogSchema.index({ user: 1, createdAt: -1 });
 PriceChangeLogSchema.index({ seller: 1, createdAt: -1 });
 PriceChangeLogSchema.index({ legacyItemId: 1, createdAt: -1 });
+PriceChangeLogSchema.index({ orderId: 1, createdAt: -1 });
+PriceChangeLogSchema.index({ legacyItemId: 1, success: 1, createdAt: -1 });
+PriceChangeLogSchema.index({ orderId: 1, success: 1, createdAt: -1 });
 
 export default mongoose.model('PriceChangeLog', PriceChangeLogSchema);

@@ -129,6 +129,43 @@ function buildAffiliateSpendQuery(dateStr, excludeLowValue, extraFilters = []) {
 // GET /api/affiliate-orders/daily/sellers?date=YYYY-MM-DD
 // Returns seller options for the current daily queue filters
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /affiliate-orders/daily/sellers:
+ *   get:
+ *     tags: [Affiliate Orders]
+ *     summary: List sellers present in the daily sourcing queue
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: date
+ *         required: true
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: excludeLowValue
+ *         schema: { type: string, enum: ['true','false'] }
+ *       - in: query
+ *         name: includeDone
+ *         schema: { type: string, enum: ['true','false'] }
+ *     responses:
+ *       200:
+ *         description: Array of seller options with order counts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   value: { type: string }
+ *                   label: { type: string }
+ *                   count: { type: integer }
+ *       400:
+ *         description: date is required
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/daily/sellers', async (req, res) => {
     try {
         const { date, excludeLowValue, includeDone } = req.query;
@@ -186,6 +223,36 @@ router.get('/daily/sellers', async (req, res) => {
 // GET /api/affiliate-orders/daily?date=YYYY-MM-DD
 // Returns daily queue orders, optionally filtered by seller
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /affiliate-orders/daily:
+ *   get:
+ *     tags: [Affiliate Orders]
+ *     summary: Get the daily sourcing queue orders
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: date
+ *         required: true
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: excludeLowValue
+ *         schema: { type: string, enum: ['true','false'] }
+ *       - in: query
+ *         name: includeDone
+ *         schema: { type: string, enum: ['true','false'] }
+ *     responses:
+ *       200:
+ *         description: Orders enriched with carryOverDays, sellerGroupName, sourceDate
+ *       400:
+ *         description: date is required
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/daily', async (req, res) => {
     try {
         const { date, excludeLowValue, includeDone, sellerId } = req.query;
@@ -246,6 +313,30 @@ router.get('/daily', async (req, res) => {
 // GET /api/affiliate-orders/spend?date=YYYY-MM-DD
 // Returns orders whose spend should be recognized on the selected day
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /affiliate-orders/spend:
+ *   get:
+ *     tags: [Affiliate Orders]
+ *     summary: Get orders with spend recognised on a given day
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: date
+ *         required: true
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: excludeLowValue
+ *         schema: { type: string, enum: ['true','false'] }
+ *     responses:
+ *       200:
+ *         description: Orders enriched with spendDate and sellerGroupName
+ *       400:
+ *         description: date is required
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/spend', async (req, res) => {
     try {
         const { date, excludeLowValue } = req.query;
@@ -288,6 +379,44 @@ router.get('/spend', async (req, res) => {
 // PATCH /api/affiliate-orders/:id/sourcing
 // Update the sourcing-specific fields on an order
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /affiliate-orders/{id}/sourcing:
+ *   patch:
+ *     tags: [Affiliate Orders]
+ *     summary: Update sourcing fields on an order
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               affiliateLink:         { type: string }
+ *               sourcingStatus:        { type: string }
+ *               purchaser:             { type: string }
+ *               sourcingMessageStatus: { type: string }
+ *               amazonAccount:         { type: string }
+ *               affiliatePrice:        { type: number }
+ *               beforeTax:             { type: number }
+ *               estimatedTax:          { type: number }
+ *               fulfillmentNotes:      { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated order
+ *       400:
+ *         description: No valid fields provided
+ *       404:
+ *         description: Order not found
+ *       500:
+ *         description: Internal server error
+ */
 router.patch('/:id/sourcing', async (req, res) => {
     try {
         const ALLOWED_FIELDS = [
@@ -359,6 +488,30 @@ router.patch('/:id/sourcing', async (req, res) => {
 // Returns one row per Amazon account with totalExpense (auto-calculated from orders)
 // and the editable balance fields (upserted on first access)
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /affiliate-orders/balances:
+ *   get:
+ *     tags: [Affiliate Orders]
+ *     summary: Get Amazon account gift-card balances for a day
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: date
+ *         required: true
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: excludeLowValue
+ *         schema: { type: string, enum: ['true','false'] }
+ *     responses:
+ *       200:
+ *         description: One row per Amazon account with totalExpense, availableBalance, addedBalance, difference
+ *       400:
+ *         description: date is required
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/balances', async (req, res) => {
     try {
         const { date, excludeLowValue } = req.query;
@@ -429,6 +582,36 @@ router.get('/balances', async (req, res) => {
 // Upsert a daily balance record for one Amazon account
 // Body: { amazonAccountName, date, availableBalance, addedBalance, giftCardStatus, note }
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /affiliate-orders/balances:
+ *   put:
+ *     tags: [Affiliate Orders]
+ *     summary: Upsert a daily gift-card balance for an Amazon account
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [amazonAccountName, date]
+ *             properties:
+ *               amazonAccountName: { type: string }
+ *               date:              { type: string, format: date }
+ *               availableBalance:  { type: number }
+ *               addedBalance:      { type: number }
+ *               giftCardStatus:    { type: boolean }
+ *               note:              { type: string }
+ *     responses:
+ *       200:
+ *         description: Upserted balance record
+ *       400:
+ *         description: amazonAccountName and date are required
+ *       500:
+ *         description: Internal server error
+ */
 router.put('/balances', async (req, res) => {
     try {
         const { amazonAccountName, date, availableBalance, addedBalance, giftCardStatus, note } = req.body;
@@ -460,6 +643,30 @@ router.put('/balances', async (req, res) => {
 // GET /api/affiliate-orders/summary?date=YYYY-MM-DD
 // Returns per-purchaser counts and overall day totals
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /affiliate-orders/summary:
+ *   get:
+ *     tags: [Affiliate Orders]
+ *     summary: Get daily sourcing summary stats
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: date
+ *         required: true
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: excludeLowValue
+ *         schema: { type: string, enum: ['true','false'] }
+ *     responses:
+ *       200:
+ *         description: Summary with totalOrders, totalUSD, totalINR, byPurchaser, byAmazonAccount
+ *       400:
+ *         description: date is required
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/summary', async (req, res) => {
     try {
         const { date, excludeLowValue } = req.query;

@@ -18,7 +18,24 @@ export async function trackApiUsage({
   success, 
   errorMessage, 
   responseTime, 
-  extractedFields 
+  extractedFields,
+  model,
+  promptTokens,
+  completionTokens,
+  totalTokens,
+  fieldName,
+  fieldType,
+  aiRunId,
+  aiRunStartedAt,
+  templateId,
+  sellerId,
+  userId,
+  ipAddress,
+  ipSource,
+  forwardedFor,
+  userAgent,
+  promptChars,
+  completionChars
 }) {
   // Skip if tracking is disabled
   if (process.env.ENABLE_API_USAGE_TRACKING === 'false') {
@@ -37,6 +54,23 @@ export async function trackApiUsage({
       errorMessage,
       responseTime,
       extractedFields,
+      model,
+      promptTokens,
+      completionTokens,
+      totalTokens,
+      fieldName,
+      fieldType,
+      aiRunId,
+      aiRunStartedAt,
+      templateId,
+      sellerId,
+      userId,
+      ipAddress,
+      ipSource,
+      forwardedFor,
+      userAgent,
+      promptChars,
+      completionChars,
       year: now.getFullYear(),
       month: now.getMonth() + 1,
       day: now.getDate()
@@ -112,7 +146,11 @@ export async function getFieldExtractionStats({ service, year, month }) {
     {
       $group: {
         _id: '$extractedFields',
-        count: { $sum: 1 }
+        count: { $sum: 1 },
+        totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+        promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+        completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+        avgResponseTime: { $avg: '$responseTime' }
       }
     },
     { $sort: { count: -1 } }
@@ -125,6 +163,10 @@ export async function getFieldExtractionStats({ service, year, month }) {
     fieldStats: stats.map(s => ({
       field: s._id || 'none',
       count: s.count,
+      totalTokens: s.totalTokens,
+      promptTokens: s.promptTokens,
+      completionTokens: s.completionTokens,
+      avgResponseTime: s.avgResponseTime ? parseFloat(s.avgResponseTime.toFixed(1)) : 0,
       percentage: ((s.count / totalRequests) * 100).toFixed(1)
     }))
   };

@@ -2,10 +2,77 @@ import express from 'express';
 import AsinListProduct from '../models/AsinListProduct.js';
 import AsinDirectory from '../models/AsinDirectory.js';
 import { requireAuth } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import {
+  createAsinListProductSchema,
+  renameAsinListProductSchema,
+  moveAsinsSchema,
+  copyProductsToRangeSchema,
+} from '../schemas/index.js';
 
 const router = express.Router();
 
 // Get all products under a range (or all products when ?all=true)
+/**
+ * @swagger
+ * /asin-list-products:
+ *   get:
+ *     tags: [ASIN List Products]
+ *     summary: List products for a range, or all products
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: rangeId
+ *         schema: { type: string }
+ *         description: Required unless all=true
+ *       - in: query
+ *         name: all
+ *         schema: { type: boolean }
+ *         description: Return all products across all ranges
+ *     responses:
+ *       200:
+ *         description: Array of product documents
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/AsinListProduct'
+ *       400:
+ *         description: rangeId is required (when all is not true)
+ *       500:
+ *         description: Internal server error
+ *   post:
+ *     tags: [ASIN List Products]
+ *     summary: Create a new product under a range
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, rangeId, categoryId]
+ *             properties:
+ *               name:       { type: string }
+ *               rangeId:    { type: string }
+ *               categoryId: { type: string }
+ *     responses:
+ *       201:
+ *         description: Created product
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AsinListProduct'
+ *       400:
+ *         description: Validation error
+ *       409:
+ *         description: Product already exists in this range
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { rangeId, all } = req.query;
@@ -28,20 +95,11 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Create a new product under a range
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, validate(createAsinListProductSchema), async (req, res) => {
   try {
     const { name, rangeId, categoryId } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Product name is required' });
-    }
-    if (!rangeId) {
-      return res.status(400).json({ error: 'rangeId is required' });
-    }
-    if (!categoryId) {
-      return res.status(400).json({ error: 'categoryId is required' });
-    }
 
-    const product = await AsinListProduct.create({ name: name.trim(), rangeId, categoryId });
+    const product = await AsinListProduct.create({ name, rangeId, categoryId });
     res.status(201).json(product);
   } catch (error) {
     if (error.code === 11000) {
@@ -53,16 +111,45 @@ router.post('/', requireAuth, async (req, res) => {
 });
 
 // Move selected ASINs to a product list
-router.post('/move', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /asin-list-products/move:
+ *   post:
+ *     tags: [ASIN List Products]
+ *     summary: Move selected ASINs into a product list
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [asinIds, productId]
+ *             properties:
+ *               asinIds:   { type: array, items: { type: string } }
+ *               productId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Move result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 movedCount:  { type: integer }
+ *                 productId:   { type: string }
+ *                 productName: { type: string }
+ *       400:
+ *         description: Missing asinIds or productId
+ *       404:
+ *         description: Product not found
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/move', requireAuth, validate(moveAsinsSchema), async (req, res) => {
   try {
     const { asinIds, productId } = req.body;
-
-    if (!asinIds || !Array.isArray(asinIds) || asinIds.length === 0) {
-      return res.status(400).json({ error: 'asinIds array is required' });
-    }
-    if (!productId) {
-      return res.status(400).json({ error: 'productId is required' });
-    }
 
     // Verify product exists
     const product = await AsinListProduct.findById(productId).lean();
@@ -89,16 +176,72 @@ router.post('/move', requireAuth, async (req, res) => {
 });
 
 // Rename a product
-router.put('/:id', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /asin-list-products/{id}:
+ *   put:
+ *     tags: [ASIN List Products]
+ *     summary: Rename a product
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated product
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AsinListProduct'
+ *       400:
+ *         description: Name is required
+ *       404:
+ *         description: Product not found
+ *       409:
+ *         description: Duplicate name in this range
+ *       500:
+ *         description: Internal server error
+ *   delete:
+ *     tags: [ASIN List Products]
+ *     summary: Delete a product and unassign its ASINs
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion confirmed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *       500:
+ *         description: Internal server error
+ */
+router.put('/:id', requireAuth, validate(renameAsinListProductSchema), async (req, res) => {
   try {
     const { id } = req.params;
     const { name } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Product name is required' });
-    }
     const updated = await AsinListProduct.findByIdAndUpdate(
       id,
-      { name: name.trim() },
+      { name },
       { new: true, runValidators: true }
     );
     if (!updated) return res.status(404).json({ error: 'Product not found' });
@@ -113,12 +256,50 @@ router.put('/:id', requireAuth, async (req, res) => {
 });
 
 // Copy selected products (by id) into a target range
-router.post('/copy-to-range', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /asin-list-products/copy-to-range:
+ *   post:
+ *     tags: [ASIN List Products]
+ *     summary: Copy products into one or more target ranges
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [productIds]
+ *             properties:
+ *               productIds:    { type: array, items: { type: string } }
+ *               targetRangeId:
+ *                 type: string
+ *                 description: Single target range (legacy)
+ *               targetRangeIds:
+ *                 type: array
+ *                 items: { type: string }
+ *                 description: Multiple target ranges
+ *     responses:
+ *       200:
+ *         description: Copy results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 copied:          { type: integer }
+ *                 skipped:         { type: integer }
+ *                 skippedNames:    { type: array, items: { type: string } }
+ *                 rangesProcessed: { type: integer }
+ *       400:
+ *         description: Missing productIds or target range
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/copy-to-range', requireAuth, validate(copyProductsToRangeSchema), async (req, res) => {
   try {
     const { productIds, targetRangeId, targetRangeIds } = req.body;
-    if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
-      return res.status(400).json({ error: 'productIds array is required' });
-    }
 
     // Support both singular (legacy) and plural form
     const rangeIds = targetRangeIds && targetRangeIds.length > 0

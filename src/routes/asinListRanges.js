@@ -4,10 +4,71 @@ import AsinListProduct from '../models/AsinListProduct.js';
 import AsinDirectory from '../models/AsinDirectory.js';
 import AsinListCategory from '../models/AsinListCategory.js';
 import { requireAuth } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createAsinListRangeSchema, renameAsinListRangeSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
 // Get ranges — filtered by categoryId, or all ranges when ?all=true
+/**
+ * @swagger
+ * /asin-list-ranges:
+ *   get:
+ *     tags: [ASIN List Ranges]
+ *     summary: List ranges for a category, or all ranges
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: categoryId
+ *         schema: { type: string }
+ *         description: Required unless all=true
+ *       - in: query
+ *         name: all
+ *         schema: { type: boolean }
+ *         description: Return all ranges across all categories with categoryName attached
+ *     responses:
+ *       200:
+ *         description: Array of range documents
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/AsinListRange'
+ *       400:
+ *         description: categoryId is required (when all is not true)
+ *       500:
+ *         description: Internal server error
+ *   post:
+ *     tags: [ASIN List Ranges]
+ *     summary: Create a new range under a category
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, categoryId]
+ *             properties:
+ *               name:       { type: string }
+ *               categoryId: { type: string }
+ *     responses:
+ *       201:
+ *         description: Created range
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AsinListRange'
+ *       400:
+ *         description: Validation error
+ *       409:
+ *         description: Range already exists in this category
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { categoryId, all } = req.query;
@@ -39,17 +100,11 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Create a new range under a category
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, validate(createAsinListRangeSchema), async (req, res) => {
   try {
     const { name, categoryId } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Range name is required' });
-    }
-    if (!categoryId) {
-      return res.status(400).json({ error: 'categoryId is required' });
-    }
 
-    const range = await AsinListRange.create({ name: name.trim(), categoryId });
+    const range = await AsinListRange.create({ name, categoryId });
     res.status(201).json(range);
   } catch (error) {
     if (error.code === 11000) {
@@ -61,16 +116,72 @@ router.post('/', requireAuth, async (req, res) => {
 });
 
 // Rename a range
-router.put('/:id', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /asin-list-ranges/{id}:
+ *   put:
+ *     tags: [ASIN List Ranges]
+ *     summary: Rename a range
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated range
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AsinListRange'
+ *       400:
+ *         description: Name is required
+ *       404:
+ *         description: Range not found
+ *       409:
+ *         description: Duplicate name in this category
+ *       500:
+ *         description: Internal server error
+ *   delete:
+ *     tags: [ASIN List Ranges]
+ *     summary: Delete a range and cascade-delete its products; unassigns associated ASINs
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion confirmed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *       500:
+ *         description: Internal server error
+ */
+router.put('/:id', requireAuth, validate(renameAsinListRangeSchema), async (req, res) => {
   try {
     const { id } = req.params;
     const { name } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Range name is required' });
-    }
     const range = await AsinListRange.findByIdAndUpdate(
       id,
-      { name: name.trim() },
+      { name },
       { new: true, runValidators: true }
     );
     if (!range) return res.status(404).json({ error: 'Range not found' });
@@ -85,6 +196,40 @@ router.put('/:id', requireAuth, async (req, res) => {
 });
 
 // Shallow duplicate a range (same category, no products copied)
+/**
+ * @swagger
+ * /asin-list-ranges/duplicate:
+ *   post:
+ *     tags: [ASIN List Ranges]
+ *     summary: Shallow-duplicate a range into the same category (no products copied)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sourceRangeId, name]
+ *             properties:
+ *               sourceRangeId: { type: string }
+ *               name:          { type: string }
+ *     responses:
+ *       201:
+ *         description: Created duplicate range
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AsinListRange'
+ *       400:
+ *         description: Missing required fields
+ *       404:
+ *         description: Source range not found
+ *       409:
+ *         description: Range name already exists in this category
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/duplicate', requireAuth, async (req, res) => {
   try {
     const { sourceRangeId, name } = req.body;

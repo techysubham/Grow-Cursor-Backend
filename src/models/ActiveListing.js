@@ -8,6 +8,7 @@ const ActiveListingSchema = new mongoose.Schema({
     sku: { type: String },
     title: { type: String },
     currentPrice: { type: Number },
+    currentPriceUSD: { type: Number },   // Converted to USD (ConvertedCurrentPrice from eBay)
     currency: { type: String },
     mainImageUrl: { type: String },
 

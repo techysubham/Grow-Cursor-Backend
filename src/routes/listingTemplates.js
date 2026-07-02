@@ -2,10 +2,71 @@ import express from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import ListingTemplate from '../models/ListingTemplate.js';
 import TemplateOverride from '../models/TemplateOverride.js';
+import SellerPricingConfig from '../models/SellerPricingConfig.js';
 
 const router = express.Router();
 
 // Get custom Action field for template
+/**
+ * @swagger
+ * /listing-templates/action-field/{templateId}:
+ *   get:
+ *     tags: [Listing Templates]
+ *     summary: Get the effective custom Action field for a template (seller override if set)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Action field value and source
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 actionField: { type: string }
+ *                 source:      { type: string, enum: [template, seller-override] }
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ *   put:
+ *     tags: [Listing Templates]
+ *     summary: Update the custom Action field (base template or seller override)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [actionField]
+ *             properties:
+ *               actionField: { type: string }
+ *               sellerId:    { type: string, description: Omit to update base template }
+ *     responses:
+ *       200:
+ *         description: Updated action field value and source
+ *       400:
+ *         description: Action field cannot be empty
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/action-field/:templateId', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params;
@@ -98,6 +159,37 @@ router.put('/action-field/:templateId', requireAuth, async (req, res) => {
 });
 
 // Bulk reset overrides for a template (apply base template to all sellers)
+/**
+ * @swagger
+ * /listing-templates/{id}/bulk-reset-overrides:
+ *   delete:
+ *     tags: [Listing Templates]
+ *     summary: Delete all seller overrides and pricing configs for a template
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Reset summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:         { type: boolean }
+ *                 deletedCount:    { type: integer }
+ *                 affectedSellers: { type: array, items: { type: string } }
+ *                 templateName:    { type: string }
+ *                 message:         { type: string }
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ */
 router.delete('/:id/bulk-reset-overrides', requireAuth, async (req, res) => {
   try {
     const { id: templateId } = req.params;
@@ -109,25 +201,31 @@ router.delete('/:id/bulk-reset-overrides', requireAuth, async (req, res) => {
     }
     
     // Get affected sellers before deletion for logging
-    const affectedOverrides = await TemplateOverride.find({ 
-      baseTemplateId: templateId 
-    }).select('sellerId');
-    
-    const affectedSellerIds = affectedOverrides.map(o => o.sellerId);
-    
-    // Perform bulk deletion
-    const result = await TemplateOverride.deleteMany({ 
-      baseTemplateId: templateId 
-    });
-    
-    console.log(`[BULK RESET] Template "${template.name}" (${templateId}): Deleted ${result.deletedCount} overrides for sellers:`, affectedSellerIds);
-    
-    res.json({ 
+    const [affectedOverrides, affectedPricingConfigs] = await Promise.all([
+      TemplateOverride.find({ baseTemplateId: templateId }).select('sellerId').lean(),
+      SellerPricingConfig.find({ templateId }).select('sellerId').lean()
+    ]);
+
+    const affectedSellerSet = new Set([
+      ...affectedOverrides.map(o => o.sellerId.toString()),
+      ...affectedPricingConfigs.map(p => p.sellerId.toString())
+    ]);
+    const affectedSellerIds = [...affectedSellerSet];
+
+    // Perform bulk deletion of both override layers
+    const [overrideResult, pricingResult] = await Promise.all([
+      TemplateOverride.deleteMany({ baseTemplateId: templateId }),
+      SellerPricingConfig.deleteMany({ templateId })
+    ]);
+
+    console.log(`[BULK RESET] Template "${template.name}" (${templateId}): Deleted ${overrideResult.deletedCount} overrides + ${pricingResult.deletedCount} pricing configs for sellers:`, affectedSellerIds);
+
+    res.json({
       success: true,
-      deletedCount: result.deletedCount,
+      deletedCount: affectedSellerIds.length,
       affectedSellers: affectedSellerIds,
       templateName: template.name,
-      message: `Successfully reset ${result.deletedCount} seller customizations. All sellers will now use the base template.`
+      message: `Successfully reset ${affectedSellerIds.length} seller customizations. All sellers will now use the base template.`
     });
   } catch (error) {
     console.error('Error in bulk reset overrides:', error);
@@ -136,6 +234,67 @@ router.delete('/:id/bulk-reset-overrides', requireAuth, async (req, res) => {
 });
 
 // Get all templates
+/**
+ * @swagger
+ * /listing-templates:
+ *   get:
+ *     tags: [Listing Templates]
+ *     summary: List all listing templates
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: rangeId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: listProductId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Array of template documents
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/ListingTemplate'
+ *       500:
+ *         description: Internal server error
+ *   post:
+ *     tags: [Listing Templates]
+ *     summary: Create a new listing template
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:              { type: string }
+ *               description:       { type: string }
+ *               category:          { type: string }
+ *               ebayCategory:      { type: string }
+ *               customColumns:     { type: array, items: { type: object } }
+ *               asinAutomation:    { type: object }
+ *               pricingConfig:     { type: object }
+ *               coreFieldDefaults: { type: object }
+ *               rangeId:           { type: string }
+ *               listProductId:     { type: string }
+ *     responses:
+ *       201:
+ *         description: Created template
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ListingTemplate'
+ *       400:
+ *         description: Template name is required
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { listProductId, rangeId } = req.query;
@@ -154,6 +313,75 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Get single template by ID
+/**
+ * @swagger
+ * /listing-templates/{id}:
+ *   get:
+ *     tags: [Listing Templates]
+ *     summary: Get a single template by ID
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Template document
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ListingTemplate'
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ *   put:
+ *     tags: [Listing Templates]
+ *     summary: Replace a template's configuration
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/ListingTemplate'
+ *     responses:
+ *       200:
+ *         description: Updated template
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ListingTemplate'
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ *   delete:
+ *     tags: [Listing Templates]
+ *     summary: Delete a template
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion confirmed
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const template = await ListingTemplate.findById(req.params.id)
@@ -212,6 +440,31 @@ router.post('/', requireAuth, async (req, res) => {
 });
 
 // Duplicate template
+/**
+ * @swagger
+ * /listing-templates/{id}/duplicate:
+ *   post:
+ *     tags: [Listing Templates]
+ *     summary: Duplicate a template (auto-generates a unique name)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       201:
+ *         description: Duplicated template
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ListingTemplate'
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/:id/duplicate', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -347,6 +600,47 @@ router.delete('/:id', requireAuth, async (req, res) => {
 });
 
 // Add custom column to template
+/**
+ * @swagger
+ * /listing-templates/{id}/columns:
+ *   post:
+ *     tags: [Listing Templates]
+ *     summary: Add a custom column to a template
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, displayName]
+ *             properties:
+ *               name:         { type: string }
+ *               displayName:  { type: string }
+ *               dataType:     { type: string, default: text }
+ *               defaultValue: { type: string }
+ *               isRequired:   { type: boolean }
+ *               placeholder:  { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated template with new column
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ListingTemplate'
+ *       400:
+ *         description: name and displayName are required
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/:id/columns', requireAuth, async (req, res) => {
   try {
     const { name, displayName, dataType, defaultValue, isRequired, placeholder } = req.body;
@@ -387,6 +681,71 @@ router.post('/:id/columns', requireAuth, async (req, res) => {
 });
 
 // Update custom column
+/**
+ * @swagger
+ * /listing-templates/{id}/columns/{columnName}:
+ *   put:
+ *     tags: [Listing Templates]
+ *     summary: Update a custom column definition
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: columnName
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               displayName:  { type: string }
+ *               dataType:     { type: string }
+ *               defaultValue: { type: string }
+ *               isRequired:   { type: boolean }
+ *               placeholder:  { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated template
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ListingTemplate'
+ *       404:
+ *         description: Template or column not found
+ *       500:
+ *         description: Internal server error
+ *   delete:
+ *     tags: [Listing Templates]
+ *     summary: Remove a custom column from a template
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: columnName
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated template with column removed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ListingTemplate'
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ */
 router.put('/:id/columns/:columnName', requireAuth, async (req, res) => {
   try {
     const { displayName, dataType, defaultValue, isRequired, placeholder } = req.body;
@@ -445,6 +804,46 @@ router.delete('/:id/columns/:columnName', requireAuth, async (req, res) => {
 });
 
 // Reorder custom columns
+/**
+ * @swagger
+ * /listing-templates/{id}/columns/reorder:
+ *   post:
+ *     tags: [Listing Templates]
+ *     summary: Reorder custom columns on a template
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [columnOrders]
+ *             properties:
+ *               columnOrders:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     name:  { type: string }
+ *                     order: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Updated template with new column order
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ListingTemplate'
+ *       404:
+ *         description: Template not found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/:id/columns/reorder', requireAuth, async (req, res) => {
   try {
     const { columnOrders } = req.body; // Array of { name, order }

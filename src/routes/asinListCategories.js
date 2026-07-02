@@ -4,10 +4,59 @@ import AsinListRange from '../models/AsinListRange.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import AsinDirectory from '../models/AsinDirectory.js';
 import { requireAuth } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createAsinListCategorySchema } from '../schemas/index.js';
 
 const router = express.Router();
 
 // Get all categories
+/**
+ * @swagger
+ * /asin-list-categories:
+ *   get:
+ *     tags: [ASIN List Categories]
+ *     summary: List all ASIN list categories
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Array of category documents
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/AsinListCategory'
+ *       500:
+ *         description: Internal server error
+ *   post:
+ *     tags: [ASIN List Categories]
+ *     summary: Create a new ASIN list category
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string }
+ *     responses:
+ *       201:
+ *         description: Created category
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AsinListCategory'
+ *       400:
+ *         description: Name is required
+ *       409:
+ *         description: Category already exists
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     const categories = await AsinListCategory.find().sort({ name: 1 }).lean();
@@ -19,14 +68,11 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Create a new category
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, validate(createAsinListCategorySchema), async (req, res) => {
   try {
     const { name } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Category name is required' });
-    }
 
-    const category = await AsinListCategory.create({ name: name.trim() });
+    const category = await AsinListCategory.create({ name });
     res.status(201).json(category);
   } catch (error) {
     if (error.code === 11000) {
@@ -38,6 +84,31 @@ router.post('/', requireAuth, async (req, res) => {
 });
 
 // Delete a category and cascade-delete its ranges, products, and orphan assigned ASINs
+/**
+ * @swagger
+ * /asin-list-categories/{id}:
+ *   delete:
+ *     tags: [ASIN List Categories]
+ *     summary: Delete a category and cascade-delete all child ranges, products, and unassign ASINs
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion confirmed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *       500:
+ *         description: Internal server error
+ */
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;

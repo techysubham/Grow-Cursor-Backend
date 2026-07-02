@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import PayoneerRecord from '../models/PayoneerRecord.js';
 import Transaction from '../models/Transaction.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
@@ -25,35 +26,78 @@ const calculateFields = (amount, exchangeRate) => {
 };
 
 // GET /api/payoneer - List all records with pagination and filtering
+/**
+ * @swagger
+ * /payoneer:
+ *   get:
+ *     tags: [Payoneer]
+ *     summary: List Payoneer records (paginated)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: store
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Paginated records with totals
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 records:         { type: array, items: { $ref: '#/components/schemas/PayoneerRecord' } }
+ *                 totalRecords:    { type: integer }
+ *                 totalPages:      { type: integer }
+ *                 currentPage:     { type: integer }
+ *                 totalAmount:     { type: number }
+ *                 totalBankDeposit:{ type: number }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { page = 1, limit = 50, startDate, endDate, store } = req.query;
 
         const query = {};
 
-        // Store Filter
+        // Store Filter (cast to ObjectId so aggregation $match works correctly)
         if (store) {
-            query.store = store;
+            query.store = new mongoose.Types.ObjectId(store);
         }
 
         // Date Filter
+        // Note: new Date("YYYY-MM-DD") parses as UTC midnight — always use setUTCHours
+        // so the end-of-day boundary is also UTC-based, regardless of server timezone.
         if (startDate || endDate) {
             query.paymentDate = {};
             if (startDate) {
-                // Assuming startDate is YYYY-MM-DD
-                query.paymentDate.$gte = new Date(startDate);
+                const start = new Date(startDate);
+                start.setUTCHours(0, 0, 0, 0);
+                query.paymentDate.$gte = start;
             }
             if (endDate) {
-                // Assuming endDate is YYYY-MM-DD, set to end of day
                 const end = new Date(endDate);
-                end.setHours(23, 59, 59, 999);
+                end.setUTCHours(23, 59, 59, 999);
                 query.paymentDate.$lte = end;
             }
         }
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        const [records, totalRecords] = await Promise.all([
+        const [records, totalRecords, totalsAgg] = await Promise.all([
             PayoneerRecord.find(query)
                 .populate({
                     path: 'store',
@@ -67,14 +111,28 @@ router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => 
                 .sort({ paymentDate: -1 })
                 .skip(skip)
                 .limit(parseInt(limit)),
-            PayoneerRecord.countDocuments(query)
+            PayoneerRecord.countDocuments(query),
+            PayoneerRecord.aggregate([
+                { $match: query },
+                {
+                    $group: {
+                        _id: null,
+                        totalAmount: { $sum: '$amount' },
+                        totalBankDeposit: { $sum: '$bankDeposit' }
+                    }
+                }
+            ])
         ]);
+
+        const totals = totalsAgg[0] || { totalAmount: 0, totalBankDeposit: 0 };
 
         res.json({
             records,
             totalRecords,
             totalPages: Math.ceil(totalRecords / parseInt(limit)),
-            currentPage: parseInt(page)
+            currentPage: parseInt(page),
+            totalAmount: totals.totalAmount,
+            totalBankDeposit: totals.totalBankDeposit
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -82,6 +140,42 @@ router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => 
 });
 
 // POST /api/payoneer - Create new record
+/**
+ * @swagger
+ * /payoneer:
+ *   post:
+ *     tags: [Payoneer]
+ *     summary: Create a Payoneer record (auto-creates a Transaction)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [bankAccount, paymentDate, amount, exchangeRate, store]
+ *             properties:
+ *               bankAccount:  { type: string }
+ *               paymentDate:  { type: string, format: date-time }
+ *               amount:       { type: number }
+ *               exchangeRate: { type: number }
+ *               store:        { type: string }
+ *               periodStart:  { type: string, format: date-time }
+ *               periodEnd:    { type: string, format: date-time }
+ *               profit:       { type: number }
+ *     responses:
+ *       201:
+ *         description: Created record with computed actualExchangeRate and bankDeposit
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/PayoneerRecord'
+ *       400:
+ *         description: Missing required fields
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit } = req.body;
@@ -139,6 +233,45 @@ router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) =>
 });
 
 // PUT /api/payoneer/:id - Update record
+/**
+ * @swagger
+ * /payoneer/{id}:
+ *   put:
+ *     tags: [Payoneer]
+ *     summary: Update a Payoneer record (syncs the linked Transaction)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               bankAccount:  { type: string }
+ *               paymentDate:  { type: string, format: date-time }
+ *               amount:       { type: number }
+ *               exchangeRate: { type: number }
+ *               store:        { type: string }
+ *               periodStart:  { type: string, format: date-time }
+ *               periodEnd:    { type: string, format: date-time }
+ *               profit:       { type: number }
+ *     responses:
+ *       200:
+ *         description: Updated record
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/PayoneerRecord'
+ *       404:
+ *         description: Record not found
+ *       500:
+ *         description: Internal server error
+ */
 router.put('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { id } = req.params;
@@ -202,6 +335,25 @@ router.put('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) 
 });
 
 // DELETE /api/payoneer/:id - Delete record
+/**
+ * @swagger
+ * /payoneer/{id}:
+ *   delete:
+ *     tags: [Payoneer]
+ *     summary: Delete a Payoneer record (also deletes the linked Transaction)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Record deleted
+ *       500:
+ *         description: Internal server error
+ */
 router.delete('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { id } = req.params;

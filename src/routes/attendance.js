@@ -2,8 +2,17 @@ import { Router } from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Attendance from '../models/Attendance.js';
 import User from '../models/User.js';
+import { validate } from '../utils/validate.js';
+import { editAttendanceHoursSchema } from '../schemas/index.js';
 
 const router = Router();
+
+/**
+ * @swagger
+ * tags:
+ *   name: Attendance
+ *   description: Working hours tracking — start, pause, resume, stop timer and reporting
+ */
 
 // Nomenclature note:
 // This route file uses the legacy name `attendance` for compatibility,
@@ -20,6 +29,21 @@ function getTodayDateString() {
     return `${year}-${month}-${day}`;
 }
 
+/**
+ * @swagger
+ * /attendance/start:
+ *   post:
+ *     tags: [Attendance]
+ *     summary: Start or restart the working-hours timer
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Creates or updates today's attendance record and starts the timer.
+ *       If the timer was previously stopped or paused, calling start again resumes a new session.
+ *     responses:
+ *       200: { description: Updated attendance record }
+ *       401: { description: Unauthorized }
+ */
 // POST /start - Start or restart timer
 router.post('/start', requireAuth, async (req, res) => {
     try {
@@ -67,6 +91,20 @@ router.post('/start', requireAuth, async (req, res) => {
 });
 
 // POST /pause - Pause the timer
+/**
+ * @swagger
+ * /attendance/pause:
+ *   post:
+ *     tags: [Attendance]
+ *     summary: Pause the working-hours timer
+ *     security:
+ *       - bearerAuth: []
+ *     description: Records the pause timestamp and accumulates elapsed time.
+ *     responses:
+ *       200: { description: Updated attendance record }
+ *       400: { description: Timer not running }
+ *       401: { description: Unauthorized }
+ */
 router.post('/pause', requireAuth, async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -104,6 +142,20 @@ router.post('/pause', requireAuth, async (req, res) => {
 });
 
 // POST /resume - Resume the timer after pause
+/**
+ * @swagger
+ * /attendance/resume:
+ *   post:
+ *     tags: [Attendance]
+ *     summary: Resume the working-hours timer from a paused state
+ *     security:
+ *       - bearerAuth: []
+ *     description: Records the resume timestamp and continues accumulating time.
+ *     responses:
+ *       200: { description: Updated attendance record }
+ *       400: { description: Timer not paused }
+ *       401: { description: Unauthorized }
+ */
 router.post('/resume', requireAuth, async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -137,6 +189,20 @@ router.post('/resume', requireAuth, async (req, res) => {
 });
 
 // POST /stop - Stop the timer (end day)
+/**
+ * @swagger
+ * /attendance/stop:
+ *   post:
+ *     tags: [Attendance]
+ *     summary: Stop the working-hours timer for today
+ *     security:
+ *       - bearerAuth: []
+ *     description: Finalises today's total hours worked and marks the session as stopped.
+ *     responses:
+ *       200: { description: Final attendance record with total hours }
+ *       400: { description: Timer not running }
+ *       401: { description: Unauthorized }
+ */
 router.post('/stop', requireAuth, async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -171,6 +237,19 @@ router.post('/stop', requireAuth, async (req, res) => {
 });
 
 // GET /status - Get current user's timer status
+/**
+ * @swagger
+ * /attendance/status:
+ *   get:
+ *     tags: [Attendance]
+ *     summary: Get today's timer status for the current user
+ *     security:
+ *       - bearerAuth: []
+ *     description: Returns today's attendance record including current status, elapsed time, and session log.
+ *     responses:
+ *       200: { description: Today's attendance status object (or null if not started) }
+ *       401: { description: Unauthorized }
+ */
 router.get('/status', requireAuth, async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -207,6 +286,22 @@ router.get('/status', requireAuth, async (req, res) => {
 });
 
 // GET /report - Get attendance records (with filters)
+/**
+ * @swagger
+ * /attendance/report:
+ *   get:
+ *     tags: [Attendance]
+ *     summary: Get the current user's attendance report
+ *     security:
+ *       - bearerAuth: []
+ *     description: Returns the caller's own attendance history for a given date range.
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *     responses:
+ *       200: { description: Array of attendance records }
+ *       401: { description: Unauthorized }
+ */
 router.get('/report', requireAuth, async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -237,6 +332,26 @@ router.get('/report', requireAuth, async (req, res) => {
 });
 
 // GET /admin/report - Admin endpoint for viewing all attendance (Superadmin only)
+/**
+ * @swagger
+ * /attendance/admin/report:
+ *   get:
+ *     tags: [Attendance]
+ *     summary: Admin attendance report for all employees
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns attendance records for all employees, optionally filtered by user and date range.
+ *       **Requires Attendance page access.**
+ *     parameters:
+ *       - { in: query, name: userId, schema: { type: string } }
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *     responses:
+ *       200: { description: Array of attendance records for all matching users }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/admin/report', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
     try {
         const { date, department, userId } = req.query;
@@ -273,6 +388,23 @@ router.get('/admin/report', requireAuth, requirePageAccess('Attendance'), async 
 });
 
 // POST /admin/force-stop/:attendanceId - Force stop a timer (Superadmin only)
+/**
+ * @swagger
+ * /attendance/admin/force-stop/{attendanceId}:
+ *   post:
+ *     tags: [Attendance]
+ *     summary: Admin force-stop a running timer for any employee
+ *     security:
+ *       - bearerAuth: []
+ *     description: Forcefully stops a timer session for any user. **Requires Attendance page access.**
+ *     parameters:
+ *       - { in: path, name: attendanceId, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Force-stopped attendance record }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Attendance record not found }
+ */
 router.post('/admin/force-stop/:attendanceId', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
     try {
         const { attendanceId } = req.params;
@@ -312,15 +444,36 @@ router.post('/admin/force-stop/:attendanceId', requireAuth, requirePageAccess('A
 });
 
 // Edit attendance hours - HR admin and superadmin only
-router.put('/admin/edit-hours/:attendanceId', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
+/**
+ * @swagger
+ * /attendance/admin/edit-hours/{attendanceId}:
+ *   put:
+ *     tags: [Attendance]
+ *     summary: Admin manually edit hours for an attendance record
+ *     security:
+ *       - bearerAuth: []
+ *     description: Overrides the calculated total hours for an attendance record. **Requires Attendance page access.**
+ *     parameters:
+ *       - { in: path, name: attendanceId, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [totalHours]
+ *             properties:
+ *               totalHours: { type: number }
+ *     responses:
+ *       200: { description: Updated attendance record }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Attendance record not found }
+ */
+router.put('/admin/edit-hours/:attendanceId', requireAuth, requirePageAccess('Attendance'), validate(editAttendanceHoursSchema), async (req, res) => {
     try {
         const { attendanceId } = req.params;
         const { totalWorkTime } = req.body;
-
-        // Validate input
-        if (typeof totalWorkTime !== 'number' || totalWorkTime < 0) {
-            return res.status(400).json({ error: 'Invalid totalWorkTime value. Must be a non-negative number in milliseconds.' });
-        }
 
         const attendance = await Attendance.findById(attendanceId).populate('user', 'username email');
 
@@ -345,6 +498,23 @@ router.put('/admin/edit-hours/:attendanceId', requireAuth, requirePageAccess('At
 });
 
 // Delete attendance record - HR admin and superadmin only
+/**
+ * @swagger
+ * /attendance/admin/{attendanceId}:
+ *   delete:
+ *     tags: [Attendance]
+ *     summary: Delete an attendance record (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     description: Permanently deletes an attendance record. **Requires Attendance page access.**
+ *     parameters:
+ *       - { in: path, name: attendanceId, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Deletion confirmation }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Attendance record not found }
+ */
 router.delete('/admin/:attendanceId', requireAuth, requirePageAccess('Attendance'), async (req, res) => {
     try {
         const { attendanceId } = req.params;

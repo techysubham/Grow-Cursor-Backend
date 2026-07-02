@@ -6,13 +6,22 @@ import Case from '../models/Case.js';
 import Return from '../models/Return.js';
 import MarketMetric from '../models/MarketMetric.js';
 import Seller from '../models/Seller.js';
+import { getCache, setCache } from '../lib/redis.js';
 
 const router = Router();
+
+/**
+ * @swagger
+ * tags:
+ *   name: AccountHealth
+ *   description: eBay account health monitoring — SNAD details, BBE evaluation windows, and seller overview
+ */
 
 // SNAD-related return reasons
 const SNAD_RETURN_REASONS = [
   'NOT_AS_DESCRIBED',
   'DEFECTIVE_ITEM',
+  'ORDERED_DIFFERENT_ITEM',
   'WRONG_ITEM',
   'MISSING_PARTS',
   'ARRIVED_DAMAGED',
@@ -25,6 +34,26 @@ const SNAD_RETURN_REASONS = [
  * GET /account-health/details
  * Returns SNAD details for orders with SNAD cases or returns
  * Supports filters: sellerId, startDate, endDate
+ */
+/**
+ * @swagger
+ * /account-health/details:
+ *   get:
+ *     tags: [AccountHealth]
+ *     summary: SNAD case/return details per order
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns orders that have SNAD (Significantly Not As Described) cases or returns.
+ *       Results are Redis-cached. **Requires AccountHealth page access.**
+ *     parameters:
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *     responses:
+ *       200: { description: Array of SNAD order detail objects }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
  */
 router.get('/details', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
@@ -124,7 +153,7 @@ router.get('/details', requireAuth, requirePageAccess('AccountHealth'), async (r
     // Build response
     const details = orders.map(order => {
       const orderId = order.orderId || order.legacyOrderId;
-      
+
       // Try to match with orderId first, then legacyOrderId (but not both to avoid double-counting)
       let snadCount = 0;
       if (order.orderId && orderSnadCount.has(order.orderId)) {
@@ -132,14 +161,14 @@ router.get('/details', requireAuth, requirePageAccess('AccountHealth'), async (r
       } else if (order.legacyOrderId && orderSnadCount.has(order.legacyOrderId)) {
         snadCount = orderSnadCount.get(order.legacyOrderId);
       }
-      
+
       let inrCount = 0;
       if (order.orderId && orderInrCount.has(order.orderId)) {
         inrCount = orderInrCount.get(order.orderId);
       } else if (order.legacyOrderId && orderInrCount.has(order.legacyOrderId)) {
         inrCount = orderInrCount.get(order.legacyOrderId);
       }
-      
+
       // Calculate remark date (3 months from order date)
       let remarkDate = null;
       if (order.dateSold) {
@@ -179,15 +208,38 @@ router.get('/details', requireAuth, requirePageAccess('AccountHealth'), async (r
  * Each window covers an 84-day period, and we generate a new window every week
  * BBE Rate = (SNAD count / Total Sales in that 84-day period) × 100
  */
+/**
+ * @swagger
+ * /account-health/evaluation-windows:
+ *   get:
+ *     tags: [AccountHealth]
+ *     summary: BBE evaluation window data
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns the 4-week BBE (Buyer Bad Experience) evaluation window data per seller,
+ *       including SNAD rates and market average thresholds.
+ *       **Requires AccountHealth page access.**
+ *     parameters:
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *     responses:
+ *       200: { description: Evaluation window data per seller }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
     const { sellerId } = req.query;
     const sellerMatch = sellerId ? { seller: new mongoose.Types.ObjectId(sellerId) } : {};
 
+    const cacheKey = `ah:eval-windows:${sellerId || 'all'}`;
+    const cached = await getCache(cacheKey);
+    if (cached) return res.json(cached);
+
     // We'll generate weekly windows, each spanning 84 days
     const windows = [];
     const today = new Date();
-    
+
     // Align to the most recent Sunday (or today if Sunday)
     let currentWindowEnd = new Date(today);
     const dayOfWeek = currentWindowEnd.getDay();
@@ -205,17 +257,17 @@ router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'
     // - without seller selected: use only global metrics
     const marketMetricQuery = sellerId
       ? {
-          type: 'bbe_market_avg',
-          $or: [
-            { seller: new mongoose.Types.ObjectId(sellerId) },
-            { seller: { $exists: false } },
-            { seller: null }
-          ]
-        }
+        type: 'bbe_market_avg',
+        $or: [
+          { seller: new mongoose.Types.ObjectId(sellerId) },
+          { seller: { $exists: false } },
+          { seller: null }
+        ]
+      }
       : {
-          type: 'bbe_market_avg',
-          $or: [{ seller: { $exists: false } }, { seller: null }]
-        };
+        type: 'bbe_market_avg',
+        $or: [{ seller: { $exists: false } }, { seller: null }]
+      };
     // Important: when multiple metrics exist for the same effectiveDate,
     // prefer the most recently created record.
     const marketMetrics = await MarketMetric.find(marketMetricQuery)
@@ -225,7 +277,7 @@ router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'
       ? marketMetrics.filter(m => m.seller && m.seller.toString() === sellerId)
       : [];
     const globalMetrics = marketMetrics.filter(m => !m.seller);
-    
+
     for (let i = 0; i < maxWindows; i++) {
       // Data should cover 84 days ending on the displayed window end date minus 1 day.
       // Example: if display end is 01/25, data should include up to 01/24.
@@ -287,7 +339,7 @@ router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'
         totalSales: totalSalesCount,
         snadCount: totalSnadCount,
         bbeRate: bbeRate.toFixed(2),
-        marketAvg, 
+        marketAvg,
         evaluationDate: currentWindowEnd.toISOString()
       });
 
@@ -297,7 +349,9 @@ router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'
       currentWindowEnd.setHours(23, 59, 59, 999);
     }
 
-    res.json({ windows });
+    const result = { windows };
+    await setCache(cacheKey, result, 3600);
+    res.json(result);
   } catch (error) {
     console.error('Error fetching evaluation windows:', error);
     res.status(500).json({ error: 'Failed to fetch evaluation windows' });
@@ -308,10 +362,38 @@ router.get('/evaluation-windows', requireAuth, requirePageAccess('AccountHealth'
  * POST /account-health/evaluation-windows/market-avg
  * Update market average (creates a new historical record)
  */
+/**
+ * @swagger
+ * /account-health/evaluation-windows/market-avg:
+ *   post:
+ *     tags: [AccountHealth]
+ *     summary: Record a new market average BBE value
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Stores a new historical MarketMetric record for the BBE market average.
+ *       Used to track the threshold over time. **Requires AccountHealth page access.**
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [value, effectiveDate]
+ *             properties:
+ *               value: { type: number, description: Market average BBE rate }
+ *               effectiveDate: { type: string, format: date }
+ *               sellerId: { type: string, description: Optional — seller-specific override }
+ *     responses:
+ *       200: { description: Created MarketMetric record }
+ *       400: { description: Missing or invalid fields }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.post('/evaluation-windows/market-avg', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
     const { value, effectiveDate, sellerId } = req.body;
-    
+
     if (!value || isNaN(value)) {
       return res.status(400).json({ error: 'Valid value is required' });
     }
@@ -341,6 +423,35 @@ router.post('/evaluation-windows/market-avg', requireAuth, requirePageAccess('Ac
 /**
  * PATCH /account-health/details/:orderId
  * Update sellerFault field for an order
+ */
+/**
+ * @swagger
+ * /account-health/details/{orderId}:
+ *   patch:
+ *     tags: [AccountHealth]
+ *     summary: Update sellerFault flag on an order
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Sets the `sellerFault` field ("Yes" or "No") on an order for account health tracking.
+ *       **Requires AccountHealth page access.**
+ *     parameters:
+ *       - { in: path, name: orderId, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sellerFault]
+ *             properties:
+ *               sellerFault: { type: string, enum: ["Yes", "No"] }
+ *     responses:
+ *       200: { description: Updated order }
+ *       400: { description: Invalid sellerFault value }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ *       404: { description: Order not found }
  */
 router.patch('/details/:orderId', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
@@ -374,8 +485,29 @@ router.patch('/details/:orderId', requireAuth, requirePageAccess('AccountHealth'
  * Week 1 & 2: Actual BBE rate (past data)
  * Week 3 & 4: Additional sales needed to meet market avg (prediction)
  */
+/**
+ * @swagger
+ * /account-health/overview:
+ *   get:
+ *     tags: [AccountHealth]
+ *     summary: Seller BBE overview across 4 evaluation weeks
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns a per-seller overview spanning 4 weeks:
+ *       weeks 1–2 show actual BBE rates, weeks 3–4 show additional sales needed to meet
+ *       the market average threshold (predictive). Results are Redis-cached.
+ *       **Requires AccountHealth page access.**
+ *     responses:
+ *       200: { description: Array of per-seller overview objects }
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
 router.get('/overview', requireAuth, requirePageAccess('AccountHealth'), async (req, res) => {
   try {
+    const cached = await getCache('ah:overview');
+    if (cached) return res.json(cached);
+
     // Fetch all sellers with user data
     const sellers = await Seller.find().populate('user', 'username email').lean();
 
@@ -412,11 +544,11 @@ router.get('/overview', requireAuth, requirePageAccess('AccountHealth'), async (
 
       for (let weekIdx = 0; weekIdx < 4; weekIdx++) {
         const windowEnd = weekEnds[weekIdx];
-        
+
         // Apply the same row shift logic: data window is 1 week before display window
         const dataWindowEnd = new Date(windowEnd);
         dataWindowEnd.setDate(dataWindowEnd.getDate() - 7);
-        
+
         // Apply 7-day buffer
         const calculationEnd = new Date(dataWindowEnd);
         calculationEnd.setDate(calculationEnd.getDate() - 7);
@@ -489,7 +621,9 @@ router.get('/overview', requireAuth, requirePageAccess('AccountHealth'), async (
       });
     }
 
-    res.json({ overview: overviewData, marketAvg });
+    const result = { overview: overviewData, marketAvg };
+    await setCache('ah:overview', result, 1800);
+    res.json(result);
   } catch (error) {
     console.error('Error fetching account health overview:', error);
     res.status(500).json({ error: 'Failed to fetch overview' });

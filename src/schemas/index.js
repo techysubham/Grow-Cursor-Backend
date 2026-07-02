@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+const objectIdSchema = z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid ObjectId');
+const optionalObjectIdSchema = z.union([objectIdSchema, z.literal('')]).optional();
+const optionalDateStringSchema = z.string().optional();
+const booleanStringSchema = z.enum(['true', 'false']).optional();
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 export const loginSchema = z.object({
@@ -156,6 +161,31 @@ export const createAssignmentSchema = z.object({
   scheduledDate: z.string().optional(),
 });
 
+// ── Meetings ─────────────────────────────────────────────────────────────────
+
+const meetingActionItemSchema = z.object({
+  text: z.string().trim().min(1, 'Action item text is required'),
+  assigneeId: z.string().optional(),
+  dueDate: z.string().optional(),
+  status: z.enum(['pending', 'in-progress', 'done']).optional(),
+});
+
+export const createMeetingSchema = z.object({
+  title: z.string().trim().min(1, 'Title is required'),
+  scheduledFor: z.string().min(1, 'Meeting date is required'),
+  organizerId: z.string().min(1, 'Organizer is required'),
+  attendeeIds: z.array(z.string().min(1)).min(1, 'At least one attendee is required'),
+  status: z.enum(['planned', 'in-progress', 'completed', 'cancelled']).optional(),
+  location: z.string().optional(),
+  agenda: z.string().optional(),
+  discussionSummary: z.string().optional(),
+  decisions: z.string().optional(),
+  futureScope: z.string().optional(),
+  actionItems: z.array(meetingActionItemSchema).optional(),
+});
+
+export const updateMeetingSchema = createMeetingSchema.partial();
+
 // ── Internal messages ─────────────────────────────────────────────────────────
 
 export const sendMessageSchema = z.object({
@@ -229,4 +259,222 @@ const remarkTemplateItemSchema = z.object({
 
 export const updateRemarkTemplatesSchema = z.object({
   templates: z.array(remarkTemplateItemSchema).min(1, 'templates must be a non-empty array'),
+});
+
+// ── Credit card names ─────────────────────────────────────────────────────────
+
+export const creditCardNameSchema = z.object({
+  name: z.string().trim().min(1, 'Card name is required'),
+});
+
+// ── Resolution options ────────────────────────────────────────────────────────
+
+export const resolutionOptionSchema = z.object({
+  name: z.string().trim().min(1, 'Resolution option name is required'),
+});
+
+// ── Seller upload limits ──────────────────────────────────────────────────────
+
+const UPLOAD_LIMIT_COUNTRIES = ['US', 'UK', 'AU', 'Canada'];
+
+export const sellerUploadLimitSchema = z.object({
+  sellerId: z.string().min(1, 'sellerId is required'),
+  country: z.enum(UPLOAD_LIMIT_COUNTRIES, {
+    errorMap: () => ({ message: 'country must be one of: US, UK, AU, Canada' }),
+  }),
+  limit: z.coerce.number().int().min(1, 'limit must be a positive integer'),
+});
+
+export const sellerUploadLimitCheckQuerySchema = z.object({
+  sellerId: z.string().min(1, 'sellerId is required'),
+  country: z.enum(UPLOAD_LIMIT_COUNTRIES, {
+    errorMap: () => ({ message: 'country must be one of: US, UK, AU, Canada' }),
+  }),
+});
+
+// ── End listing logs ─────────────────────────────────────────────────────────
+
+export const endListingStatsQuerySchema = z.object({
+  sellerId: optionalObjectIdSchema,
+  startDate: optionalDateStringSchema,
+  endDate: optionalDateStringSchema,
+});
+
+// ── Price change logs ────────────────────────────────────────────────────────
+
+export const priceChangeLogsQuerySchema = z.object({
+  legacyItemId: z.string().optional(),
+  orderId: z.string().optional(),
+  userId: optionalObjectIdSchema,
+  sellerId: optionalObjectIdSchema,
+  startDate: optionalDateStringSchema,
+  endDate: optionalDateStringSchema,
+  successOnly: booleanStringSchema,
+  failedOnly: booleanStringSchema,
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).optional(),
+});
+
+// ── Micro orders ─────────────────────────────────────────────────────────────
+
+export const microOrdersQuerySchema = z.object({
+  seller: optionalObjectIdSchema,
+  dateMode: z.enum(['none', 'single', 'range']).optional(),
+  date: optionalDateStringSchema,
+  dateFrom: optionalDateStringSchema,
+  dateTo: optionalDateStringSchema,
+  excludeClient: booleanStringSchema,
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+// ── Item category map ────────────────────────────────────────────────────────
+
+export const itemNumberParamsSchema = z.object({
+  itemNumber: z.string().trim().min(1, 'itemNumber is required'),
+});
+
+export const itemCategoryLookupSchema = z.object({
+  itemNumbers: z.array(z.string().trim().min(1)).min(1, 'itemNumbers array is required'),
+});
+
+export const updateItemCategoryMapSchema = z.object({
+  categoryId: objectIdSchema,
+  rangeId: optionalObjectIdSchema.nullable(),
+  productId: optionalObjectIdSchema.nullable(),
+});
+
+// ── User seller assignments ──────────────────────────────────────────────────
+
+export const idParamsSchema = z.object({
+  id: objectIdSchema,
+});
+
+export const createUserSellerAssignmentSchema = z.object({
+  userId: objectIdSchema,
+  sellerId: objectIdSchema,
+  dailyTarget: z.coerce.number().optional(),
+});
+
+export const updateUserSellerTargetSchema = z.object({
+  dailyTarget: z.coerce.number({ invalid_type_error: 'Valid daily target is required' }),
+});
+
+export const updatePerformanceRemarksSchema = z.object({
+  remarks: z.enum(['Good', 'Average', 'Need for improvement', ''], {
+    errorMap: () => ({ message: 'Invalid remark value' }),
+  }),
+});
+
+// ── ASIN list categories ──────────────────────────────────────────────────────
+
+export const createAsinListCategorySchema = z.object({
+  name: z.string().trim().min(1, 'Category name is required'),
+});
+
+// ── ASIN list ranges ──────────────────────────────────────────────────────────
+
+export const createAsinListRangeSchema = z.object({
+  name: z.string().trim().min(1, 'Range name is required'),
+  categoryId: z.string().min(1, 'categoryId is required'),
+});
+
+export const renameAsinListRangeSchema = z.object({
+  name: z.string().trim().min(1, 'Range name is required'),
+});
+
+// ── ASIN list products ────────────────────────────────────────────────────────
+
+export const createAsinListProductSchema = z.object({
+  name: z.string().trim().min(1, 'Product name is required'),
+  rangeId: z.string().min(1, 'rangeId is required'),
+  categoryId: z.string().min(1, 'categoryId is required'),
+});
+
+export const renameAsinListProductSchema = z.object({
+  name: z.string().trim().min(1, 'Product name is required'),
+});
+
+export const moveAsinsSchema = z.object({
+  asinIds: z.array(z.string()).min(1, 'asinIds must be a non-empty array'),
+  productId: z.string().min(1, 'productId is required'),
+});
+
+export const copyProductsToRangeSchema = z.object({
+  productIds: z.array(z.string()).min(1, 'productIds must be a non-empty array'),
+  targetRangeId: z.string().optional(),
+  targetRangeIds: z.array(z.string()).optional(),
+});
+
+// ── ASIN directory ────────────────────────────────────────────────────────────
+
+const ASIN_REGIONS = ['US', 'UK', 'AU', 'CA', 'DE', 'FR', 'IT', 'ES', 'MX', 'IN'];
+
+export const bulkAddAsinsSchema = z.object({
+  asins: z.array(z.string()).min(1, 'asins must be a non-empty array'),
+  region: z.string().optional().default('US'),
+});
+
+export const csvImportAsinsSchema = z.object({
+  csvData: z.string().min(1, 'csvData is required'),
+  region: z.string().optional().default('US'),
+});
+
+export const updateAsinSchema = z.object({
+  price: z.coerce.number().optional(),
+  description: z.string().optional(),
+});
+
+export const bulkDeleteAsinsSchema = z.object({
+  ids: z.array(z.string()).min(1, 'ids must be a non-empty array'),
+});
+
+// ── Attendance ────────────────────────────────────────────────────────────────
+
+export const editAttendanceHoursSchema = z.object({
+  totalWorkTime: z.coerce
+    .number()
+    .min(0, 'totalWorkTime must be a non-negative number (milliseconds)'),
+});
+
+// ── Employee profiles ─────────────────────────────────────────────────────────
+
+// All fields optional — mirrors the pickProfile() whitelist already in the route.
+// Zod ensures correct types before pickProfile() filters further.
+const employeeProfileFields = {
+  name: z.string().optional(),
+  phoneNumber: z.string().optional(),
+  dateOfBirth: z.string().optional(),
+  bloodGroup: z.string().optional(),
+  dateOfJoining: z.string().optional(),
+  gender: z.string().optional(),
+  address: z.string().optional(),
+  email: z.union([z.string().email('Invalid email format'), z.literal('')]).optional(),
+  bankAccountNumber: z.string().optional(),
+  bankIFSC: z.string().optional(),
+  bankName: z.string().optional(),
+  aadharNumber: z.string().optional(),
+  panNumber: z.string().optional(),
+  profilePicUrl: z.string().optional(),
+  aadharImageUrl: z.string().optional(),
+  panImageUrl: z.string().optional(),
+  myTaskList: z.any().optional(),
+  primaryTask: z.string().optional(),
+  secondaryTask: z.string().optional(),
+};
+
+export const updateMyProfileSchema = z.object(employeeProfileFields);
+
+// Admin PUT also reads workingMode, workingHours, role, department from req.body
+export const adminUpdateProfileSchema = z.object({
+  ...employeeProfileFields,
+  workingMode: z.string().optional(),
+  workingHours: z.union([z.string(), z.number()]).optional(),
+  role: z.string().optional(),
+  department: z.string().optional(),
+});
+
+export const adminProfileFieldsSchema = z.object({
+  workingMode: z.string().optional(),
+  workingHours: z.union([z.string(), z.number()]).optional(),
 });

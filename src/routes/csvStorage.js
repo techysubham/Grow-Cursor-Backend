@@ -4,12 +4,67 @@ import { requireAuth } from '../middleware/auth.js';
 import CsvStorage from '../models/CsvStorage.js';
 import FeedUpload from '../models/FeedUpload.js';
 
+
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
 // ============================================
 // GET /csv-storage — Paginated list with filters
 // ============================================
+/**
+ * @swagger
+ * /csv-storage:
+ *   get:
+ *     tags: [CSV Storage]
+ *     summary: List CSV records (paginated)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: keyword
+ *         schema: { type: string }
+ *         description: Case-insensitive name search
+ *       - in: query
+ *         name: dateFrom
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: dateTo
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: categoryId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: rangeId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: productId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 10 }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: integer, default: 0 }
+ *     responses:
+ *       200:
+ *         description: Paginated records (csvData field excluded)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 records:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/CsvStorageRecord'
+ *                 total:
+ *                   type: integer
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, async (req, res) => {
     try {
         const {
@@ -69,6 +124,66 @@ router.get('/', requireAuth, async (req, res) => {
 // ============================================
 // POST /csv-storage — Save a new CSV record
 // ============================================
+/**
+ * @swagger
+ * /csv-storage:
+ *   post:
+ *     tags: [CSV Storage]
+ *     summary: Upload and save a CSV record
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [csvFile, sellerId]
+ *             properties:
+ *               csvFile:
+ *                 type: string
+ *                 format: binary
+ *               sellerId:
+ *                 type: string
+ *               templateId:
+ *                 type: string
+ *               listingCount:
+ *                 type: integer
+ *               categoryId:
+ *                 type: string
+ *               categoryName:
+ *                 type: string
+ *               rangeId:
+ *                 type: string
+ *               rangeName:
+ *                 type: string
+ *               productId:
+ *                 type: string
+ *               productName:
+ *                 type: string
+ *               source:
+ *                 type: string
+ *               country:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Saved record summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 _id:
+ *                   type: string
+ *                 name:
+ *                   type: string
+ *                 fileName:
+ *                   type: string
+ *       400:
+ *         description: No CSV file or missing sellerId
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
     try {
         const file = req.file;
@@ -86,7 +201,8 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
             rangeName,
             productId,
             productName,
-            source
+            source,
+            country
         } = req.body;
 
         if (!sellerId) {
@@ -110,6 +226,7 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
             productId: productId || null,
             productName: productName || '',
             source: source || null,
+            country: country || null,
             createdBy: req.user?._id || null
         });
 
@@ -123,6 +240,49 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
 // ============================================
 // PATCH /csv-storage/:id/link-upload — Link FeedUpload by taskId
 // ============================================
+/**
+ * @swagger
+ * /csv-storage/{id}/link-upload:
+ *   patch:
+ *     tags: [CSV Storage]
+ *     summary: Link a FeedUpload record to a CSV by taskId
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [taskId]
+ *             properties:
+ *               taskId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Record with feedUploadId linked
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 record:
+ *                   $ref: '#/components/schemas/CsvStorageRecord'
+ *       400:
+ *         description: Missing taskId
+ *       404:
+ *         description: CSV record or FeedUpload not found
+ *       500:
+ *         description: Internal server error
+ */
 router.patch('/:id/link-upload', requireAuth, async (req, res) => {
     try {
         const { taskId } = req.body;
@@ -155,6 +315,33 @@ router.patch('/:id/link-upload', requireAuth, async (req, res) => {
 // ============================================
 // GET /csv-storage/:id/download — Stream CSV from DB
 // ============================================
+/**
+ * @swagger
+ * /csv-storage/{id}/download:
+ *   get:
+ *     tags: [CSV Storage]
+ *     summary: Download a stored CSV file
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Raw CSV file stream
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       404:
+ *         description: CSV record not found
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/:id/download', requireAuth, async (req, res) => {
     try {
         const record = await CsvStorage.findById(req.params.id);
@@ -174,9 +361,63 @@ router.get('/:id/download', requireAuth, async (req, res) => {
 // ============================================
 // POST /csv-storage/:id/schedule-upload — Set or update scheduled auto-upload
 // ============================================
+/**
+ * @swagger
+ * /csv-storage/{id}/schedule-upload:
+ *   post:
+ *     tags: [CSV Storage]
+ *     summary: Schedule an auto-upload for a CSV record
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [scheduledAt, sellerId]
+ *             properties:
+ *               scheduledAt:
+ *                 type: string
+ *                 format: date-time
+ *               sellerId:
+ *                 type: string
+ *               country:
+ *                 type: string
+ *               categoryId:
+ *                 type: string
+ *               rangeId:
+ *                 type: string
+ *               productId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Schedule set
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 record:
+ *                   $ref: '#/components/schemas/CsvStorageRecord'
+ *       400:
+ *         description: Missing scheduledAt/sellerId or date in the past
+ *       404:
+ *         description: CSV record not found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/:id/schedule-upload', requireAuth, async (req, res) => {
     try {
-        const { scheduledAt, sellerId } = req.body;
+        const { scheduledAt, sellerId, country, categoryId, rangeId, productId } = req.body;
         if (!scheduledAt) return res.status(400).json({ error: 'Missing scheduledAt' });
         if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
 
@@ -184,9 +425,20 @@ router.post('/:id/schedule-upload', requireAuth, async (req, res) => {
         if (isNaN(scheduledDate.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt date' });
         if (scheduledDate <= new Date()) return res.status(400).json({ error: 'Scheduled time must be in the future' });
 
+        const updateFields = {
+            scheduledUploadAt: scheduledDate,
+            scheduledSellerId: sellerId,
+            scheduledUploadStatus: 'pending'
+        };
+        // Persist optional metadata so the cron job can forward them to FeedUpload
+        if (country) updateFields.country = country;
+        if (categoryId) updateFields.categoryId = categoryId;
+        if (rangeId) updateFields.rangeId = rangeId;
+        if (productId) updateFields.productId = productId;
+
         const record = await CsvStorage.findByIdAndUpdate(
             req.params.id,
-            { scheduledUploadAt: scheduledDate, scheduledSellerId: sellerId, scheduledUploadStatus: 'pending' },
+            updateFields,
             { new: true }
         ).select('-csvData').populate('seller', 'storeName').populate('feedUploadId', 'status uploadSummary taskId');
 
@@ -201,6 +453,39 @@ router.post('/:id/schedule-upload', requireAuth, async (req, res) => {
 // ============================================
 // DELETE /csv-storage/:id/schedule-upload — Cancel scheduled auto-upload
 // ============================================
+/**
+ * @swagger
+ * /csv-storage/{id}/schedule-upload:
+ *   delete:
+ *     tags: [CSV Storage]
+ *     summary: Cancel a scheduled auto-upload
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Schedule cancelled
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 record:
+ *                   $ref: '#/components/schemas/CsvStorageRecord'
+ *       400:
+ *         description: Cannot cancel — upload is already processing
+ *       404:
+ *         description: CSV record not found
+ *       500:
+ *         description: Internal server error
+ */
 router.delete('/:id/schedule-upload', requireAuth, async (req, res) => {
     try {
         const existing = await CsvStorage.findById(req.params.id).select('scheduledUploadStatus');
@@ -225,6 +510,35 @@ router.delete('/:id/schedule-upload', requireAuth, async (req, res) => {
 // ============================================
 // DELETE /csv-storage/:id — Remove record
 // ============================================
+/**
+ * @swagger
+ * /csv-storage/{id}:
+ *   delete:
+ *     tags: [CSV Storage]
+ *     summary: Delete a CSV storage record
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *       404:
+ *         description: CSV record not found
+ *       500:
+ *         description: Internal server error
+ */
 router.delete('/:id', requireAuth, async (req, res) => {
     try {
         const record = await CsvStorage.findByIdAndDelete(req.params.id);

@@ -1,53 +1,2179 @@
 import express from 'express';
-import { requireAuth, requireAuthSSE } from '../middleware/auth.js';
+import mongoose from 'mongoose';
+import { requireAuth, requireAuthSSE, requirePageAccess } from '../middleware/auth.js';
 import TemplateListing from '../models/TemplateListing.js';
 import ListingTemplate from '../models/ListingTemplate.js';
 import Seller from '../models/Seller.js';
+import Order from '../models/Order.js';
 import SellerPricingConfig from '../models/SellerPricingConfig.js';
 import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
+import { calculateStartPrice } from '../utils/pricingCalculator.js';
+import { generateWithGemini } from '../utils/gemini.js';
 import { generateSKUFromASIN, generateSKUWithCount } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
 import { getAsinCacheStats, clearAsinCache, invalidateAsinCache } from '../utils/asinCache.js';
 import AsinDirectory from '../models/AsinDirectory.js';
+import ApiUsage from '../models/ApiUsage.js';
+import AiListingRun from '../models/AiListingRun.js';
+import SellerSkuIndex from '../models/SellerSkuIndex.js';
+import User from '../models/User.js';
 
 const router = express.Router();
+const EXCLUDED_CLIENT_USERNAME = 'Vergo';
 
+async function getExcludedClientSellerIds() {
+  const excludedUsers = await User.find({
+    username: { $regex: new RegExp(`^${EXCLUDED_CLIENT_USERNAME}$`, 'i') },
+  })
+    .select('_id')
+    .lean();
+
+  if (excludedUsers.length === 0) return [];
+
+  return Seller.find({
+    user: { $in: excludedUsers.map(user => user._id) },
+  }).distinct('_id');
+}
+
+function firstHeaderValue(value) {
+  if (Array.isArray(value)) return value[0] || '';
+  return value || '';
+}
+
+function getClientIpInfo(req) {
+  const cfConnectingIp = firstHeaderValue(req.headers['cf-connecting-ip']).trim();
+  if (cfConnectingIp) {
+    return { ipAddress: cfConnectingIp, ipSource: 'cf-connecting-ip' };
+  }
+
+  const trueClientIp = firstHeaderValue(req.headers['true-client-ip']).trim();
+  if (trueClientIp) {
+    return { ipAddress: trueClientIp, ipSource: 'true-client-ip' };
+  }
+
+  const xRealIp = firstHeaderValue(req.headers['x-real-ip']).trim();
+  if (xRealIp) {
+    return { ipAddress: xRealIp, ipSource: 'x-real-ip' };
+  }
+
+  const forwardedFor = firstHeaderValue(req.headers['x-forwarded-for']);
+  const firstForwardedIp = forwardedFor.split(',').map(ip => ip.trim()).find(Boolean);
+  if (firstForwardedIp) {
+    return { ipAddress: firstForwardedIp, ipSource: 'x-forwarded-for' };
+  }
+
+  return { ipAddress: req.ip, ipSource: 'req.ip' };
+}
+
+function createAiRunContext(prefix = 'listing') {
+  const startedAt = new Date();
+  return {
+    aiRunId: `${prefix}-${startedAt.getTime()}-${new mongoose.Types.ObjectId().toString()}`,
+    aiRunStartedAt: startedAt
+  };
+}
+
+function buildAiUsageContext(req, templateId, sellerId, runContext = {}) {
+  const ipInfo = getClientIpInfo(req);
+  return {
+    templateId,
+    sellerId,
+    userId: req.user?.userId,
+    aiRunId: runContext.aiRunId,
+    aiRunStartedAt: runContext.aiRunStartedAt,
+    ipAddress: ipInfo.ipAddress,
+    ipSource: ipInfo.ipSource,
+    forwardedFor: req.headers['x-forwarded-for'] || '',
+    userAgent: req.get('user-agent') || ''
+  };
+}
+
+function getListingAiRunId(listingData = {}) {
+  return listingData._aiRunId || listingData.aiRunId || listingData._runId || listingData.runId || null;
+}
+
+async function recordReviewSaveCounts({ listings = [], results = [], templateId, sellerId, userId, dismissedByRunId = [] }) {
+  const savedStatuses = new Set(['created', 'updated', 'reactivated']);
+  const countsByRunId = new Map();
+  const updateableDuplicateCountsByRunId = new Map();
+  const dismissedCountsByRunId = new Map();
+  const dismissedNewCountsByRunId = new Map();
+  const dismissedUpdateableDuplicateCountsByRunId = new Map();
+
+  results.forEach((result, index) => {
+    if (!savedStatuses.has(result.status)) return;
+    const listingData = listings[index] || {};
+    const aiRunId = getListingAiRunId(listingData);
+    if (!aiRunId) return;
+    countsByRunId.set(aiRunId, (countsByRunId.get(aiRunId) || 0) + 1);
+    if (listingData._isDuplicateUpdate) {
+      updateableDuplicateCountsByRunId.set(
+        aiRunId,
+        (updateableDuplicateCountsByRunId.get(aiRunId) || 0) + 1
+      );
+    }
+  });
+
+  dismissedByRunId.forEach((item) => {
+    const aiRunId = item?.aiRunId;
+    if (!aiRunId) return;
+    dismissedCountsByRunId.set(
+      aiRunId,
+      (dismissedCountsByRunId.get(aiRunId) || 0) + Number(item.dismissedCount || 0)
+    );
+    dismissedNewCountsByRunId.set(
+      aiRunId,
+      (dismissedNewCountsByRunId.get(aiRunId) || 0) + Number(item.dismissedNewAsinCount || 0)
+    );
+    dismissedUpdateableDuplicateCountsByRunId.set(
+      aiRunId,
+      (dismissedUpdateableDuplicateCountsByRunId.get(aiRunId) || 0) + Number(item.dismissedUpdateableDuplicateCount || 0)
+    );
+  });
+
+  const runIds = new Set([
+    ...countsByRunId.keys(),
+    ...dismissedCountsByRunId.keys()
+  ]);
+
+  await Promise.all([...runIds].map((aiRunId) => {
+    const savedCount = countsByRunId.get(aiRunId) || 0;
+    const dismissedCount = dismissedCountsByRunId.get(aiRunId) || 0;
+    return (
+    AiListingRun.findOneAndUpdate(
+      { aiRunId },
+      {
+        $setOnInsert: { aiRunId },
+        $set: {
+          templateId,
+          sellerId,
+          userId,
+          lastSavedFromReviewAt: new Date()
+        },
+        $inc: {
+          savedFromReviewCount: savedCount,
+          updateableDuplicateCount: updateableDuplicateCountsByRunId.get(aiRunId) || 0,
+          dismissedFromReviewCount: dismissedCount,
+          dismissedNewAsinCount: dismissedNewCountsByRunId.get(aiRunId) || 0,
+          dismissedUpdateableDuplicateCount: dismissedUpdateableDuplicateCountsByRunId.get(aiRunId) || 0,
+          reviewSaveAttempts: 1
+        }
+      },
+      { upsert: true, new: true }
+    )
+    );
+  }));
+
+  return [...runIds].map((aiRunId) => ({
+    aiRunId,
+    savedCount: countsByRunId.get(aiRunId) || 0,
+    updateableDuplicateCount: updateableDuplicateCountsByRunId.get(aiRunId) || 0,
+    dismissedCount: dismissedCountsByRunId.get(aiRunId) || 0,
+    dismissedNewAsinCount: dismissedNewCountsByRunId.get(aiRunId) || 0,
+    dismissedUpdateableDuplicateCount: dismissedUpdateableDuplicateCountsByRunId.get(aiRunId) || 0
+  }));
+}
+
+function buildDirectorySourceData(doc, priceOverride = null) {
+  if (!doc) return null;
+
+  return {
+    title: doc.title || '',
+    brand: doc.brand || '',
+    price: priceOverride ?? doc.price ?? '',
+    description: doc.description || '',
+    images: doc.images || [],
+    color: doc.color || '',
+    compatibility: doc.compatibility || ''
+  };
+}
+
+function buildAmazonSourceData(amazonData) {
+  return {
+    title: amazonData.title,
+    brand: amazonData.brand,
+    price: amazonData.price,
+    description: amazonData.description,
+    images: amazonData.images,
+    color: amazonData.color,
+    compatibility: amazonData.compatibility,
+    productInfo: amazonData.productInfo || null
+  };
+}
+
+function calculatePricingOnly(asin, amazonPrice, pricingConfig) {
+  if (!pricingConfig?.enabled) return null;
+
+  if (!amazonPrice || String(amazonPrice).trim() === '') {
+    console.warn(`[ASIN: ${asin}] ⚠️ duplicate pricing: Amazon price not available — cannot calculate startPrice`);
+    return {
+      enabled: true,
+      error: 'Amazon price not available'
+    };
+  }
+
+  try {
+    const amazonCost = parseFloat(String(amazonPrice).replace(/[^0-9.]/g, ''));
+
+    if (!isNaN(amazonCost) && amazonCost > 0) {
+      const result = calculateStartPrice(pricingConfig, amazonCost);
+      const pricingCalculation = {
+        enabled: true,
+        amazonCost: amazonPrice,
+        calculatedStartPrice: result.price.toFixed(2),
+        breakdown: result.breakdown
+      };
+
+      if (result.breakdown.profitTier?.enabled) {
+        console.log(`[ASIN: ${asin}] 💰 duplicate pricing: ${amazonPrice} → $${result.price.toFixed(2)} (tier: ${result.breakdown.profitTier.costRange}, +₹${result.breakdown.profitTier.profit})`);
+      } else {
+        console.log(`[ASIN: ${asin}] 💰 duplicate pricing: ${amazonPrice} → $${result.price.toFixed(2)}`);
+      }
+
+      return pricingCalculation;
+    }
+
+    console.warn(`[ASIN: ${asin}] ⚠️ duplicate pricing: invalid price "${amazonPrice}" (parsed: ${amazonCost})`);
+    return {
+      enabled: true,
+      error: `Invalid price value: ${amazonPrice}`
+    };
+  } catch (error) {
+    console.error(`[ASIN: ${asin}] ❌ duplicate pricing error: ${error.message}`);
+    return {
+      enabled: true,
+      error: error.message
+    };
+  }
+}
+
+async function runWithConcurrency(items, concurrency, worker, shouldContinue = () => true) {
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: limit }, async () => {
+    while (nextIndex < items.length && shouldContinue()) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      if (!shouldContinue()) break;
+      await worker(items[currentIndex], currentIndex);
+    }
+  });
+
+  await Promise.allSettled(workers);
+}
+
+function getBaseSku(sku = '') {
+  const cleanSku = String(sku || '').trim();
+  return cleanSku.replace(/-\d+$/, '');
+}
+
+function parseNumericPrice(value) {
+  const price = parseFloat(String(value || '').replace(/[^0-9.]/g, ''));
+  return Number.isFinite(price) ? price : null;
+}
+
+const MARKETPLACE_TIMEZONES = {
+  US: 'America/Los_Angeles',
+  UK: 'Europe/London',
+  CA: 'America/Toronto',
+  AU: 'Australia/Sydney'
+};
+
+const MONTH_INDEX = {
+  january: 0,
+  february: 1,
+  march: 2,
+  april: 3,
+  may: 4,
+  june: 5,
+  july: 6,
+  august: 7,
+  september: 8,
+  october: 9,
+  november: 10,
+  december: 11
+};
+
+function getMarketplaceLocalDateParts(date, timezone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric'
+  }).formatToParts(date);
+
+  return {
+    year: Number(parts.find(part => part.type === 'year')?.value),
+    month: Number(parts.find(part => part.type === 'month')?.value) - 1,
+    day: Number(parts.find(part => part.type === 'day')?.value)
+  };
+}
+
+function parseShippingDate(shippingValue, scrapedAt, timezone) {
+  const raw = String(shippingValue || '').trim();
+  const match = raw.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:,\s*(\d{4}))?/i);
+  if (!match) return { deliveryDate: null, deliveryDays: null };
+
+  const scrapedLocal = getMarketplaceLocalDateParts(scrapedAt, timezone);
+  const month = MONTH_INDEX[match[1].toLowerCase()];
+  const day = Number(match[2]);
+  let year = match[3] ? Number(match[3]) : scrapedLocal.year;
+
+  let deliveryUtc = Date.UTC(year, month, day);
+  const scrapedUtc = Date.UTC(scrapedLocal.year, scrapedLocal.month, scrapedLocal.day);
+
+  if (!match[3] && deliveryUtc < scrapedUtc) {
+    year += 1;
+    deliveryUtc = Date.UTC(year, month, day);
+  }
+
+  const deliveryDays = Math.round((deliveryUtc - scrapedUtc) / 86400000);
+  return {
+    deliveryDate: `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+    deliveryDays: Number.isFinite(deliveryDays) ? deliveryDays : null
+  };
+}
+
+function getPrecheckEnrichment(amazonData = {}, region = 'US', scrapedAt = new Date()) {
+  const rawData = amazonData.rawData?.rawData || amazonData.rawData || {};
+  const customerReviews = rawData.product_information?.customer_reviews || {};
+  const rating = Number(rawData.average_rating ?? customerReviews.stars ?? 0);
+  const reviewCount = Number(rawData.total_reviews ?? rawData.total_ratings ?? customerReviews.ratings_count ?? 0);
+  const availabilityStatus = String(rawData.availability_status || '').trim();
+  const shippingTime = String(rawData.shipping_time || '').trim();
+  const shippingCondition = String(rawData.shipping_condition || '').trim();
+  const marketplaceTimezone = MARKETPLACE_TIMEZONES[region] || MARKETPLACE_TIMEZONES.US;
+  const delivery = parseShippingDate(shippingTime || shippingCondition, scrapedAt, marketplaceTimezone);
+  const availabilityLower = availabilityStatus.toLowerCase();
+  let inStock = null;
+  if (availabilityStatus) {
+    if (availabilityLower.includes('out of stock') || availabilityLower.includes('unavailable')) {
+      inStock = false;
+    } else if (availabilityLower.includes('in stock') || availabilityLower.includes('available')) {
+      inStock = true;
+    }
+  }
+
+  return {
+    price: amazonData.price || '',
+    priceNumber: parseNumericPrice(amazonData.price),
+    availabilityStatus,
+    inStock,
+    rating: Number.isFinite(rating) && rating > 0 ? rating : null,
+    reviewCount: Number.isFinite(reviewCount) && reviewCount > 0 ? reviewCount : null,
+    shippingTime,
+    shippingCondition,
+    marketplaceTimezone,
+    scrapedAt: scrapedAt.toISOString(),
+    deliveryDate: delivery.deliveryDate,
+    deliveryDays: delivery.deliveryDays
+  };
+}
+
+function parseJsonObject(text = '') {
+  const raw = String(text || '').trim();
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(item => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function detectVehicleYearText(title = '') {
+  const yearPattern = /\b(?:19[5-9]\d|20[0-4]\d)(?:\s*[-–/]\s*(?:\d{2}|19[5-9]\d|20[0-4]\d))?\b/g;
+  return [...new Set(String(title || '').match(yearPattern) || [])].slice(0, 8);
+}
+
+function detectUniversalPhrase(title = '') {
+  const match = String(title || '').match(/\b(universal(?:\s+fit)?|fits\s+most\s+(?:cars|vehicles|trucks|motorcycles)|for\s+most\s+(?:cars|vehicles|trucks|motorcycles))\b/i);
+  return match ? match[0] : '';
+}
+
+function detectKnownVehicleModelPhrase(title = '') {
+  const text = String(title || '');
+  const knownModelPattern = /\b(?:Harley\s+Davidson|Sportster|Softail|Dyna|Electra\s+Glide|Road\s+King|Fatboy|Touring|Chevy|Chevrolet|Silverado|Colorado|Ford|F-?150|F-?250|F-?350|Ram|Dodge|Jeep|Wrangler|Toyota|Tacoma|Tundra|Camry|Corolla|Honda|Civic|Accord|BMW|Mercedes|Audi|Nissan|Altima|Sentra|Subaru|Outback|Forester|Yamaha|Kawasaki|Suzuki|Polaris|Can-Am)\b/i;
+  const match = text.match(knownModelPattern);
+  return match ? match[0] : '';
+}
+
+async function classifyEbayMotorsTitle(title, asin, usageContext = {}) {
+  const cleanTitle = String(title || '').trim();
+  if (!cleanTitle) {
+    return {
+      eligible: false,
+      reason: 'No title found',
+      signals: { hasModel: false, hasYear: false, isUniversal: false },
+      detected: { modelNames: [], years: [], universalPhrase: '' }
+    };
+  }
+
+  const prompt = `
+You are checking if an Amazon product title is suitable for an eBay Motors listing precheck.
+
+Pass rule:
+- eligible=true if the title contains BOTH a vehicle model name and a year/year range.
+- Otherwise eligible=false.
+
+Definitions:
+- eBay Motors includes cars, trucks, motorcycles, powersports, ATV/UTV, and their parts.
+- A vehicle model name can be a real vehicle make/model/trim/platform/family such as Silverado, Colorado, F-150, Civic, Wrangler, X5, G05, Camry, Tacoma, Harley Davidson Sportster, Dyna, Softail, Yamaha YZF, Polaris Ranger, etc.
+- A year/year range means a model year like 2024, or a range like 2019-2024, 2023 2024 2025, 1999-06.
+- Universal fit does NOT pass by itself. Universal products must still be excluded unless the title also has BOTH a vehicle model name and a year/year range.
+- Do not require the exact word "model"; detect actual vehicle model names from the title.
+- Engine sizes or product part numbers alone are not vehicle model names.
+
+Return only valid JSON:
+{
+  "eligible": boolean,
+  "reason": "short reason",
+  "signals": {
+    "hasModel": boolean,
+    "hasYear": boolean,
+    "isUniversal": boolean
+  },
+  "detected": {
+    "modelNames": ["detected vehicle model names"],
+    "years": ["detected years or year ranges"],
+    "universalPhrase": "detected universal phrase or empty string"
+  }
+}
+
+Examples:
+- "27490-96 Carburetor for Harley Davidson Sportster 883 Sportster 1200 1988-2007" => eligible=true, hasModel=true, hasYear=true.
+- "Universal Mud Flaps for Cars Trucks SUV" => eligible=false, isUniversal=true, because model and year are missing.
+- "Carburetor for Predator 4000 Champion Honda 3500 Generator" => eligible=false because vehicle model and year are missing.
+
+Title: ${cleanTitle}
+`.trim();
+
+  try {
+    const response = await generateWithGemini(prompt, {
+      maxTokens: 180,
+      asin,
+      fieldName: 'ebay_motors_title_eligibility',
+      fieldType: 'precheck',
+      ...usageContext
+    });
+    const parsed = parseJsonObject(response);
+    if (!parsed || typeof parsed.eligible !== 'boolean') {
+      throw new Error('Invalid eligibility response');
+    }
+
+    const signals = parsed.signals || {};
+    const detected = parsed.detected || {};
+    const modelNames = normalizeStringArray(detected.modelNames);
+    const years = normalizeStringArray(detected.years);
+    const universalPhrase = String(detected.universalPhrase || '').trim();
+    const fallbackYears = detectVehicleYearText(cleanTitle);
+    const fallbackUniversalPhrase = detectUniversalPhrase(cleanTitle);
+    const fallbackModelPhrase = detectKnownVehicleModelPhrase(cleanTitle);
+    const hasModel = Boolean(signals.hasModel) || modelNames.length > 0 || Boolean(fallbackModelPhrase);
+    const hasYear = Boolean(signals.hasYear) || years.length > 0 || fallbackYears.length > 0;
+    const isUniversal = Boolean(signals.isUniversal) || Boolean(universalPhrase) || Boolean(fallbackUniversalPhrase);
+    const eligible = hasModel && hasYear;
+    const normalizedDetected = {
+      modelNames: modelNames.length > 0 ? modelNames : (fallbackModelPhrase ? [fallbackModelPhrase] : []),
+      years: years.length > 0 ? years : fallbackYears,
+      universalPhrase: universalPhrase || fallbackUniversalPhrase
+    };
+    const reason = eligible
+      ? String(parsed.reason || 'Contains vehicle model and year fitment').slice(0, 180)
+      : String(
+          isUniversal
+            ? 'Universal product excluded; model name and year are required'
+            : parsed.reason || 'Missing vehicle model name or year'
+        ).slice(0, 180);
+
+    return {
+      eligible,
+      reason,
+      signals: {
+        hasModel,
+        hasYear,
+        isUniversal
+      },
+      detected: normalizedDetected
+    };
+  } catch (error) {
+    console.warn(`[ASIN Precheck] eBay Motors title check failed for ${asin}:`, error.message);
+    return {
+      eligible: false,
+      reason: 'Could not verify eBay Motors fitment from title',
+      signals: { hasModel: false, hasYear: false, isUniversal: false },
+      detected: { modelNames: [], years: [], universalPhrase: '' }
+    };
+  }
+}
+
+function getSkuLookupValues(sku = '') {
+  return [...new Set([String(sku || '').trim(), getBaseSku(sku)].filter(Boolean))];
+}
+
+function toObjectId(value) {
+  return mongoose.Types.ObjectId.isValid(value) ? new mongoose.Types.ObjectId(value) : null;
+}
+
+function normalizeMoney(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
+}
+
+function getPTDayBoundsUTC(dateStr) {
+  function getPTHour(d) {
+    return parseInt(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Los_Angeles',
+        hour: 'numeric',
+        hour12: false,
+        hourCycle: 'h23',
+      }).format(d),
+      10,
+    );
+  }
+
+  function getPTDateStr(d) {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(d);
+  }
+
+  function findMidnightUTC(ds) {
+    const pst = new Date(`${ds}T08:00:00.000Z`);
+    if (getPTDateStr(pst) === ds && getPTHour(pst) === 0) return pst;
+    const pdt = new Date(`${ds}T07:00:00.000Z`);
+    if (getPTDateStr(pdt) === ds && getPTHour(pdt) === 0) return pdt;
+    return pst;
+  }
+
+  const start = findMidnightUTC(dateStr);
+  const tmp = new Date(`${dateStr}T12:00:00.000Z`);
+  tmp.setUTCDate(tmp.getUTCDate() + 1);
+  const nextStart = findMidnightUTC(tmp.toISOString().split('T')[0]);
+  return { start, end: new Date(nextStart.getTime() - 1) };
+}
+
+router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
+  let heartbeat = null;
+
+  try {
+    const { templateId, sellerId, asins: asinsParam, region = 'US' } = req.query;
+    const ebayMotorsMode = String(req.query.ebayMotorsMode || '').toLowerCase() === 'true';
+
+    if (!templateId || !sellerId || !asinsParam) {
+      return res.status(400).json({ error: 'Template ID, Seller ID, and ASINs are required' });
+    }
+
+    const asins = [
+      ...new Set(
+        String(asinsParam)
+          .split(',')
+          .map(a => a.trim().toUpperCase())
+          .filter(Boolean)
+      )
+    ];
+
+    if (asins.length === 0) {
+      return res.status(400).json({ error: 'At least one ASIN is required' });
+    }
+
+    if (asins.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 ASINs allowed per batch' });
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+
+    let streamClosed = false;
+    const sendSse = (payload) => {
+      if (streamClosed) return;
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      if (typeof res.flush === 'function') res.flush();
+    };
+    const sendDone = () => {
+      if (streamClosed) return;
+      res.write('data: [DONE]\n\n');
+      if (typeof res.flush === 'function') res.flush();
+    };
+
+    heartbeat = setInterval(() => {
+      sendSse({ type: 'ping', timestamp: Date.now() });
+    }, 15000);
+
+    req.on('close', () => {
+      streamClosed = true;
+      if (heartbeat) clearInterval(heartbeat);
+    });
+
+    const [seller, template] = await Promise.all([
+      Seller.findById(sellerId).select('_id').lean(),
+      getEffectiveTemplate(templateId, sellerId)
+    ]);
+
+    if (!seller || !template) {
+      sendSse({ type: 'error', error: 'Seller or template not found' });
+      sendDone();
+      if (heartbeat) clearInterval(heartbeat);
+      return res.end();
+    }
+
+    const generatedRows = asins.map(asin => {
+      const sku = generateSKUFromASIN(asin);
+      return { asin, sku, baseSku: getBaseSku(sku) };
+    });
+
+    const skuValues = [...new Set(generatedRows.flatMap(row => [row.sku, row.baseSku]).filter(Boolean))];
+    const activeRecords = skuValues.length > 0
+      ? await SellerSkuIndex.find({
+          seller: sellerId,
+          $or: [
+            { sku: { $in: skuValues } },
+            { baseSku: { $in: skuValues } }
+          ]
+        }).select('sku baseSku').lean()
+      : [];
+
+    const activeSkuSet = new Set();
+    activeRecords.forEach(record => {
+      if (record.sku) activeSkuSet.add(record.sku);
+      if (record.baseSku) activeSkuSet.add(record.baseSku);
+    });
+
+    const streamConcurrency = parseInt(process.env.ASIN_PRECHECK_CONCURRENCY, 10)
+      || parseInt(process.env.SCRAPER_API_CONCURRENT, 10)
+      || 10;
+    const rowByAsin = new Map(generatedRows.map(row => [row.asin, row]));
+    let completed = 0;
+
+    const usageContext = buildAiUsageContext(req, templateId, sellerId);
+
+    sendSse({
+      type: 'started',
+      total: asins.length,
+      concurrency: Math.min(streamConcurrency, asins.length),
+      ebayMotorsMode
+    });
+
+    await runWithConcurrency(asins, streamConcurrency, async (asin) => {
+      if (streamClosed) return;
+
+      const generated = rowByAsin.get(asin) || {
+        sku: generateSKUFromASIN(asin),
+        baseSku: getBaseSku(generateSKUFromASIN(asin))
+      };
+
+      try {
+        sendSse({
+          type: 'item_started',
+          asin,
+          id: `asin-precheck-${asin}`,
+          progressStage: 'fetching'
+        });
+
+        const scrapedAt = new Date();
+        const amazonData = await fetchAmazonData(asin, region);
+        const sourceData = buildAmazonSourceData(amazonData);
+        const active = activeSkuSet.has(generated.sku) || activeSkuSet.has(generated.baseSku);
+        const enrichment = getPrecheckEnrichment(amazonData, region, scrapedAt);
+        const ebayMotorsEligibility = ebayMotorsMode
+          ? await classifyEbayMotorsTitle(amazonData.title || '', asin, usageContext)
+          : null;
+
+        sendSse({
+          type: 'item',
+          item: {
+            id: `asin-precheck-${asin}`,
+            asin,
+            sku: generated.sku,
+            baseSku: generated.baseSku,
+            active,
+            activeStatus: active ? 'active' : 'inactive',
+            title: amazonData.title || '',
+            image: Array.isArray(amazonData.images) ? amazonData.images[0] || '' : '',
+            ...enrichment,
+            ebayMotorsMode,
+            ebayMotorsEligible: ebayMotorsEligibility?.eligible ?? null,
+            ebayMotorsReason: ebayMotorsEligibility?.reason || '',
+            ebayMotorsSignals: ebayMotorsEligibility?.signals || null,
+            ebayMotorsDetected: ebayMotorsEligibility?.detected || null,
+            intent: ebayMotorsEligibility && !ebayMotorsEligibility.eligible ? 'excluded' : 'neutral',
+            sourceData,
+            status: 'success',
+            progressStage: 'complete',
+            errors: []
+          },
+          progress: ++completed,
+          total: asins.length
+        });
+      } catch (error) {
+        console.error(`[ASIN Precheck] Error processing ${asin}:`, error.message);
+        const active = activeSkuSet.has(generated.sku) || activeSkuSet.has(generated.baseSku);
+
+        sendSse({
+          type: 'item',
+          item: {
+            id: `asin-precheck-${asin}`,
+            asin,
+            sku: generated.sku,
+            baseSku: generated.baseSku,
+            active,
+            activeStatus: active ? 'active' : 'inactive',
+            title: '',
+            image: '',
+            price: '',
+            priceNumber: null,
+            availabilityStatus: '',
+            inStock: null,
+            rating: null,
+            reviewCount: null,
+            shippingTime: '',
+            shippingCondition: '',
+            marketplaceTimezone: MARKETPLACE_TIMEZONES[region] || MARKETPLACE_TIMEZONES.US,
+            scrapedAt: new Date().toISOString(),
+            deliveryDate: null,
+            deliveryDays: null,
+            ebayMotorsMode,
+            ebayMotorsEligible: ebayMotorsMode ? false : null,
+            ebayMotorsReason: ebayMotorsMode ? 'Could not check title eligibility' : '',
+            ebayMotorsSignals: ebayMotorsMode ? { hasModel: false, hasYear: false, isUniversal: false } : null,
+            ebayMotorsDetected: ebayMotorsMode ? { modelNames: [], years: [], universalPhrase: '' } : null,
+            intent: ebayMotorsMode ? 'excluded' : 'neutral',
+            sourceData: null,
+            status: 'error',
+            progressStage: 'complete',
+            errors: [error.message]
+          },
+          progress: ++completed,
+          total: asins.length
+        });
+      }
+    }, () => !streamClosed);
+
+    sendSse({ type: 'complete', total: completed });
+    sendDone();
+    if (heartbeat) clearInterval(heartbeat);
+    res.end();
+  } catch (error) {
+    console.error('[ASIN Precheck] Stream error:', error);
+    if (heartbeat) clearInterval(heartbeat);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'Failed to run ASIN precheck', details: error.message });
+    }
+    res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
+});
+
+router.get('/sku-seller-order-profit', requireAuth, requirePageAccess('SkuSellerOrderProfit'), async (req, res) => {
+  try {
+    const {
+      search = '',
+      sellerId = '',
+      page = 1,
+      limit = 50,
+      orderFrom = '',
+      orderTo = '',
+      createdFrom = '',
+      createdTo = '',
+      marketplace = '',
+      searchMarketplace = '',
+      excludeClient = '',
+      excludeLowValue = '',
+    } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    const sellerObjectId = sellerId && sellerId !== 'all' ? toObjectId(sellerId) : null;
+    const trimmedSearch = String(search || '').trim();
+    const fromValue = orderFrom || createdFrom;
+    const toValue = orderTo || createdTo;
+    const marketplaceValue = marketplace || searchMarketplace;
+
+    if (sellerId && sellerId !== 'all' && !sellerObjectId) {
+      return res.status(400).json({ error: 'Invalid sellerId' });
+    }
+    if (!fromValue || !toValue) {
+      return res.status(400).json({ error: 'Order From and Order To are required.' });
+    }
+
+    const { start: fromDate } = getPTDayBoundsUTC(fromValue);
+    const { end: toDate } = getPTDayBoundsUTC(toValue);
+    if (Number.isNaN(fromDate.getTime())) return res.status(400).json({ error: 'Invalid orderFrom date' });
+    if (Number.isNaN(toDate.getTime())) return res.status(400).json({ error: 'Invalid orderTo date' });
+    if (fromDate > toDate) return res.status(400).json({ error: 'Order From must be before Order To' });
+
+    const orderMatch = {
+      dateSold: { $gte: fromDate, $lte: toDate },
+    };
+    if (sellerObjectId) orderMatch.seller = sellerObjectId;
+    if (marketplaceValue) {
+      orderMatch.purchaseMarketplaceId = marketplaceValue === 'EBAY_ENCA' ? 'EBAY_CA' : marketplaceValue;
+    }
+    const orderAndConditions = [];
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        orderAndConditions.push({ seller: { $nin: excludedSellerIds } });
+      }
+    }
+    if (excludeLowValue === 'true') {
+      orderAndConditions.push({
+        $or: [
+          { subtotalUSD: { $gte: 3 } },
+          { subtotal: { $gte: 3 } },
+        ],
+      });
+    }
+    if (orderAndConditions.length > 0) {
+      orderMatch.$and = orderAndConditions;
+    }
+
+    const skuSetExpression = {
+      $setUnion: [
+        {
+          $cond: [
+            { $and: [{ $ne: ['$sku', null] }, { $ne: ['$sku', ''] }] },
+            [{ $toString: '$sku' }],
+            [],
+          ],
+        },
+        {
+          $map: {
+            input: { $ifNull: ['$lineItems', []] },
+            as: 'item',
+            in: {
+              $toString: {
+                $ifNull: [
+                  '$$item.sku',
+                  { $ifNull: ['$$item.SKU', { $ifNull: ['$$item.sellerSku', ''] }] },
+                ],
+              },
+            },
+          },
+        },
+      ],
+    };
+
+    const orderPipeline = [
+      { $match: orderMatch },
+      {
+        $project: {
+          orderId: 1,
+          seller: 1,
+          dateSold: 1,
+          creationDate: 1,
+          purchaseMarketplaceId: 1,
+          productName: 1,
+          subtotal: 1,
+          subtotalUSD: 1,
+          profit: 1,
+          quantity: 1,
+          skuCandidates: skuSetExpression,
+        },
+      },
+      { $unwind: '$skuCandidates' },
+      { $set: { sku: { $trim: { input: { $toString: { $ifNull: ['$skuCandidates', ''] } } } } } },
+      { $match: { sku: { $regex: /\S/ } } },
+      { $match: { sku: { $nin: ['null', 'undefined'] } } },
+    ];
+
+    if (trimmedSearch) {
+      const searchRegex = new RegExp(trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      orderPipeline.push({
+        $match: {
+          $or: [
+            { sku: searchRegex },
+            { productName: searchRegex },
+            { orderId: searchRegex },
+          ],
+        },
+      });
+    }
+
+    const groupedOrderStages = [
+      { $sort: { dateSold: -1, creationDate: -1, _id: -1 } },
+      {
+        $group: {
+          _id: '$sku',
+          orderCount: { $sum: 1 },
+          totalSubtotal: { $sum: { $ifNull: ['$subtotal', 0] } },
+          totalProfit: { $sum: { $ifNull: ['$profit', 0] } },
+          lastOrderDate: { $max: '$dateSold' },
+          orders: {
+            $push: {
+              orderId: '$orderId',
+              sku: '$sku',
+              seller: '$seller',
+              dateSold: '$dateSold',
+              creationDate: '$creationDate',
+              purchaseMarketplaceId: '$purchaseMarketplaceId',
+              productName: '$productName',
+              subtotal: '$subtotal',
+              subtotalUSD: '$subtotalUSD',
+              profit: '$profit',
+              quantity: '$quantity',
+            },
+          },
+        },
+      },
+    ];
+
+    const [aggregationResult = {}] = await Order.aggregate([
+      { $match: orderMatch },
+      {
+        $facet: {
+          rawSummary: [
+            { $count: 'totalFilteredOrders' },
+          ],
+          rows: [
+            ...orderPipeline.slice(1),
+            ...groupedOrderStages,
+            { $sort: { lastOrderDate: -1, _id: 1 } },
+            { $skip: (pageNum - 1) * limitNum },
+            { $limit: limitNum },
+            {
+              $project: {
+                orderCount: 1,
+                totalSubtotal: 1,
+                totalProfit: 1,
+                lastOrderDate: 1,
+                orders: 1,
+              },
+            },
+          ],
+          summary: [
+            ...orderPipeline.slice(1),
+            ...groupedOrderStages,
+            {
+              $group: {
+                _id: null,
+                totalSkus: { $sum: 1 },
+                totalOrders: { $sum: '$orderCount' },
+              },
+            },
+          ],
+        },
+      },
+    ])
+      .option({ allowDiskUse: true, maxTimeMS: 60000 });
+
+    const pageOrderRows = aggregationResult.rows || [];
+    const summary = aggregationResult.summary?.[0] || {};
+    const rawSummary = aggregationResult.rawSummary?.[0] || {};
+    const total = summary.totalSkus || 0;
+    const totalOrders = summary.totalOrders || 0;
+    const totalFilteredOrders = rawSummary.totalFilteredOrders || 0;
+    const pages = total > 0 ? Math.ceil(total / limitNum) : 0;
+    const hasNextPage = pageNum < pages;
+    const skus = pageOrderRows.map(row => row._id).filter(Boolean);
+
+    const listings = skus.length > 0
+      ? await TemplateListing.find({
+          deletedAt: null,
+          customLabel: { $in: skus },
+        })
+          .select('_id customLabel sellerId templateId title startPrice createdAt amazonLink +_asinReference')
+          .sort({ customLabel: 1, sellerId: 1, _id: 1 })
+          .lean()
+      : [];
+
+    const listingsBySku = new Map();
+    const skuIndexPairs = [];
+    listings.forEach((listing) => {
+      const sku = String(listing.customLabel || '').trim();
+      if (!sku) return;
+      if (!listingsBySku.has(sku)) listingsBySku.set(sku, []);
+      listingsBySku.get(sku).push(listing);
+      if (listing.sellerId) {
+        skuIndexPairs.push({
+          seller: listing.sellerId,
+          sku,
+        });
+      }
+    });
+
+    const skuIndexOr = skuIndexPairs
+      .filter(pair => pair.seller && pair.sku)
+      .map(pair => ({
+        seller: pair.seller,
+        sku: pair.sku,
+      }));
+    const skuIndexRecords = skuIndexOr.length > 0
+      ? await SellerSkuIndex.find({ $or: skuIndexOr })
+          .select('seller baseSku sku itemId syncedAt title')
+          .lean()
+      : [];
+    const skuIndexBySellerAndSku = new Map();
+    const skuIndexBySku = new Map();
+    skuIndexRecords.forEach((record) => {
+      const value = String(record.sku || '').trim();
+      if (!value) return;
+      const key = `${String(record.seller)}::${value}`;
+      if (!skuIndexBySellerAndSku.has(key)) skuIndexBySellerAndSku.set(key, []);
+      skuIndexBySellerAndSku.get(key).push(record);
+    });
+    const skuLookupValues = [...new Set(skus.map(sku => String(sku || '').trim()).filter(Boolean))];
+    const allSkuIndexRecords = skuLookupValues.length > 0
+      ? await SellerSkuIndex.find({
+          sku: { $in: skuLookupValues },
+        })
+          .select('seller baseSku sku itemId syncedAt title')
+          .lean()
+      : [];
+    allSkuIndexRecords.forEach((record) => {
+      const value = String(record.sku || '').trim();
+      if (!value) return;
+      if (!skuIndexBySku.has(value)) skuIndexBySku.set(value, []);
+      skuIndexBySku.get(value).push(record);
+    });
+
+    const sellerIdsFromListings = [
+      ...new Set(listings.map(listing => String(listing.sellerId)).filter(Boolean)),
+    ];
+    const sellerIdsFromOrders = [
+      ...new Set(pageOrderRows.flatMap(row => (row.orders || []).map(order => String(order.seller)).filter(Boolean))),
+    ];
+    const sellerIdsFromSkuIndex = [
+      ...new Set(allSkuIndexRecords.map(record => String(record.seller)).filter(Boolean)),
+    ];
+    const allSellerIds = [...new Set([...sellerIdsFromListings, ...sellerIdsFromOrders, ...sellerIdsFromSkuIndex])];
+    const sellerDocs = allSellerIds.length > 0
+      ? await Seller.find({ _id: { $in: allSellerIds } }).populate('user', 'username email').lean()
+      : [];
+    const sellerNameById = new Map(sellerDocs.map(seller => [
+      String(seller._id),
+      seller.user?.username || seller.user?.email || String(seller._id),
+    ]));
+
+    const templateIds = [
+      ...new Set(listings.map(listing => String(listing.templateId)).filter(Boolean)),
+    ];
+    const templateDocs = templateIds.length > 0
+      ? await ListingTemplate.find({ _id: { $in: templateIds } }).select('name').lean()
+      : [];
+    const templateNameById = new Map(templateDocs.map(template => [String(template._id), template.name || 'Template']));
+
+    const formattedRows = pageOrderRows.map((orderRow) => {
+      const rowListings = listingsBySku.get(orderRow._id) || [];
+      const sellerIds = new Set(rowListings.map(listing => String(listing.sellerId)).filter(Boolean));
+      const skuIndexRows = skuIndexBySku.get(String(orderRow._id || '').trim()) || [];
+      const skuIndexSellerIds = new Set(skuIndexRows.map(record => String(record.seller)).filter(Boolean));
+      let minTemplatePrice = null;
+      let maxTemplatePrice = null;
+      let priceTotal = 0;
+      let priceCount = 0;
+
+      rowListings.forEach((listing) => {
+        const price = Number(listing.startPrice);
+        if (Number.isFinite(price)) {
+          minTemplatePrice = minTemplatePrice == null ? price : Math.min(minTemplatePrice, price);
+          maxTemplatePrice = maxTemplatePrice == null ? price : Math.max(maxTemplatePrice, price);
+          priceTotal += price;
+          priceCount += 1;
+        }
+      });
+
+      return {
+        sku: orderRow._id,
+        listingCount: rowListings.length,
+        sellerCount: sellerIds.size,
+        skuIndexCount: skuIndexRows.length,
+        skuIndexSellerCount: skuIndexSellerIds.size,
+        minTemplatePrice: normalizeMoney(minTemplatePrice),
+        maxTemplatePrice: normalizeMoney(maxTemplatePrice),
+        avgTemplatePrice: normalizeMoney(priceCount > 0 ? priceTotal / priceCount : null),
+        orderCount: orderRow.orderCount || 0,
+        totalSubtotal: normalizeMoney(orderRow.totalSubtotal || 0),
+        totalProfit: normalizeMoney(orderRow.totalProfit || 0),
+        listings: rowListings.map(listing => ({
+          id: listing._id,
+          sellerId: listing.sellerId,
+          sellerName: sellerNameById.get(String(listing.sellerId)) || String(listing.sellerId || ''),
+          templateId: listing.templateId,
+          templateName: templateNameById.get(String(listing.templateId)) || 'Template',
+          title: listing.title || '',
+          startPrice: normalizeMoney(listing.startPrice),
+          createdAt: listing.createdAt,
+          asin: listing._asinReference || '',
+          amazonLink: listing.amazonLink || (listing._asinReference ? `https://www.amazon.com/dp/${listing._asinReference}` : ''),
+          skuSyncIndex: (() => {
+            const records = skuIndexBySellerAndSku.get(`${String(listing.sellerId)}::${String(listing.customLabel || '').trim()}`) || [];
+            return {
+              present: records.length > 0,
+              count: records.length,
+              itemIds: records.map(record => record.itemId).filter(Boolean),
+              syncedAt: records[0]?.syncedAt || null,
+            };
+          })(),
+        })).sort((a, b) => a.sellerName.localeCompare(b.sellerName)),
+        orders: (orderRow.orders || []).map(order => ({
+          orderId: order.orderId,
+          sku: order.sku || orderRow._id,
+          sellerName: sellerNameById.get(String(order.seller)) || String(order.seller || ''),
+          marketplace: order.purchaseMarketplaceId || '',
+          dateSold: order.dateSold || order.creationDate || null,
+          productName: order.productName || '',
+          subtotal: normalizeMoney(order.subtotal),
+          subtotalUSD: normalizeMoney(order.subtotalUSD),
+          profit: normalizeMoney(order.profit),
+          quantity: order.quantity || 0,
+        })),
+        syncRecords: skuIndexRows
+          .map(record => ({
+            id: record._id,
+            sellerId: record.seller,
+            sellerName: sellerNameById.get(String(record.seller)) || String(record.seller || ''),
+            itemId: record.itemId || '',
+            sku: record.sku || '',
+            baseSku: record.baseSku || '',
+            syncedAt: record.syncedAt || null,
+            title: record.title || '',
+          }))
+          .sort((a, b) => a.sellerName.localeCompare(b.sellerName) || String(a.itemId).localeCompare(String(b.itemId))),
+      };
+    });
+
+    return res.json({
+      rows: formattedRows,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages,
+        totalOrders,
+        totalFilteredOrders,
+        ordersWithoutUsableSku: Math.max(0, totalFilteredOrders - totalOrders),
+        hasNextPage,
+        scannedListings: null,
+        source: 'orders',
+      },
+    });
+  } catch (err) {
+    console.error('[SKU Seller Order Profit] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch SKU seller order profit report' });
+  }
+});
+
+router.get('/sku-seller-order-profit-listing-driven', requireAuth, requirePageAccess('SkuSellerOrderProfit'), async (req, res) => {
+  try {
+    const {
+      search = '',
+      sellerId = '',
+      page = 1,
+      limit = 25,
+      ordersPerSku = 5,
+      createdFrom = '',
+      createdTo = '',
+    } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 25));
+    const ordersLimit = Math.min(25, Math.max(1, parseInt(ordersPerSku, 10) || 5));
+    const sellerObjectId = sellerId && sellerId !== 'all' ? toObjectId(sellerId) : null;
+    const trimmedSearch = String(search || '').trim();
+    const createdAtRange = {};
+    if (createdFrom) {
+      const fromDate = new Date(`${createdFrom}T00:00:00.000Z`);
+      if (Number.isNaN(fromDate.getTime())) return res.status(400).json({ error: 'Invalid createdFrom date' });
+      createdAtRange.$gte = fromDate;
+    }
+    if (createdTo) {
+      const toDate = new Date(`${createdTo}T23:59:59.999Z`);
+      if (Number.isNaN(toDate.getTime())) return res.status(400).json({ error: 'Invalid createdTo date' });
+      createdAtRange.$lte = toDate;
+    }
+    if (createdAtRange.$gte && createdAtRange.$lte && createdAtRange.$gte > createdAtRange.$lte) {
+      return res.status(400).json({ error: 'Created From must be before Created To' });
+    }
+
+    if (sellerId && sellerId !== 'all' && !sellerObjectId) {
+      return res.status(400).json({ error: 'Invalid sellerId' });
+    }
+
+    const listingQuery = {
+      deletedAt: null,
+      customLabel: { $nin: [null, ''] },
+    };
+    if (Object.keys(createdAtRange).length > 0) {
+      listingQuery.createdAt = createdAtRange;
+    }
+    if (trimmedSearch) {
+      listingQuery.$or = [
+        { customLabel: { $regex: trimmedSearch, $options: 'i' } },
+        { title: { $regex: trimmedSearch, $options: 'i' } },
+      ];
+    }
+
+    const targetCount = pageNum * limitNum + 1;
+    const groupedRows = [];
+    let currentSku = null;
+    let currentGroup = null;
+    let scannedListings = 0;
+
+    const pushGroupIfMatch = (group) => {
+      if (!group) return;
+      const sellerIds = [...group.sellerIds];
+      if (sellerIds.length <= 1) return;
+      if (sellerObjectId && !group.sellerIds.has(String(sellerObjectId))) return;
+      groupedRows.push({
+        sku: group.sku,
+        listingCount: group.listingCount,
+        sellerIds,
+        minTemplatePrice: group.minTemplatePrice,
+        maxTemplatePrice: group.maxTemplatePrice,
+        avgTemplatePrice: group.priceCount > 0 ? group.priceTotal / group.priceCount : null,
+        listings: group.listings,
+      });
+    };
+
+    if (sellerObjectId) {
+      const neededRows = pageNum * limitNum + 1;
+      const pageRows = [];
+      const candidateBatch = [];
+      const seenCandidateSkus = new Set();
+      let skippedMatches = 0;
+      let scannedListings = 0;
+      let lastSellerSku = null;
+      let hasNextPage = false;
+
+      const buildGroupFromListings = (sku, listings) => {
+        const sellerIds = new Set();
+        let minTemplatePrice = null;
+        let maxTemplatePrice = null;
+        let priceTotal = 0;
+        let priceCount = 0;
+
+        listings.forEach((listing) => {
+          if (listing.sellerId) sellerIds.add(String(listing.sellerId));
+          const price = Number(listing.startPrice);
+          if (Number.isFinite(price)) {
+            minTemplatePrice = minTemplatePrice == null ? price : Math.min(minTemplatePrice, price);
+            maxTemplatePrice = maxTemplatePrice == null ? price : Math.max(maxTemplatePrice, price);
+            priceTotal += price;
+            priceCount += 1;
+          }
+        });
+
+        return {
+          sku,
+          listingCount: listings.length,
+          sellerIds: [...sellerIds],
+          minTemplatePrice,
+          maxTemplatePrice,
+          avgTemplatePrice: priceCount > 0 ? priceTotal / priceCount : null,
+          listings: listings.map(listing => ({
+            id: listing._id,
+            sellerId: listing.sellerId,
+            templateId: listing.templateId,
+            title: listing.title,
+            startPrice: listing.startPrice,
+            status: listing.status,
+            createdAt: listing.createdAt,
+          })),
+        };
+      };
+
+      const flushCandidates = async () => {
+        if (candidateBatch.length === 0 || pageRows.length >= neededRows) return;
+        const skusToCheck = candidateBatch.splice(0, candidateBatch.length);
+        const listings = await TemplateListing.find({
+          deletedAt: null,
+          customLabel: { $in: skusToCheck },
+          ...(Object.keys(createdAtRange).length > 0 ? { createdAt: createdAtRange } : {}),
+        })
+          .select('_id customLabel sellerId templateId title startPrice status createdAt')
+          .sort({ customLabel: 1, sellerId: 1, _id: 1 })
+          .lean();
+
+        const bySku = new Map();
+        listings.forEach((listing) => {
+          const sku = String(listing.customLabel || '').trim();
+          if (!sku) return;
+          if (!bySku.has(sku)) bySku.set(sku, []);
+          bySku.get(sku).push(listing);
+        });
+
+        for (const sku of skusToCheck) {
+          const groupListings = bySku.get(sku) || [];
+          const sellerIds = new Set(groupListings.map(listing => String(listing.sellerId)).filter(Boolean));
+          if (sellerIds.size <= 1 || !sellerIds.has(String(sellerObjectId))) continue;
+
+          if (skippedMatches < (pageNum - 1) * limitNum) {
+            skippedMatches += 1;
+            continue;
+          }
+
+          pageRows.push(buildGroupFromListings(sku, groupListings));
+          if (pageRows.length >= neededRows) {
+            hasNextPage = true;
+            break;
+          }
+        }
+      };
+
+      const sellerCursor = TemplateListing.find({
+        ...listingQuery,
+        sellerId: sellerObjectId,
+      })
+        .select('customLabel')
+        .sort({ customLabel: 1, _id: 1 })
+        .lean()
+        .cursor({ batchSize: 1000 });
+
+      try {
+        for await (const listing of sellerCursor) {
+          scannedListings += 1;
+          const sku = String(listing.customLabel || '').trim();
+          if (!sku || sku === lastSellerSku || seenCandidateSkus.has(sku)) continue;
+          lastSellerSku = sku;
+          seenCandidateSkus.add(sku);
+          candidateBatch.push(sku);
+
+          if (candidateBatch.length >= 100) {
+            await flushCandidates();
+            if (pageRows.length >= neededRows) break;
+          }
+        }
+        await flushCandidates();
+      } finally {
+        await sellerCursor.close();
+      }
+
+      const responseRows = pageRows.slice(0, limitNum);
+      const skus = responseRows.map(row => row.sku);
+      const orderRows = skus.length > 0
+        ? await Order.aggregate([
+            {
+              $match: {
+                $or: [
+                  { sku: { $in: skus } },
+                  { 'lineItems.sku': { $in: skus } },
+                  { 'lineItems.SKU': { $in: skus } },
+                  { 'lineItems.sellerSku': { $in: skus } },
+                ],
+              },
+            },
+            {
+              $addFields: {
+                matchedSku: {
+                  $let: {
+                    vars: {
+                      matchedLineItem: {
+                        $arrayElemAt: [
+                          {
+                            $filter: {
+                              input: { $ifNull: ['$lineItems', []] },
+                              as: 'item',
+                              cond: {
+                                $in: [
+                                  { $ifNull: ['$$item.sku', { $ifNull: ['$$item.SKU', '$$item.sellerSku'] }] },
+                                  skus,
+                                ],
+                              },
+                            },
+                          },
+                          0,
+                        ],
+                      },
+                    },
+                    in: {
+                      $ifNull: [
+                        '$sku',
+                        { $ifNull: ['$$matchedLineItem.sku', { $ifNull: ['$$matchedLineItem.SKU', '$$matchedLineItem.sellerSku'] }] },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+            { $match: { matchedSku: { $in: skus } } },
+            { $sort: { dateSold: -1, creationDate: -1, createdAt: -1 } },
+            {
+              $group: {
+                _id: '$matchedSku',
+                orderCount: { $sum: 1 },
+                totalSubtotal: { $sum: { $ifNull: ['$subtotal', 0] } },
+                totalProfit: { $sum: { $ifNull: ['$profit', 0] } },
+                orders: {
+                  $push: {
+                    orderId: '$orderId',
+                    seller: '$seller',
+                    dateSold: '$dateSold',
+                    creationDate: '$creationDate',
+                    productName: '$productName',
+                    subtotal: '$subtotal',
+                    subtotalUSD: '$subtotalUSD',
+                    profit: '$profit',
+                    quantity: '$quantity',
+                  },
+                },
+              },
+            },
+            { $project: { orderCount: 1, totalSubtotal: 1, totalProfit: 1, orders: { $slice: ['$orders', ordersLimit] } } },
+          ]).allowDiskUse(true)
+        : [];
+
+      const sellerIdsFromListings = [
+        ...new Set(responseRows.flatMap(row => row.sellerIds).filter(Boolean)),
+      ];
+      const sellerIdsFromOrders = [
+        ...new Set(orderRows.flatMap(row => (row.orders || []).map(order => String(order.seller)).filter(Boolean))),
+      ];
+      const allSellerIds = [...new Set([...sellerIdsFromListings, ...sellerIdsFromOrders])];
+      const sellerDocs = allSellerIds.length > 0
+        ? await Seller.find({ _id: { $in: allSellerIds } }).populate('user', 'username email').lean()
+        : [];
+      const sellerNameById = new Map(sellerDocs.map(seller => [
+        String(seller._id),
+        seller.user?.username || seller.user?.email || String(seller._id),
+      ]));
+
+      const templateIds = [
+        ...new Set(responseRows.flatMap(row => row.listings.map(listing => String(listing.templateId)).filter(Boolean))),
+      ];
+      const templateDocs = templateIds.length > 0
+        ? await ListingTemplate.find({ _id: { $in: templateIds } }).select('name').lean()
+        : [];
+      const templateNameById = new Map(templateDocs.map(template => [String(template._id), template.name || 'Template']));
+      const ordersBySku = new Map(orderRows.map(row => [row._id, row]));
+
+      const formattedRows = responseRows.map((row) => {
+        const orderSummary = ordersBySku.get(row.sku) || {};
+        return {
+          sku: row.sku,
+          listingCount: row.listingCount,
+          sellerCount: row.sellerIds.length,
+          minTemplatePrice: normalizeMoney(row.minTemplatePrice),
+          maxTemplatePrice: normalizeMoney(row.maxTemplatePrice),
+          avgTemplatePrice: normalizeMoney(row.avgTemplatePrice),
+          orderCount: orderSummary.orderCount || 0,
+          totalSubtotal: normalizeMoney(orderSummary.totalSubtotal || 0),
+          totalProfit: normalizeMoney(orderSummary.totalProfit || 0),
+          listings: (row.listings || []).map(listing => ({
+            id: listing.id,
+            sellerId: listing.sellerId,
+            sellerName: sellerNameById.get(String(listing.sellerId)) || String(listing.sellerId),
+            templateId: listing.templateId,
+            templateName: templateNameById.get(String(listing.templateId)) || 'Template',
+            title: listing.title || '',
+            startPrice: normalizeMoney(listing.startPrice),
+            status: listing.status || '',
+            createdAt: listing.createdAt,
+          })).sort((a, b) => a.sellerName.localeCompare(b.sellerName)),
+          orders: (orderSummary.orders || []).map(order => ({
+            orderId: order.orderId,
+            sellerName: sellerNameById.get(String(order.seller)) || String(order.seller || ''),
+            dateSold: order.dateSold || order.creationDate || null,
+            productName: order.productName || '',
+            subtotal: normalizeMoney(order.subtotal),
+            subtotalUSD: normalizeMoney(order.subtotalUSD),
+            profit: normalizeMoney(order.profit),
+            quantity: order.quantity || 0,
+          })),
+        };
+      });
+
+      return res.json({
+        rows: formattedRows,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total: null,
+          pages: null,
+          hasNextPage,
+          scannedListings,
+        },
+      });
+    }
+
+    if (Object.keys(createdAtRange).length > 0) {
+      const aggregateRows = await TemplateListing.aggregate([
+        { $match: listingQuery },
+        {
+          $group: {
+            _id: '$customLabel',
+            listingCount: { $sum: 1 },
+            sellerIds: { $addToSet: '$sellerId' },
+            minTemplatePrice: { $min: '$startPrice' },
+            maxTemplatePrice: { $max: '$startPrice' },
+            avgTemplatePrice: { $avg: '$startPrice' },
+            listings: {
+              $push: {
+                id: '$_id',
+                sellerId: '$sellerId',
+                templateId: '$templateId',
+                title: '$title',
+                startPrice: '$startPrice',
+                status: '$status',
+                createdAt: '$createdAt',
+              },
+            },
+          },
+        },
+        { $match: { $expr: { $gt: [{ $size: '$sellerIds' }, 1] } } },
+        { $sort: { _id: 1 } },
+        { $limit: targetCount },
+      ])
+        .option({
+          allowDiskUse: true,
+          maxTimeMS: 60000,
+          hint: { deletedAt: 1, createdAt: -1, customLabel: 1, sellerId: 1 },
+        });
+
+      aggregateRows.forEach((row) => {
+        groupedRows.push({
+          sku: row._id,
+          listingCount: row.listingCount,
+          sellerIds: (row.sellerIds || []).map(id => String(id)),
+          minTemplatePrice: row.minTemplatePrice,
+          maxTemplatePrice: row.maxTemplatePrice,
+          avgTemplatePrice: row.avgTemplatePrice,
+          listings: row.listings || [],
+        });
+      });
+      scannedListings = null;
+    } else {
+      const cursor = TemplateListing.find(listingQuery)
+        .select('_id customLabel sellerId templateId title startPrice status createdAt')
+        .sort({ customLabel: 1, sellerId: 1, _id: 1 })
+        .lean()
+        .cursor({ batchSize: 1000 });
+
+      try {
+        for await (const listing of cursor) {
+          scannedListings += 1;
+          const sku = String(listing.customLabel || '').trim();
+          if (!sku) continue;
+
+          if (currentSku !== sku) {
+            pushGroupIfMatch(currentGroup);
+            if (groupedRows.length >= targetCount) break;
+            currentSku = sku;
+            currentGroup = {
+              sku,
+              listingCount: 0,
+              sellerIds: new Set(),
+              minTemplatePrice: null,
+              maxTemplatePrice: null,
+              priceTotal: 0,
+              priceCount: 0,
+              listings: [],
+            };
+          }
+
+          currentGroup.listingCount += 1;
+          if (listing.sellerId) currentGroup.sellerIds.add(String(listing.sellerId));
+
+          const price = Number(listing.startPrice);
+          if (Number.isFinite(price)) {
+            currentGroup.minTemplatePrice = currentGroup.minTemplatePrice == null ? price : Math.min(currentGroup.minTemplatePrice, price);
+            currentGroup.maxTemplatePrice = currentGroup.maxTemplatePrice == null ? price : Math.max(currentGroup.maxTemplatePrice, price);
+            currentGroup.priceTotal += price;
+            currentGroup.priceCount += 1;
+          }
+
+          currentGroup.listings.push({
+            id: listing._id,
+            sellerId: listing.sellerId,
+            templateId: listing.templateId,
+            title: listing.title,
+            startPrice: listing.startPrice,
+            status: listing.status,
+            createdAt: listing.createdAt,
+          });
+        }
+
+        if (groupedRows.length < targetCount) {
+          pushGroupIfMatch(currentGroup);
+        }
+      } finally {
+        await cursor.close();
+      }
+    }
+
+    const start = (pageNum - 1) * limitNum;
+    const pageRows = groupedRows.slice(start, start + limitNum);
+    const hasNextPage = groupedRows.length > start + limitNum;
+    const skus = pageRows.map(row => row.sku);
+
+    const orderRows = skus.length > 0
+      ? await Order.aggregate([
+          {
+            $match: {
+              $or: [
+                { sku: { $in: skus } },
+                { 'lineItems.sku': { $in: skus } },
+                { 'lineItems.SKU': { $in: skus } },
+                { 'lineItems.sellerSku': { $in: skus } },
+              ],
+            },
+          },
+          {
+            $addFields: {
+              matchedSku: {
+                $let: {
+                  vars: {
+                    matchedLineItem: {
+                      $arrayElemAt: [
+                        {
+                          $filter: {
+                            input: { $ifNull: ['$lineItems', []] },
+                            as: 'item',
+                            cond: {
+                              $in: [
+                                { $ifNull: ['$$item.sku', { $ifNull: ['$$item.SKU', '$$item.sellerSku'] }] },
+                                skus,
+                              ],
+                            },
+                          },
+                        },
+                        0,
+                      ],
+                    },
+                  },
+                  in: {
+                    $ifNull: [
+                      '$sku',
+                      { $ifNull: ['$$matchedLineItem.sku', { $ifNull: ['$$matchedLineItem.SKU', '$$matchedLineItem.sellerSku'] }] },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+          { $match: { matchedSku: { $in: skus } } },
+          { $sort: { dateSold: -1, creationDate: -1, createdAt: -1 } },
+          {
+            $group: {
+              _id: '$matchedSku',
+              orderCount: { $sum: 1 },
+              totalSubtotal: { $sum: { $ifNull: ['$subtotal', 0] } },
+              totalProfit: { $sum: { $ifNull: ['$profit', 0] } },
+              orders: {
+                $push: {
+                  orderId: '$orderId',
+                  seller: '$seller',
+                  dateSold: '$dateSold',
+                  creationDate: '$creationDate',
+                  productName: '$productName',
+                  subtotal: '$subtotal',
+                  subtotalUSD: '$subtotalUSD',
+                  profit: '$profit',
+                  quantity: '$quantity',
+                },
+              },
+            },
+          },
+          { $project: { orderCount: 1, totalSubtotal: 1, totalProfit: 1, orders: { $slice: ['$orders', ordersLimit] } } },
+        ]).allowDiskUse(true)
+      : [];
+
+    const sellerIdsFromListings = [
+      ...new Set(pageRows.flatMap(row => row.sellerIds).filter(Boolean)),
+    ];
+    const sellerIdsFromOrders = [
+      ...new Set(orderRows.flatMap(row => (row.orders || []).map(order => String(order.seller)).filter(Boolean))),
+    ];
+    const allSellerIds = [...new Set([...sellerIdsFromListings, ...sellerIdsFromOrders])];
+    const sellerDocs = allSellerIds.length > 0
+      ? await Seller.find({ _id: { $in: allSellerIds } }).populate('user', 'username email').lean()
+      : [];
+    const sellerNameById = new Map(sellerDocs.map(seller => [
+      String(seller._id),
+      seller.user?.username || seller.user?.email || String(seller._id),
+    ]));
+
+    const templateIds = [
+      ...new Set(pageRows.flatMap(row => row.listings.map(listing => String(listing.templateId)).filter(Boolean))),
+    ];
+    const templateDocs = templateIds.length > 0
+      ? await ListingTemplate.find({ _id: { $in: templateIds } }).select('name').lean()
+      : [];
+    const templateNameById = new Map(templateDocs.map(template => [String(template._id), template.name || 'Template']));
+    const ordersBySku = new Map(orderRows.map(row => [row._id, row]));
+
+    const formattedRows = pageRows.map((row) => {
+      const orderSummary = ordersBySku.get(row.sku) || {};
+
+      return {
+        sku: row.sku,
+        listingCount: row.listingCount,
+        sellerCount: row.sellerIds.length,
+        minTemplatePrice: normalizeMoney(row.minTemplatePrice),
+        maxTemplatePrice: normalizeMoney(row.maxTemplatePrice),
+        avgTemplatePrice: normalizeMoney(row.avgTemplatePrice),
+        orderCount: orderSummary.orderCount || 0,
+        totalSubtotal: normalizeMoney(orderSummary.totalSubtotal || 0),
+        totalProfit: normalizeMoney(orderSummary.totalProfit || 0),
+        listings: (row.listings || []).map(listing => ({
+          id: listing.id,
+          sellerId: listing.sellerId,
+          sellerName: sellerNameById.get(String(listing.sellerId)) || String(listing.sellerId),
+          templateId: listing.templateId,
+          templateName: templateNameById.get(String(listing.templateId)) || 'Template',
+          title: listing.title || '',
+          startPrice: normalizeMoney(listing.startPrice),
+          status: listing.status || '',
+          createdAt: listing.createdAt,
+        })).sort((a, b) => a.sellerName.localeCompare(b.sellerName)),
+        orders: (orderSummary.orders || []).map(order => ({
+          orderId: order.orderId,
+          sellerName: sellerNameById.get(String(order.seller)) || String(order.seller || ''),
+          dateSold: order.dateSold || order.creationDate || null,
+          productName: order.productName || '',
+          subtotal: normalizeMoney(order.subtotal),
+          subtotalUSD: normalizeMoney(order.subtotalUSD),
+          profit: normalizeMoney(order.profit),
+          quantity: order.quantity || 0,
+        })),
+      };
+    });
+
+    res.json({
+      rows: formattedRows,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: null,
+        pages: null,
+        hasNextPage,
+        scannedListings,
+      },
+    });
+  } catch (err) {
+    console.error('[SKU Seller Order Profit] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch SKU seller order profit report' });
+  }
+});
+
+router.get('/sku-seller-order-profit-full-scan', requireAuth, requirePageAccess('SkuSellerOrderProfit'), async (req, res) => {
+  try {
+    const {
+      search = '',
+      sellerId = '',
+      page = 1,
+      limit = 25,
+      ordersPerSku = 5,
+    } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 25));
+    const ordersLimit = Math.min(25, Math.max(1, parseInt(ordersPerSku, 10) || 5));
+    const sellerObjectId = sellerId && sellerId !== 'all' ? toObjectId(sellerId) : null;
+    const trimmedSearch = String(search || '').trim();
+
+    if (sellerId && sellerId !== 'all' && !sellerObjectId) {
+      return res.status(400).json({ error: 'Invalid sellerId' });
+    }
+
+    const matchStage = {
+      deletedAt: null,
+      customLabel: { $nin: [null, ''] },
+    };
+    if (trimmedSearch) {
+      matchStage.$or = [
+        { customLabel: { $regex: trimmedSearch, $options: 'i' } },
+        { title: { $regex: trimmedSearch, $options: 'i' } },
+      ];
+    }
+
+    const pipeline = [
+      { $match: matchStage },
+      {
+        $group: {
+          _id: '$customLabel',
+          listingCount: { $sum: 1 },
+          sellerIds: { $addToSet: '$sellerId' },
+          minTemplatePrice: { $min: '$startPrice' },
+          maxTemplatePrice: { $max: '$startPrice' },
+          avgTemplatePrice: { $avg: '$startPrice' },
+          listings: {
+            $push: {
+              id: '$_id',
+              sellerId: '$sellerId',
+              templateId: '$templateId',
+              title: '$title',
+              startPrice: '$startPrice',
+              status: '$status',
+              createdAt: '$createdAt',
+            },
+          },
+        },
+      },
+      {
+        $match: {
+          $expr: { $gt: [{ $size: '$sellerIds' }, 1] },
+          ...(sellerObjectId ? { sellerIds: sellerObjectId } : {}),
+        },
+      },
+      { $sort: { listingCount: -1, _id: 1 } },
+      {
+        $facet: {
+          rows: [
+            { $skip: (pageNum - 1) * limitNum },
+            { $limit: limitNum },
+            {
+              $lookup: {
+                from: 'sellers',
+                localField: 'sellerIds',
+                foreignField: '_id',
+                as: 'sellerDocs',
+              },
+            },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'sellerDocs.user',
+                foreignField: '_id',
+                as: 'sellerUsers',
+              },
+            },
+            {
+              $lookup: {
+                from: 'listingtemplates',
+                localField: 'listings.templateId',
+                foreignField: '_id',
+                as: 'templateDocs',
+              },
+            },
+          ],
+          total: [{ $count: 'count' }],
+        },
+      },
+    ];
+
+    const [result] = await TemplateListing.aggregate(pipeline).allowDiskUse(true);
+    const rows = result?.rows || [];
+    const total = result?.total?.[0]?.count || 0;
+    const skus = rows.map(row => row._id);
+
+    const orderRows = skus.length > 0
+      ? await Order.aggregate([
+          {
+            $match: {
+              $or: [
+                { sku: { $in: skus } },
+                { 'lineItems.sku': { $in: skus } },
+                { 'lineItems.SKU': { $in: skus } },
+                { 'lineItems.sellerSku': { $in: skus } },
+              ],
+            },
+          },
+          {
+            $addFields: {
+              matchedSku: {
+                $let: {
+                  vars: {
+                    matchedLineItem: {
+                      $arrayElemAt: [
+                        {
+                          $filter: {
+                            input: { $ifNull: ['$lineItems', []] },
+                            as: 'item',
+                            cond: {
+                              $in: [
+                                { $ifNull: ['$$item.sku', { $ifNull: ['$$item.SKU', '$$item.sellerSku'] }] },
+                                skus,
+                              ],
+                            },
+                          },
+                        },
+                        0,
+                      ],
+                    },
+                  },
+                  in: {
+                    $ifNull: [
+                      '$sku',
+                      { $ifNull: ['$$matchedLineItem.sku', { $ifNull: ['$$matchedLineItem.SKU', '$$matchedLineItem.sellerSku'] }] },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+          { $match: { matchedSku: { $in: skus } } },
+          { $sort: { dateSold: -1, creationDate: -1, createdAt: -1 } },
+          {
+            $group: {
+              _id: '$matchedSku',
+              orderCount: { $sum: 1 },
+              totalSubtotal: { $sum: { $ifNull: ['$subtotal', 0] } },
+              totalProfit: { $sum: { $ifNull: ['$profit', 0] } },
+              orders: {
+                $push: {
+                  orderId: '$orderId',
+                  seller: '$seller',
+                  dateSold: '$dateSold',
+                  creationDate: '$creationDate',
+                  productName: '$productName',
+                  subtotal: '$subtotal',
+                  subtotalUSD: '$subtotalUSD',
+                  profit: '$profit',
+                  quantity: '$quantity',
+                },
+              },
+            },
+          },
+          { $project: { orderCount: 1, totalSubtotal: 1, totalProfit: 1, orders: { $slice: ['$orders', ordersLimit] } } },
+        ]).allowDiskUse(true)
+      : [];
+
+    const sellerIdsFromOrders = [
+      ...new Set(orderRows.flatMap(row => (row.orders || []).map(order => String(order.seller)).filter(Boolean))),
+    ];
+    const orderSellers = sellerIdsFromOrders.length > 0
+      ? await Seller.find({ _id: { $in: sellerIdsFromOrders } }).populate('user', 'username email').lean()
+      : [];
+    const orderSellerNameById = new Map(orderSellers.map(seller => [
+      String(seller._id),
+      seller.user?.username || seller.user?.email || String(seller._id),
+    ]));
+    const ordersBySku = new Map(orderRows.map(row => [row._id, row]));
+
+    const formattedRows = rows.map((row) => {
+      const sellerUserById = new Map((row.sellerUsers || []).map(user => [String(user._id), user]));
+      const sellerNameById = new Map((row.sellerDocs || []).map((seller) => {
+        const user = sellerUserById.get(String(seller.user));
+        return [String(seller._id), user?.username || user?.email || String(seller._id)];
+      }));
+      const templateNameById = new Map((row.templateDocs || []).map(template => [String(template._id), template.name || 'Template']));
+      const orderSummary = ordersBySku.get(row._id) || {};
+
+      return {
+        sku: row._id,
+        listingCount: row.listingCount,
+        sellerCount: row.sellerIds.length,
+        minTemplatePrice: normalizeMoney(row.minTemplatePrice),
+        maxTemplatePrice: normalizeMoney(row.maxTemplatePrice),
+        avgTemplatePrice: normalizeMoney(row.avgTemplatePrice),
+        orderCount: orderSummary.orderCount || 0,
+        totalSubtotal: normalizeMoney(orderSummary.totalSubtotal || 0),
+        totalProfit: normalizeMoney(orderSummary.totalProfit || 0),
+        listings: (row.listings || []).map(listing => ({
+          id: listing.id,
+          sellerId: listing.sellerId,
+          sellerName: sellerNameById.get(String(listing.sellerId)) || String(listing.sellerId),
+          templateId: listing.templateId,
+          templateName: templateNameById.get(String(listing.templateId)) || 'Template',
+          title: listing.title || '',
+          startPrice: normalizeMoney(listing.startPrice),
+          status: listing.status || '',
+          createdAt: listing.createdAt,
+        })).sort((a, b) => a.sellerName.localeCompare(b.sellerName)),
+        orders: (orderSummary.orders || []).map(order => ({
+          orderId: order.orderId,
+          sellerName: orderSellerNameById.get(String(order.seller)) || String(order.seller || ''),
+          dateSold: order.dateSold || order.creationDate || null,
+          productName: order.productName || '',
+          subtotal: normalizeMoney(order.subtotal),
+          subtotalUSD: normalizeMoney(order.subtotalUSD),
+          profit: normalizeMoney(order.profit),
+          quantity: order.quantity || 0,
+        })),
+      };
+    });
+
+    res.json({
+      rows: formattedRows,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum),
+      },
+    });
+  } catch (err) {
+    console.error('[SKU Seller Order Profit] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch SKU seller order profit report' });
+  }
+});
+
+/**
+ * @swagger
+ * /template-listings/counts:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Batch listing counts
+ *     description: "Returns { templateId: count } for one or more template IDs in a single round-trip. Useful for populating per-tab badges in the UI."
+ *     parameters:
+ *       - in: query
+ *         name: templateIds
+ *         required: true
+ *         schema: { type: string }
+ *         description: Comma-separated template IDs
+ *         example: "665abc123def456789012345,665abc123def456789012346"
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *         description: Restrict count to a specific seller
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, default: active }
+ *         description: Listing status filter. Pass `all` to count all statuses.
+ *     responses:
+ *       200:
+ *         description: Map of templateId → listing count
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               additionalProperties: { type: integer }
+ *               example: { "665abc123def456789012345": 42 }
+ *       400: { description: templateIds query param missing }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
+// Batch listing counts — returns { [templateId]: count } for multiple templates in one query
+router.get('/counts', requireAuth, async (req, res) => {
+  try {
+    const { templateIds, sellerId, status = 'active' } = req.query;
+    if (!templateIds) return res.status(400).json({ error: 'templateIds is required' });
+
+    const ids = templateIds.split(',').map(id => id.trim()).filter(Boolean);
+    if (ids.length === 0) return res.json({});
+
+    const matchStage = { templateId: { $in: ids } };
+    if (sellerId) matchStage.sellerId = sellerId;
+    if (status && status !== 'all') matchStage.status = status;
+
+    const rows = await TemplateListing.aggregate([
+      { $match: matchStage },
+      { $group: { _id: '$templateId', count: { $sum: 1 } } },
+    ]);
+
+    const result = {};
+    // Initialize all requested ids to 0 so missing ones don't cause UI gaps
+    for (const id of ids) result[id] = 0;
+    for (const row of rows) result[row._id] = row.count;
+
+    return res.json(result);
+  } catch (err) {
+    console.error('Error fetching template listing counts:', err);
+    return res.status(500).json({ error: 'Failed to fetch listing counts' });
+  }
+});
+
+/**
+ * @swagger
+ * /template-listings/:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: List template listings (paginated)
+ *     description: Returns paginated listings for a given template with optional seller, status, price range, batch, and full-text search filters.
+ *     parameters:
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Template ID
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *         description: Filter by seller
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *       - in: query
+ *         name: batchFilter
+ *         schema: { type: string, default: active }
+ *         description: "`active` = not-yet-downloaded, `downloaded` = already downloaded, `batch` = specific batch"
+ *       - in: query
+ *         name: batchId
+ *         schema: { type: string }
+ *         description: Filter by downloadBatchId (used when batchFilter=batch)
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, default: active }
+ *       - in: query
+ *         name: minPrice
+ *         schema: { type: number }
+ *       - in: query
+ *         name: maxPrice
+ *         schema: { type: number }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Search across title, SKU, and ASIN
+ *     responses:
+ *       200:
+ *         description: Paginated listings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 listings:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/TemplateListing' }
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     page: { type: integer }
+ *                     limit: { type: integer }
+ *                     total: { type: integer }
+ *                     pages: { type: integer }
+ *       400: { description: templateId is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Get all listings for a template
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { templateId, sellerId, page = 1, limit = 50, batchFilter = 'active', batchId, status = 'active', minPrice, maxPrice, search } = req.query;
-    
+
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    
+
     // Build filter with optional seller filtering
     const filter = { templateId };
     if (sellerId) {
       filter.sellerId = sellerId;
     }
-    
+
     // Filter by status (default to 'active' to only show active listings)
     if (status && status !== 'all') {
       filter.status = status;
     }
-    
+
     // Price range filter
     if (minPrice || maxPrice) {
       filter.startPrice = {};
       if (minPrice) filter.startPrice.$gte = parseFloat(minPrice);
       if (maxPrice) filter.startPrice.$lte = parseFloat(maxPrice);
     }
-    
+
     // Keyword / ASIN search
     if (search && search.trim()) {
       const rx = { $regex: search.trim(), $options: 'i' };
       filter.$or = [{ title: rx }, { customLabel: rx }];
     }
-    
+
     // Apply batch filtering
     if (batchId) {
       // Specific batch
@@ -58,10 +2184,10 @@ router.get('/', requireAuth, async (req, res) => {
     } else if (batchFilter === 'all') {
       // All batches (no filter on downloadBatchId)
     }
-    
+
     const [listings, total] = await Promise.all([
       TemplateListing.find(filter)
-        .select('+_asinReference')
+        .select('+_asinReference +_amazonSourcePrice')
         .populate('createdBy', 'name email')
         .populate({
           path: 'sellerId',
@@ -75,7 +2201,7 @@ router.get('/', requireAuth, async (req, res) => {
         .limit(parseInt(limit)),
       TemplateListing.countDocuments(filter)
     ]);
-    
+
     res.json({
       listings,
       pagination: {
@@ -91,36 +2217,96 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/database-view:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Database view — cross-template listing browser
+ *     description: Paginated listing browser without a required templateId. Supports cross-seller and cross-template queries with full-text search across title, SKU, and ASIN.
+ *     parameters:
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: templateId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string }
+ *         description: draft | active | inactive | sold | ended
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Full-text search across title, customLabel, and ASIN
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *     responses:
+ *       200:
+ *         description: Paginated listings with populated seller and template references
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 listings:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/TemplateListing' }
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     page: { type: integer }
+ *                     limit: { type: integer }
+ *                     total: { type: integer }
+ *                     pages: { type: integer }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Database view endpoint with comprehensive filters (MUST be before /:id route)
 router.get('/database-view', requireAuth, async (req, res) => {
   try {
-    const { 
-      sellerId, 
-      templateId, 
-      status, 
-      search, 
-      page = 1, 
-      limit = 50 
+    const {
+      sellerId,
+      templateId,
+      status,
+      search,
+      page = 1,
+      limit = 50
     } = req.query;
-    
+
     // Build query - exclude soft-deleted items
     const query = { deletedAt: null };
-    
+
     if (sellerId) query.sellerId = sellerId;
     if (templateId) query.templateId = templateId;
     if (status) query.status = status;
-    
+
     // Search across ASIN, SKU (customLabel), and Title
-    if (search) {
-      query.$or = [
-        { _asinReference: new RegExp(search, 'i') },
-        { customLabel: new RegExp(search, 'i') },
-        { title: new RegExp(search, 'i') }
-      ];
+    if (search && search.trim()) {
+      const trimmed = search.trim();
+      // ASINs are always exactly 10 chars starting with B0 — use fast exact match
+      const isAsin = /^[Bb]0[A-Za-z0-9]{8}$/.test(trimmed);
+      if (isAsin) {
+        query._asinReference = trimmed.toUpperCase();
+      } else {
+        // Use MongoDB text index for title/customLabel (fast), and prefix regex for ASIN
+        query.$and = [
+          {
+            $or: [
+              { $text: { $search: trimmed } },
+              { _asinReference: { $regex: `^${trimmed}`, $options: 'i' } },
+            ]
+          }
+        ];
+      }
     }
-    
+
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    
+
     // Fetch with populated fields
     const [listings, total] = await Promise.all([
       TemplateListing.find(query)
@@ -138,7 +2324,7 @@ router.get('/database-view', requireAuth, async (req, res) => {
         .limit(parseInt(limit)),
       TemplateListing.countDocuments(query)
     ]);
-    
+
     res.json({
       listings,
       pagination: {
@@ -154,6 +2340,30 @@ router.get('/database-view', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/database-stats:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Aggregate database statistics
+ *     description: Returns high-level counts across all non-deleted listings (total, unique sellers, unique templates, and per-status counts).
+ *     responses:
+ *       200:
+ *         description: Aggregate stats
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 total:     { type: integer, example: 1240 }
+ *                 sellers:   { type: integer, example: 5 }
+ *                 templates: { type: integer, example: 12 }
+ *                 draft:     { type: integer, example: 30 }
+ *                 active:    { type: integer, example: 900 }
+ *                 inactive:  { type: integer, example: 310 }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Database statistics endpoint (MUST be before /:id route)
 router.get('/database-stats', requireAuth, async (req, res) => {
   try {
@@ -177,7 +2387,7 @@ router.get('/database-stats', requireAuth, async (req, res) => {
         }
       }
     ]);
-    
+
     res.json({
       total: stats[0]?.totalListings || 0,
       sellers: stats[0]?.uniqueSellers?.length || 0,
@@ -192,30 +2402,60 @@ router.get('/database-stats', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/stats:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Listing creation stats (today / week / month / total)
+ *     parameters:
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Listing creation counts grouped by time window
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 today:     { type: integer, example: 12 }
+ *                 thisWeek:  { type: integer, example: 58 }
+ *                 thisMonth: { type: integer, example: 201 }
+ *                 total:     { type: integer, example: 840 }
+ *       400: { description: templateId is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Get statistics for template listings (today, week, month, total)
 router.get('/stats', requireAuth, async (req, res) => {
   try {
     const { templateId, sellerId } = req.query;
-    
+
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     const filter = { templateId };
     if (sellerId) {
       filter.sellerId = sellerId;
     }
-    
+
     // Calculate date ranges
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
     const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-    
+
     const weekStart = new Date(now);
     weekStart.setDate(weekStart.getDate() - 7);
-    
+
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-    
+
     // Run queries in parallel
     const [todayCount, weekCount, monthCount, totalCount] = await Promise.all([
       TemplateListing.countDocuments({
@@ -238,7 +2478,7 @@ router.get('/stats', requireAuth, async (req, res) => {
         status: 'active'
       })
     ]);
-    
+
     res.json({
       today: todayCount,
       thisWeek: weekCount,
@@ -251,20 +2491,104 @@ router.get('/stats', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/analytics:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Detailed listing analytics with daily & user breakdown
+ *     description: Returns paginated listings plus a per-day and per-user creation breakdown for the given template (optionally filtered by seller, date range, and user).
+ *     parameters:
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *         example: "2024-01-01"
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *         example: "2024-12-31"
+ *       - in: query
+ *         name: userId
+ *         schema: { type: string }
+ *         description: Filter by creator. Pass `all` or omit to include everyone.
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 100 }
+ *     responses:
+ *       200:
+ *         description: Paginated listings with dailyBreakdown, userBreakdown, and summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 listings:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/TemplateListing' }
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     page: { type: integer }
+ *                     limit: { type: integer }
+ *                     total: { type: integer }
+ *                     pages: { type: integer }
+ *                 dailyBreakdown:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       date: { type: string, example: "2024-06-01" }
+ *                       total: { type: integer }
+ *                       users:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           properties:
+ *                             userId: { type: string }
+ *                             username: { type: string }
+ *                             count: { type: integer }
+ *                 userBreakdown:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       userId: { type: string }
+ *                       username: { type: string }
+ *                       role: { type: string }
+ *                       count: { type: integer }
+ *                 summary:
+ *                   type: object
+ *                   properties:
+ *                     totalInPeriod: { type: integer }
+ *                     uniqueUsers: { type: integer }
+ *       400: { description: templateId is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Get detailed analytics for template listings
 router.get('/analytics', requireAuth, async (req, res) => {
   try {
     const { templateId, sellerId, startDate, endDate, userId, page = 1, limit = 100 } = req.query;
-    
+
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     const filter = { templateId };
     if (sellerId) {
       filter.sellerId = sellerId;
     }
-    
+
     // Apply date range filter
     if (startDate || endDate) {
       filter.createdAt = {};
@@ -275,12 +2599,12 @@ router.get('/analytics', requireAuth, async (req, res) => {
         filter.createdAt.$lte = new Date(endDate);
       }
     }
-    
+
     // Apply user filter
     if (userId && userId !== 'all') {
       filter.createdBy = userId;
     }
-    
+
     // Get paginated listings
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [listings, total] = await Promise.all([
@@ -292,7 +2616,7 @@ router.get('/analytics', requireAuth, async (req, res) => {
         .limit(parseInt(limit)),
       TemplateListing.countDocuments(filter)
     ]);
-    
+
     // Get daily breakdown using aggregation
     const dailyBreakdown = await TemplateListing.aggregate([
       {
@@ -326,12 +2650,12 @@ router.get('/analytics', requireAuth, async (req, res) => {
         $limit: 30 // Last 30 days
       }
     ]);
-    
+
     // Populate user details in daily breakdown
     const userIds = [...new Set(dailyBreakdown.flatMap(d => d.users.map(u => u.userId)))].filter(Boolean);
     const users = await TemplateListing.model('User').find({ _id: { $in: userIds } }).select('username email role');
     const userMap = new Map(users.map(u => [u._id.toString(), u]));
-    
+
     // Enrich daily breakdown with user details
     const enrichedDailyBreakdown = dailyBreakdown.map(day => ({
       date: day._id,
@@ -344,7 +2668,7 @@ router.get('/analytics', requireAuth, async (req, res) => {
           count: u.count
         }))
     }));
-    
+
     // Get user breakdown
     const userBreakdown = await TemplateListing.aggregate([
       {
@@ -360,7 +2684,7 @@ router.get('/analytics', requireAuth, async (req, res) => {
         $sort: { count: -1 }
       }
     ]);
-    
+
     // Populate user details in user breakdown
     const enrichedUserBreakdown = await Promise.all(
       userBreakdown
@@ -375,7 +2699,7 @@ router.get('/analytics', requireAuth, async (req, res) => {
           };
         })
     );
-    
+
     res.json({
       listings,
       pagination: {
@@ -397,25 +2721,76 @@ router.get('/analytics', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-preview-stream:
+ *   get:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk ASIN preview — SSE stream (live scraping)
+ *     description: |
+ *       Fetches and AI-processes up to 100 ASINs in real-time and streams results as Server-Sent Events.
+ *       Uses `requireAuthSSE` middleware (passes the JWT via `?token=` query param).
+ *
+ *       **Event types emitted:**
+ *       - `started` — stream begins, includes `total` count
+ *       - `item` — one preview result, includes `item`, `progress`, and `total`
+ *       - `complete` — stream finished
+ *       - `error` — fatal error (stream closes after this)
+ *     parameters:
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: asins
+ *         required: true
+ *         schema: { type: string }
+ *         description: Comma-separated ASIN list (max 100)
+ *         example: "B01N5IB20Q,B07K1RZWMC"
+ *       - in: query
+ *         name: region
+ *         schema: { type: string, default: US }
+ *         description: Amazon marketplace region
+ *       - in: query
+ *         name: token
+ *         schema: { type: string }
+ *         description: JWT token (used instead of Authorization header for EventSource)
+ *     responses:
+ *       200:
+ *         description: Server-Sent Events stream
+ *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
+ *               example: "data: {\"type\":\"item\",\"item\":{...},\"progress\":1,\"total\":10}\n\n"
+ *       400: { description: Missing required parameters or too many ASINs }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk preview with SSE streaming (real-time updates) - MUST be before /:id route
 router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
   try {
     const { templateId, sellerId, asins: asinsParam, region = 'US' } = req.query;
-    
+    const preferCachedAmazonData = req.query.preferCachedAmazonData === 'true';
+
     if (!templateId || !sellerId || !asinsParam) {
       return res.status(400).json({ error: 'Template ID, Seller ID, and ASINs are required' });
     }
-    
+
     const asins = asinsParam.split(',').map(a => a.trim()).filter(Boolean);
-    
+
     if (asins.length === 0) {
       return res.status(400).json({ error: 'At least one ASIN is required' });
     }
-    
+
     if (asins.length > 100) {
       return res.status(400).json({ error: 'Maximum 100 ASINs allowed per batch' });
     }
-    
+
     // Set up SSE headers
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -423,41 +2798,63 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no' // Disable nginx buffering
     });
-    
+
+    let streamClosed = false;
+    const sendSse = (payload) => {
+      if (streamClosed) return;
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      if (typeof res.flush === 'function') res.flush();
+    };
+    const sendDone = () => {
+      if (streamClosed) return;
+      res.write('data: [DONE]\n\n');
+      if (typeof res.flush === 'function') res.flush();
+    };
+    const heartbeat = setInterval(() => {
+      sendSse({ type: 'ping', timestamp: Date.now() });
+    }, 15000);
+    req.on('close', () => {
+      streamClosed = true;
+      clearInterval(heartbeat);
+    });
+
     console.log(`📡 [SSE Stream] Starting for ${asins.length} ASINs...`);
-    
+
     // Send initial event
-    res.write(`data: ${JSON.stringify({ type: 'started', total: asins.length })}\n\n`);
-    
+    const streamConcurrency = parseInt(process.env.BULK_PREVIEW_CONCURRENCY, 10) || 15;
+    sendSse({ type: 'started', total: asins.length, concurrency: Math.min(streamConcurrency, asins.length) });
+
     // Validate seller and template
     const [seller, template] = await Promise.all([
       Seller.findById(sellerId),
       getEffectiveTemplate(templateId, sellerId)
     ]);
-    
+
     if (!seller || !template) {
-      res.write(`data: ${JSON.stringify({ type: 'error', error: 'Seller or template not found' })}\n\n`);
-      res.write('data: [DONE]\n\n');
+      sendSse({ type: 'error', error: 'Seller or template not found' });
+      sendDone();
+      clearInterval(heartbeat);
       return res.end();
     }
-    
+
     // Get pricing config
     let pricingConfig = template.pricingConfig;
     const sellerConfig = await SellerPricingConfig.findOne({ sellerId, templateId });
     if (sellerConfig) {
       pricingConfig = sellerConfig.pricingConfig;
     }
-    
+    const aiRunContext = createAiRunContext('bulk-preview-stream');
+
     // Check for existing ASINs and SKUs (same as bulk-preview)
     const existingAsinListings = await TemplateListing.find({
       sellerId,
       _asinReference: { $in: asins },
       status: 'active'
-    }).select('+_asinReference').lean();
-    
+    }).select('+_asinReference +_amazonSourcePrice').lean();
+
     const asinInCurrentTemplate = new Map(); // Changed to Map to store full listing data
     const asinInOtherTemplates = new Map();
-    
+
     existingAsinListings.forEach(listing => {
       if (listing.templateId.toString() === templateId.toString()) {
         asinInCurrentTemplate.set(listing._asinReference, listing); // Store full listing
@@ -465,71 +2862,107 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
         asinInOtherTemplates.set(listing._asinReference, listing.templateId);
       }
     });
-    
+
+    // Pre-fetch template names for cross-template ASINs (for user-friendly warnings)
+    const otherTemplateIds1 = [...new Set([...asinInOtherTemplates.values()].map(id => id.toString()))];
+    const otherTemplateNameMap1 = new Map();
+    if (otherTemplateIds1.length > 0) {
+      const otherTpls = await ListingTemplate.find({ _id: { $in: otherTemplateIds1 } }).select('name').lean();
+      otherTpls.forEach(t => otherTemplateNameMap1.set(t._id.toString(), t.name));
+    }
+
     // Pre-generate SKUs and check conflicts
     const generatedSKUs = asins.map(asin => ({
       asin,
       sku: generateSKUFromASIN(asin)
     }));
-    
+
     const existingBySKU = await TemplateListing.find({
       templateId,
       sellerId,
       customLabel: { $in: generatedSKUs.map(item => item.sku) },
       status: { $in: ['active', 'draft'] }
     }).select('customLabel _asinReference _id').lean();
-    
+
     const existingSKUMap = new Map(
       existingBySKU.map(listing => [listing.customLabel, {
         id: listing._id,
         asin: listing._asinReference
       }])
     );
-    
-    // Process ASINs in parallel and stream results as they complete
+
+    // Process ASINs with controlled concurrency and stream results as they complete.
     let completed = 0;
-    
-    const processPromises = asins.map(async (asin) => {
+
+    await runWithConcurrency(asins, streamConcurrency, async (asin) => {
+      if (streamClosed) return;
       try {
-        // Check for blocking conditions
-        if (asinInOtherTemplates.has(asin)) {
-          const item = {
-            id: `preview-${asin}`,
-            asin,
-            sku: generateSKUFromASIN(asin),
-            status: 'blocked',
-            blockedReason: 'cross_template_duplicate',
-            errors: [`ASIN exists in another template`]
-          };
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
-          return;
-        }
-        
+        sendSse({
+          type: 'item_started',
+          asin,
+          id: `preview-${asin}`,
+          progressStage: 'fetching'
+        });
+
+        // If ASIN exists in another template, note warning but continue with generation
+        const crossTemplateWarning1 = asinInOtherTemplates.has(asin)
+          ? `This ASIN also exists in template "${otherTemplateNameMap1.get(asinInOtherTemplates.get(asin)?.toString()) || 'another template'}"`
+          : null;
+
         // Check if ASIN exists in current template (duplicate_updateable case)
         // This must be checked BEFORE SKU conflict check because duplicate ASINs
         // will have the same SKU and should be updateable, not blocked
         if (asinInCurrentTemplate.has(asin)) {
           const existingListing = asinInCurrentTemplate.get(asin);
-
-          // Get existing customFields (already an object from .lean())
           const existingCustomFields = existingListing.customFields || {};
 
-          // Compute future SKU based on current listing count
-          const asinCountDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
-          const futureSKU = generateSKUWithCount(asin, asinCountDoc?.listingCount || 0);
+          const asinDoc = await AsinDirectory.findOne({ asin }).lean();
+          const futureSKU = generateSKUWithCount(asin, asinDoc?.listingCount || 0);
 
-          // Return existing listing data for editing (no re-fetch)
+          let sourceData = null;
+          let pricingCalculation = null;
+          let freshAmazonSourcePrice = null;
+          let duplicateImages = Array.isArray(asinDoc?.images) ? asinDoc.images : [];
+          const needsLiveAmazonData = true;
+
+          if (needsLiveAmazonData) {
+            // Always refresh duplicate ASIN previews so price/source data stays current.
+            try {
+              console.log(`[duplicate_updateable] Fetching fresh Amazon data for ${asin}`);
+              const amazonData = await fetchAmazonData(asin, region, { forceRefresh: !preferCachedAmazonData });
+              if (amazonData) {
+                duplicateImages = Array.isArray(amazonData.images) ? amazonData.images : duplicateImages;
+                sourceData = buildAmazonSourceData(amazonData);
+                sendSse({
+                  type: 'amazon_loaded',
+                  asin,
+                  id: `preview-${asin}`,
+                  sourceData,
+                  progressStage: 'generating'
+                });
+                freshAmazonSourcePrice = amazonData.price ? String(amazonData.price) : freshAmazonSourcePrice;
+                pricingCalculation = calculatePricingOnly(asin, amazonData.price, pricingConfig);
+              }
+            } catch (fetchErr) {
+              // Non-fatal: chip won't render but the rest of the modal works fine
+              console.warn(`[duplicate_updateable] Option B failed for ${asin}:`, fetchErr.message);
+            }
+          }
+
+          // Return existing listing data for editing (generatedListing = user's current saved data)
+          // _amazonSourcePrice is included so the save endpoint stores it automatically
+          const freshStartPrice = pricingCalculation?.calculatedStartPrice ?? existingListing.startPrice;
           const item = {
             id: `preview-${asin}`,
             asin,
             sku: futureSKU,
             status: 'duplicate_updateable',
-
-            // Return existing data as generatedListing so modal can display it
+            sourceData,
+            pricingCalculation,
             generatedListing: {
               title: existingListing.title,
               description: existingListing.description,
-              startPrice: existingListing.startPrice,
+              startPrice: freshStartPrice,
               quantity: existingListing.quantity,
               itemPhotoUrl: existingListing.itemPhotoUrl || '',
               conditionId: existingListing.conditionId || '',
@@ -539,9 +2972,12 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
               customLabel: futureSKU,
               customFields: existingCustomFields,
               _asinReference: asin,
-              _existingListingId: existingListing._id // Track which listing to update
+              _aiRunId: aiRunContext.aiRunId,
+              _existingListingId: existingListing._id,
+              // Pass the refreshed Amazon price through so the save endpoint can persist it.
+              ...(freshAmazonSourcePrice ? { _amazonSourcePrice: freshAmazonSourcePrice } : {})
             },
-
+            progressStage: 'complete',
             warnings: [
               `This ASIN already exists in this template.`,
               existingListing.duplicateCount > 0
@@ -551,37 +2987,48 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             errors: []
           };
 
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+          sendSse({ type: 'item', item, progress: ++completed, total: asins.length });
           return;
         }
-        
+
+
+
         // Check for SKU conflicts (only for new ASINs, not duplicates)
         const sku = generateSKUFromASIN(asin);
         const existingSKU = existingSKUMap.get(sku);
-        
+
         if (existingSKU) {
           const item = {
             id: `preview-${asin}`,
             asin,
             sku,
             status: 'blocked',
+            progressStage: 'complete',
             blockedReason: 'sku_conflict',
             errors: [`SKU ${sku} already exists`]
           };
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+          sendSse({ type: 'item', item, progress: ++completed, total: asins.length });
           return;
         }
-        
+
         // Fetch and process ASIN (new listing case)
         const amazonData = await fetchAmazonData(asin, region);
-        const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
-        
+        const sourceData = buildAmazonSourceData(amazonData);
+        sendSse({
+          type: 'amazon_loaded',
+          asin,
+          id: `preview-${asin}`,
+          sourceData,
+          progressStage: 'generating'
+        });
+        const { coreFields, customFields, pricingCalculation } =
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId, aiRunContext));
+
         const mergedCoreFields = {
           ...(template.coreFieldDefaults || {}),
           ...coreFields
         };
-        
+
         if (template?.customColumns && template.customColumns.length > 0) {
           template.customColumns.forEach(col => {
             if (col.defaultValue && !customFields[col.name]) {
@@ -589,18 +3036,19 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             }
           });
         }
-        
+
         const warnings = [];
+        if (crossTemplateWarning1) warnings.push(crossTemplateWarning1);
         const validationErrors = [];
-        
+
         if (!mergedCoreFields.title) {
           validationErrors.push('Missing required field: title');
         }
-        
+
         if (mergedCoreFields.startPrice === undefined || mergedCoreFields.startPrice === null || mergedCoreFields.startPrice === '') {
           validationErrors.push('Missing required field: startPrice');
         }
-        
+
         if (!mergedCoreFields.description) {
           warnings.push('Missing description');
         }
@@ -613,29 +3061,24 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           id: `preview-${asin}`,
           asin,
           sku: finalSKU,
-          sourceData: {
-            title: amazonData.title,
-            brand: amazonData.brand,
-            price: amazonData.price,
-            description: amazonData.description,
-            images: amazonData.images,
-            color: amazonData.color,
-            compatibility: amazonData.compatibility
-          },
+          sourceData,
           generatedListing: {
             ...mergedCoreFields,
             customLabel: finalSKU,
             customFields,
-            _asinReference: asin
+            _asinReference: asin,
+            _aiRunId: aiRunContext.aiRunId,
+            _amazonSourcePrice: amazonData.price ? String(amazonData.price) : null
           },
           pricingCalculation,
           warnings,
           errors: validationErrors,
+          progressStage: 'complete',
           status: validationErrors.length > 0 ? 'error' : (warnings.length > 0 ? 'warning' : 'success')
         };
 
         // Stream the completed item
-        res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+        sendSse({ type: 'item', item, progress: ++completed, total: asins.length });
 
       } catch (error) {
         console.error(`❌ Error processing ASIN ${asin}:`, error);
@@ -644,20 +3087,19 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           asin,
           sku: generateSKUFromASIN(asin),
           status: 'error',
+          progressStage: 'complete',
           errors: [error.message]
         };
-        res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
+        sendSse({ type: 'item', item, progress: ++completed, total: asins.length });
       }
-    });
-
-    // Wait for all to complete
-    await Promise.allSettled(processPromises);
+    }, () => !streamClosed);
 
     // Send completion event
-    res.write(`data: ${JSON.stringify({ type: 'complete', total: completed })}\n\n`);
-    res.write('data: [DONE]\n\n');
+    sendSse({ type: 'complete', total: completed });
+    sendDone();
 
     console.log(`📡 [SSE Stream] Completed: ${completed}/${asins.length} ASINs`);
+    clearInterval(heartbeat);
     res.end();
 
   } catch (error) {
@@ -668,6 +3110,48 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-preview-from-directory-stream:
+ *   get:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk ASIN preview from ASIN Directory — SSE stream (no scraping)
+ *     description: |
+ *       Like `bulk-preview-stream` but reads from the locally stored ASIN Directory instead of
+ *       scraping Amazon live. Much faster and does not consume ScraperAPI quota.
+ *
+ *       **Event types emitted:** same as `bulk-preview-stream` (`started`, `item`, `complete`, `error`).
+ *     parameters:
+ *       - in: query
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: asins
+ *         required: true
+ *         schema: { type: string }
+ *         description: Comma-separated ASIN list (max 100)
+ *         example: "B01N5IB20Q,B07K1RZWMC"
+ *       - in: query
+ *         name: token
+ *         schema: { type: string }
+ *         description: JWT token (used instead of Authorization header for EventSource)
+ *     responses:
+ *       200:
+ *         description: Server-Sent Events stream
+ *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
+ *               example: "data: {\"type\":\"item\",\"item\":{...},\"progress\":1,\"total\":10}\n\n"
+ *       400: { description: Missing required parameters or too many ASINs }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk preview from ASIN Directory (no scraping — reads stored data) with SSE streaming
 router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, res) => {
   try {
@@ -735,6 +3219,14 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
       }
     });
 
+    // Pre-fetch template names for cross-template ASINs (for user-friendly warnings)
+    const otherTemplateIds2 = [...new Set([...asinInOtherTemplates.values()].map(id => id.toString()))];
+    const otherTemplateNameMap2 = new Map();
+    if (otherTemplateIds2.length > 0) {
+      const otherTpls2 = await ListingTemplate.find({ _id: { $in: otherTemplateIds2 } }).select('name').lean();
+      otherTpls2.forEach(t => otherTemplateNameMap2.set(t._id.toString(), t.name));
+    }
+
     const generatedSKUs = asins.map(asin => ({ asin, sku: generateSKUFromASIN(asin) }));
     const existingBySKU = await TemplateListing.find({
       templateId,
@@ -747,35 +3239,47 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
       existingBySKU.map(listing => [listing.customLabel, { id: listing._id, asin: listing._asinReference }])
     );
 
+    const aiRunContext = createAiRunContext('bulk-preview-directory-stream');
     let completed = 0;
 
     const processPromises = asins.map(async (asin) => {
       try {
-        // Existing in other template — blocked
-        if (asinInOtherTemplates.has(asin)) {
-          const item = {
-            id: `preview-${asin}`, asin, sku: generateSKUFromASIN(asin),
-            status: 'blocked', blockedReason: 'cross_template_duplicate',
-            errors: ['ASIN exists in another template']
-          };
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
-          return;
-        }
+        // If ASIN exists in another template, note warning but continue with generation
+        const crossTemplateWarning2 = asinInOtherTemplates.has(asin)
+          ? `This ASIN also exists in template "${otherTemplateNameMap2.get(asinInOtherTemplates.get(asin)?.toString()) || 'another template'}"`
+          : null;
 
         // Duplicate in current template — updateable
         if (asinInCurrentTemplate.has(asin)) {
           const existingListing = asinInCurrentTemplate.get(asin);
-          // Compute future SKU based on current listing count
-          const asinCountDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
-          const futureSKU = generateSKUWithCount(asin, asinCountDoc?.listingCount || 0);
+
+          // Use directory only for listing count metadata; duplicate source details come fresh from ScraperAPI.
+          const doc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
+          const futureSKU = generateSKUWithCount(asin, doc?.listingCount || 0);
+
+          let sourceData = null;
+          let pricingCalculation = null;
+
+          try {
+            const amazonData = await fetchAmazonData(asin, region, { forceRefresh: true });
+            sourceData = buildAmazonSourceData(amazonData);
+            pricingCalculation = calculatePricingOnly(asin, amazonData.price, pricingConfig);
+          } catch (fetchErr) {
+            console.warn(`[directory duplicate_updateable] Fresh ScraperAPI fetch failed for ${asin}:`, fetchErr.message);
+          }
+
+          const freshStartPrice = pricingCalculation?.calculatedStartPrice ?? existingListing.startPrice;
+
           const item = {
             id: `preview-${asin}`, asin,
             sku: futureSKU,
             status: 'duplicate_updateable',
+            sourceData,
+            pricingCalculation,
             generatedListing: {
               title: existingListing.title,
               description: existingListing.description,
-              startPrice: existingListing.startPrice,
+              startPrice: freshStartPrice,
               quantity: existingListing.quantity,
               itemPhotoUrl: existingListing.itemPhotoUrl || '',
               conditionId: existingListing.conditionId || '',
@@ -785,6 +3289,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
               customLabel: futureSKU,
               customFields: existingListing.customFields || {},
               _asinReference: asin,
+              _aiRunId: aiRunContext.aiRunId,
               _existingListingId: existingListing._id
             },
             warnings: [
@@ -812,6 +3317,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
         }
 
         // Look up ASIN in the directory
+        res.write(`data: ${JSON.stringify({ type: 'progress', id: `preview-${asin}`, stage: 'fetching' })}\n\n`);
         const doc = await AsinDirectory.findOne({ asin }).lean();
 
         // Build amazonData from stored document (no scraping).
@@ -837,8 +3343,9 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
           model: '', material: '', specialFeatures: '', size: ''
         };
 
+        res.write(`data: ${JSON.stringify({ type: 'progress', id: `preview-${asin}`, stage: 'generating' })}\n\n`);
         const { coreFields, customFields, pricingCalculation } =
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId, aiRunContext));
 
         const mergedCoreFields = {
           ...(template.coreFieldDefaults || {}),
@@ -854,6 +3361,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
         }
 
         const warnings = [];
+        if (crossTemplateWarning2) warnings.push(crossTemplateWarning2);
         const validationErrors = [];
 
         // Warn if ASIN was never scraped or not found in directory
@@ -883,13 +3391,15 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             description: amazonData.description,
             images: amazonData.images,
             color: amazonData.color,
-            compatibility: amazonData.compatibility
+            compatibility: amazonData.compatibility,
+            productInfo: amazonData.productInfo || null
           },
           generatedListing: {
             ...mergedCoreFields,
             customLabel: finalSKU,
             customFields,
-            _asinReference: asin
+            _asinReference: asin,
+            _aiRunId: aiRunContext.aiRunId
           },
           pricingCalculation,
           warnings,
@@ -924,17 +3434,39 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/{id}:
+ *   get:
+ *     tags: [Template Listings]
+ *     summary: Get a single listing by ID
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Listing document ID
+ *     responses:
+ *       200:
+ *         description: Listing document with populated createdBy and templateId
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/TemplateListing' }
+ *       401: { description: Unauthorized }
+ *       404: { description: Listing not found }
+ *       500: { description: Server error }
+ */
 // Get single listing by ID
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const listing = await TemplateListing.findById(req.params.id)
       .populate('createdBy', 'name email')
       .populate('templateId');
-    
+
     if (!listing) {
       return res.status(404).json({ error: 'Listing not found' });
     }
-    
+
     res.json(listing);
   } catch (error) {
     console.error('Error fetching listing:', error);
@@ -942,42 +3474,88 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/:
+ *   post:
+ *     tags: [Template Listings]
+ *     summary: Create a new listing
+ *     description: |
+ *       Creates a new active listing for a template. If an inactive listing with the same SKU
+ *       already exists it is reactivated instead. Returns `409` if an active listing with the
+ *       same SKU already exists.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, customLabel, title, startPrice]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId: { type: string }
+ *               customLabel: { type: string, description: eBay SKU }
+ *               title: { type: string }
+ *               startPrice: { type: number }
+ *               description: { type: string }
+ *               quantity: { type: integer, default: 1 }
+ *               categoryId: { type: string }
+ *               categoryName: { type: string }
+ *               conditionId: { type: string }
+ *               itemPhotoUrl: { type: string }
+ *               customFields: { type: object, additionalProperties: { type: string } }
+ *     responses:
+ *       201:
+ *         description: Created or reactivated listing
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 listing: { $ref: '#/components/schemas/TemplateListing' }
+ *                 wasReactivated: { type: boolean }
+ *       400: { description: Missing required fields }
+ *       401: { description: Unauthorized }
+ *       404: { description: Seller not found }
+ *       409: { description: Active listing with this SKU already exists }
+ *       500: { description: Server error }
+ */
 // Create new listing
 router.post('/', requireAuth, async (req, res) => {
   try {
     const listingData = req.body;
-    
+
     if (!listingData.templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     if (!listingData.sellerId) {
       return res.status(400).json({ error: 'Seller ID is required' });
     }
-    
+
     // Validate seller exists
     const seller = await Seller.findById(listingData.sellerId);
     if (!seller) {
       return res.status(404).json({ error: 'Seller not found' });
     }
-    
+
     if (!listingData.customLabel) {
       return res.status(400).json({ error: 'SKU (Custom label) is required' });
     }
-    
+
     if (!listingData.title) {
       return res.status(400).json({ error: 'Title is required' });
     }
-    
+
     if (!listingData.startPrice && listingData.startPrice !== 0) {
       return res.status(400).json({ error: 'Start price is required' });
     }
-    
+
     // Convert customFields object to Map
     if (listingData.customFields && typeof listingData.customFields === 'object') {
       listingData.customFields = new Map(Object.entries(listingData.customFields));
     }
-    
+
     // Check if SKU exists as active (block duplicate)
     const activeExists = await TemplateListing.findOne({
       templateId: listingData.templateId,
@@ -985,13 +3563,13 @@ router.post('/', requireAuth, async (req, res) => {
       customLabel: listingData.customLabel,
       status: 'active'
     });
-    
+
     if (activeExists) {
-      return res.status(409).json({ 
-        error: 'An active listing with this SKU already exists' 
+      return res.status(409).json({
+        error: 'An active listing with this SKU already exists'
       });
     }
-    
+
     // Check if SKU exists as inactive (reactivate instead of creating new)
     const inactiveExists = await TemplateListing.findOne({
       templateId: listingData.templateId,
@@ -999,10 +3577,10 @@ router.post('/', requireAuth, async (req, res) => {
       customLabel: listingData.customLabel,
       status: 'inactive'
     });
-    
+
     let listing;
     let wasReactivated = false;
-    
+
     if (inactiveExists) {
       // Reactivate existing inactive listing and update with new data
       Object.assign(inactiveExists, {
@@ -1011,11 +3589,11 @@ router.post('/', requireAuth, async (req, res) => {
         status: 'active',
         updatedAt: Date.now()
       });
-      
+
       await inactiveExists.save();
       listing = inactiveExists;
       wasReactivated = true;
-      
+
       console.log(`✅ Reactivated inactive listing: ${listingData.customLabel}`);
     } else {
       // Create new listing
@@ -1024,13 +3602,13 @@ router.post('/', requireAuth, async (req, res) => {
         status: 'active',
         createdBy: req.user.userId
       });
-      
+
       await listing.save();
     }
-    
+
     await listing.populate([
       { path: 'createdBy', select: 'name email' },
-      { 
+      {
         path: 'sellerId',
         populate: {
           path: 'user',
@@ -1038,7 +3616,7 @@ router.post('/', requireAuth, async (req, res) => {
         }
       }
     ]);
-    
+
     res.status(201).json({
       listing,
       wasReactivated
@@ -1052,6 +3630,47 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-apply-schedule:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Assign sequential schedule times to listings
+ *     description: |
+ *       Assigns sequential `scheduleTime` values (IST wall-clock, format `YYYY-MM-DD HH:MM:SS`) to all
+ *       matched listings, spaced by `stepMinutes`. Listings are ordered by `createdAt ASC`.
+ *       Optionally scoped to a specific batch or row range.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, startDateTime, stepMinutes]
+ *             properties:
+ *               templateId:    { type: string }
+ *               sellerId:      { type: string }
+ *               startDateTime: { type: string, example: "2024-06-01 08:00:00", description: "YYYY-MM-DD HH:MM:SS" }
+ *               stepMinutes:   { type: integer, example: 5 }
+ *               batchFilter:   { type: string, description: active | downloaded | batch }
+ *               batchId:       { type: string, description: Filter to a specific download batch }
+ *               fromRow:       { type: integer, description: 1-based start row (inclusive) }
+ *               toRow:         { type: integer, description: 1-based end row (inclusive) }
+ *     responses:
+ *       200:
+ *         description: Schedule applied
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 updated:   { type: integer, example: 48 }
+ *                 firstTime: { type: string, example: "2024-06-01 08:00:00" }
+ *                 lastTime:  { type: string, example: "2024-06-01 11:55:00" }
+ *       400: { description: Missing required fields or invalid stepMinutes / date format }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // ============================================
 // BULK APPLY SCHEDULE TIMES
 // POST /template-listings/bulk-apply-schedule
@@ -1106,7 +3725,7 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
 
     // Optional row range (1-based, inclusive). Defaults to the full list.
     const from = fromRow && parseInt(fromRow) >= 1 ? parseInt(fromRow) - 1 : 0;
-    const to   = toRow   && parseInt(toRow)   >= 1 ? parseInt(toRow)       : listings.length;
+    const to = toRow && parseInt(toRow) >= 1 ? parseInt(toRow) : listings.length;
     const targetListings = listings.slice(from, to);
 
     if (targetListings.length === 0) {
@@ -1162,6 +3781,38 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/clear-schedule:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Clear schedule times for listings
+ *     description: Sets `scheduleTime` to an empty string for all matched listings. Scope can be narrowed by batchId or batchFilter.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId]
+ *             properties:
+ *               templateId:  { type: string }
+ *               sellerId:    { type: string }
+ *               batchFilter: { type: string, description: active | downloaded | batch }
+ *               batchId:     { type: string, description: Target a specific download batch }
+ *     responses:
+ *       200:
+ *         description: Number of cleared listings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 cleared: { type: integer, example: 24 }
+ *       400: { description: templateId and sellerId are required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // ============================================
 // CLEAR SCHEDULE TIMES
 // POST /template-listings/clear-schedule
@@ -1191,6 +3842,45 @@ router.post('/clear-schedule', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-update:
+ *   put:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk update listing fields
+ *     description: Applies partial field updates to multiple listings at once. Only editable fields are patched; unknown fields are ignored.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [listings]
+ *             properties:
+ *               listings:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     _id: { type: string, description: Listing ID (or _existingListingId) }
+ *                     _existingListingId: { type: string }
+ *                     title: { type: string }
+ *                     startPrice: { type: number }
+ *                     scheduleTime: { type: string }
+ *                     customFields: { type: object }
+ *     responses:
+ *       200:
+ *         description: Number of successfully updated listings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 updated: { type: integer, example: 5 }
+ *       400: { description: listings array is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk update listings
 router.put('/bulk-update', requireAuth, async (req, res) => {
   try {
@@ -1230,18 +3920,65 @@ router.put('/bulk-update', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/{id}:
+ *   put:
+ *     tags: [Template Listings]
+ *     summary: Update a single listing
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { $ref: '#/components/schemas/TemplateListing' }
+ *     responses:
+ *       200:
+ *         description: Updated listing
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/TemplateListing' }
+ *       401: { description: Unauthorized }
+ *       404: { description: Listing not found }
+ *       409: { description: SKU conflict }
+ *       500: { description: Server error }
+ *   delete:
+ *     tags: [Template Listings]
+ *     summary: Delete a single listing
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string, example: Listing deleted successfully }
+ *       401: { description: Unauthorized }
+ *       404: { description: Listing not found }
+ *       500: { description: Server error }
+ */
 // Update listing
 router.put('/:id', requireAuth, async (req, res) => {
   try {
     const listingData = req.body;
-    
+
     // Convert customFields object to Map
     if (listingData.customFields && typeof listingData.customFields === 'object') {
       listingData.customFields = new Map(Object.entries(listingData.customFields));
     }
-    
+
     listingData.updatedAt = Date.now();
-    
+
     const listing = await TemplateListing.findByIdAndUpdate(
       req.params.id,
       listingData,
@@ -1249,11 +3986,11 @@ router.put('/:id', requireAuth, async (req, res) => {
     )
       .populate('createdBy', 'name email')
       .populate('templateId');
-    
+
     if (!listing) {
       return res.status(404).json({ error: 'Listing not found' });
     }
-    
+
     res.json(listing);
   } catch (error) {
     if (error.code === 11000) {
@@ -1268,11 +4005,11 @@ router.put('/:id', requireAuth, async (req, res) => {
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const listing = await TemplateListing.findByIdAndDelete(req.params.id);
-    
+
     if (!listing) {
       return res.status(404).json({ error: 'Listing not found' });
     }
-    
+
     res.json({ message: 'Listing deleted successfully' });
   } catch (error) {
     console.error('Error deleting listing:', error);
@@ -1280,30 +4017,77 @@ router.delete('/:id', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/autofill-from-asin:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: ASIN autofill — single ASIN
+ *     description: Fetches Amazon product data for one ASIN, applies the template's field configs and pricing rules, and returns the generated field values without persisting anything.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [asin, templateId]
+ *             properties:
+ *               asin:       { type: string, example: B01N5IB20Q }
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               region:     { type: string, default: US }
+ *     responses:
+ *       200:
+ *         description: Autofilled field data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:            { type: boolean }
+ *                 asin:               { type: string }
+ *                 autoFilledData:
+ *                   type: object
+ *                   properties:
+ *                     coreFields:   { type: object }
+ *                     customFields: { type: object }
+ *                 amazonSource:
+ *                   type: object
+ *                   properties:
+ *                     title:      { type: string }
+ *                     brand:      { type: string }
+ *                     price:      { type: number }
+ *                     imageCount: { type: integer }
+ *                 pricingCalculation: { type: object, nullable: true }
+ *       400: { description: ASIN and templateId are required or automation not enabled }
+ *       401: { description: Unauthorized }
+ *       404: { description: Template not found }
+ *       500: { description: Server error }
+ */
 // ASIN Autofill endpoint
 router.post('/autofill-from-asin', requireAuth, async (req, res) => {
   try {
     const { asin, templateId, sellerId, region = 'US' } = req.body;
-    
+
     if (!asin || !templateId) {
-      return res.status(400).json({ 
-        error: 'ASIN and Template ID are required' 
+      return res.status(400).json({
+        error: 'ASIN and Template ID are required'
       });
     }
-    
+
     // 1. Fetch effective template with automation config (includes seller overrides)
     const template = await getEffectiveTemplate(templateId, sellerId);
-    
+
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
-    
+
     if (!template.asinAutomation?.enabled) {
-      return res.status(400).json({ 
-        error: 'ASIN automation is not enabled for this template' 
+      return res.status(400).json({
+        error: 'ASIN automation is not enabled for this template'
       });
     }
-    
+
     // 1.5. Get seller-specific pricing config if sellerId is provided
     let pricingConfig = template.pricingConfig;
     if (sellerId) {
@@ -1315,19 +4099,21 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
         pricingConfig = sellerConfig.pricingConfig;
       }
     }
-    
+
     // 2. Fetch fresh Amazon data
     console.log(`Fetching Amazon data for ASIN: ${asin} (${region})`);
     const amazonData = await fetchAmazonData(asin, region);
-    
+
     // 3. Apply field configurations (AI + direct mappings)
     console.log(`Processing ${template.asinAutomation.fieldConfigs.length} field configs`);
+    const aiRunContext = createAiRunContext('autofill-single');
     const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
       amazonData,
       template.asinAutomation.fieldConfigs,
-      pricingConfig  // Use seller-specific or template default pricing config
+      pricingConfig,  // Use seller-specific or template default pricing config
+      buildAiUsageContext(req, templateId, sellerId, aiRunContext)
     );
-    
+
     // 4. Return auto-filled data (separated by type)
     res.json({
       success: true,
@@ -1344,54 +4130,108 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
       },
       pricingCalculation: pricingCalculation || null
     });
-    
+
   } catch (error) {
     console.error('ASIN autofill error:', error);
-    res.status(500).json({ 
-      error: error.message || 'Failed to fetch and process ASIN data' 
+    res.status(500).json({
+      error: error.message || 'Failed to fetch and process ASIN data'
     });
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-autofill-from-asins:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: ASIN autofill — batch (up to 100 ASINs)
+ *     description: |
+ *       Processes up to 100 ASINs in parallel batches. Each result has a `status` of:
+ *       - `success` — autofill data generated
+ *       - `duplicate_updateable` — ASIN already in this template (returns existing data for editing)
+ *       - `blocked` — ASIN in another seller template, or SKU conflict
+ *       - `error` — scraping or AI processing failed
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [asins, templateId, sellerId]
+ *             properties:
+ *               asins:      { type: array, items: { type: string }, example: ["B01N5IB20Q", "B07K1RZWMC"] }
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               region:     { type: string, default: US }
+ *     responses:
+ *       200:
+ *         description: Batch autofill results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:        { type: boolean }
+ *                 total:          { type: integer }
+ *                 successful:     { type: integer }
+ *                 failed:         { type: integer }
+ *                 duplicates:     { type: integer }
+ *                 blocked:        { type: integer }
+ *                 processingTime: { type: string, example: "4.2s" }
+ *                 results:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       asin:   { type: string }
+ *                       status: { type: string, enum: [success, duplicate_updateable, blocked, error] }
+ *                       autoFilledData: { type: object, nullable: true }
+ *                       pricingCalculation: { type: object, nullable: true }
+ *                       error:  { type: string, nullable: true }
+ *       400: { description: Validation error or automation not enabled }
+ *       401: { description: Unauthorized }
+ *       404: { description: Template not found }
+ *       500: { description: Server error }
+ */
 // Bulk auto-fill from multiple ASINs
 router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
   try {
     const { asins, templateId, sellerId, region = 'US' } = req.body;
-    
+
     if (!asins || !Array.isArray(asins) || asins.length === 0) {
-      return res.status(400).json({ 
-        error: 'ASINs array is required and must not be empty' 
+      return res.status(400).json({
+        error: 'ASINs array is required and must not be empty'
       });
     }
-    
+
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     if (!sellerId) {
       return res.status(400).json({ error: 'Seller ID is required' });
     }
-    
+
     // Validate batch size
     if (asins.length > 100) {
-      return res.status(400).json({ 
-        error: 'Maximum 100 ASINs allowed per batch' 
+      return res.status(400).json({
+        error: 'Maximum 100 ASINs allowed per batch'
       });
     }
-    
+
     // Fetch effective template with automation config (includes seller overrides)
     const template = await getEffectiveTemplate(templateId, sellerId);
-    
+
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
-    
+
     if (!template.asinAutomation?.enabled) {
-      return res.status(400).json({ 
-        error: 'ASIN automation is not enabled for this template' 
+      return res.status(400).json({
+        error: 'ASIN automation is not enabled for this template'
       });
     }
-    
+
     // Get seller-specific pricing config if available
     let pricingConfig = template.pricingConfig;
     const sellerConfig = await SellerPricingConfig.findOne({
@@ -1401,28 +4241,28 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
     if (sellerConfig) {
       pricingConfig = sellerConfig.pricingConfig;
     }
-    
+
     // Clean and deduplicate ASINs
     const cleanedAsins = [...new Set(
       asins.map(asin => asin.trim().toUpperCase()).filter(asin => asin.length > 0)
     )];
-    
+
     console.log(`\n========== BULK AUTOFILL: ${cleanedAsins.length} ASINs ==========`);
     console.log(`Template: ${template.name || templateId}`);
     console.log(`Seller: ${sellerId}`);
     console.log(`AI Fields: ${template.asinAutomation.fieldConfigs.filter(c => c.source === 'ai' && c.enabled).length}`);
-    
+
     // Check for existing ACTIVE listings with these ASINs across ALL templates for this seller
     const existingListings = await TemplateListing.find({
       sellerId,  // Check across all templates for this seller
       _asinReference: { $in: cleanedAsins },
       status: 'active'
     }).select('+_asinReference').lean();
-    
+
     // Create maps for both current template and cross-template duplicates
     const existingInCurrentTemplate = new Map(); // Changed to Map to store full listing data
     const existingInOtherTemplates = new Map();
-    
+
     existingListings.forEach(listing => {
       if (listing.templateId.toString() === templateId.toString()) {
         existingInCurrentTemplate.set(listing._asinReference, listing); // Store full listing
@@ -1430,16 +4270,16 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
         existingInOtherTemplates.set(listing._asinReference, listing.templateId);
       }
     });
-    
+
     console.log(`Found ${existingInCurrentTemplate.size} ASINs in current template (will update)`);
     console.log(`Found ${existingInOtherTemplates.size} ASINs in other templates (will block)\n`);
-    
+
     // Pre-generate all SKUs and check for collisions with existing SKUs
     const generatedSKUs = cleanedAsins.map(asin => ({
       asin,
       sku: generateSKUFromASIN(asin)
     }));
-    
+
     // Check if any generated SKUs already exist (from both ASIN imports and SKU imports)
     const existingBySKU = await TemplateListing.find({
       templateId,
@@ -1447,33 +4287,35 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
       customLabel: { $in: generatedSKUs.map(item => item.sku) },
       status: { $in: ['active', 'draft'] }
     }).select('customLabel _asinReference _id');
-    
+
     const existingSKUMap = new Map(
       existingBySKU.map(listing => [listing.customLabel, {
         id: listing._id,
         asin: listing._asinReference
       }])
     );
-    
+
     console.log(`Found ${existingSKUMap.size} SKU conflicts (will block)\n`);
-    
+
     const startTime = Date.now();
     const results = [];
-    
+
     // Process ASINs in batches of 20 (parallel within batch, parallel between batches)
     const batchSize = parseInt(process.env.BACKEND_BATCH_SIZE) || 20;
     const batches = [];
     for (let i = 0; i < cleanedAsins.length; i += batchSize) {
       batches.push(cleanedAsins.slice(i, i + batchSize));
     }
-    
+
     console.log(`🚀 Processing ${batches.length} batches in parallel (${batchSize} ASINs per batch)...`);
-    
+
+    const aiRunContext = createAiRunContext('bulk-autofill');
+
     // Process all batches in parallel
     const batchPromises = batches.map(async (batch, batchIndex) => {
       const batchNum = batchIndex + 1;
       console.log(`  ⏳ Batch ${batchNum}/${batches.length}: Starting ${batch.length} ASINs...`);
-      
+
       const batchPromises = batch.map(async (asin) => {
         // Check if ASIN exists in OTHER templates for this seller (block)
         if (existingInOtherTemplates.has(asin)) {
@@ -1484,26 +4326,23 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
             error: 'ASIN already exists for this seller in another template. Each ASIN can only be used once per seller.'
           };
         }
-        
+
         // Check if ASIN already exists in CURRENT template (duplicate_updateable)
         if (existingInCurrentTemplate.has(asin)) {
           const existingListing = existingInCurrentTemplate.get(asin);
           const generatedSKU = generateSKUFromASIN(asin);
-          
-          // Get existing customFields (already an object from .lean())
-          const existingCustomFields = existingListing.customFields || {};
-          
-          // Return existing listing data for editing (no re-fetch)
+
+          const amazonData = await fetchAmazonData(asin, region, { forceRefresh: true });
+          const pricingCalculation = calculatePricingOnly(asin, amazonData.price, pricingConfig);
+
           return {
             asin,
             status: 'duplicate_updateable',
-            
-            // Return existing data for editing
             autoFilledData: {
               coreFields: {
                 title: existingListing.title,
                 description: existingListing.description,
-                startPrice: existingListing.startPrice,
+                startPrice: pricingCalculation?.calculatedStartPrice ?? existingListing.startPrice,
                 quantity: existingListing.quantity,
                 itemPhotoUrl: existingListing.itemPhotoUrl || '',
                 conditionId: existingListing.conditionId || '',
@@ -1511,19 +4350,26 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
                 duration: existingListing.duration || '',
                 location: existingListing.location || ''
               },
-              customFields: existingCustomFields
+              customFields: existingListing.customFields || {}
             },
+            amazonSource: {
+              title: amazonData.title,
+              brand: amazonData.brand,
+              price: amazonData.price,
+              imageCount: Array.isArray(amazonData.images) ? amazonData.images.length : 0
+            },
+            pricingCalculation: pricingCalculation || null,
             sku: existingListing.customLabel || generatedSKU,
             _existingListingId: existingListing._id, // Track which listing to update
             warnings: [
               `This ASIN already exists in this template.`,
-              existingListing.duplicateCount > 0 
+              existingListing.duplicateCount > 0
                 ? `Previously updated ${existingListing.duplicateCount} time(s).`
                 : `First time editing this ASIN.`
             ]
           };
         }
-        
+
         // Check if generated SKU already exists (from ASIN imports or SKU imports)
         const generatedSKU = generateSKUFromASIN(asin);
         const existingSKU = existingSKUMap.get(generatedSKU);
@@ -1534,23 +4380,24 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
             status: 'blocked',
             blockedReason: 'sku_conflict',
             existingListingId: existingSKU.id.toString(),
-            error: existingSKU.asin 
+            error: existingSKU.asin
               ? `SKU ${generatedSKU} already exists for ASIN ${existingSKU.asin} in this template`
               : `SKU ${generatedSKU} already exists in this template (imported via SKU import)`
           };
         }
-        
+
         try {
           // Fetch Amazon data
           const amazonData = await fetchAmazonData(asin, region);
-          
+
           // Apply field configurations
           const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
             amazonData,
             template.asinAutomation.fieldConfigs,
-            pricingConfig  // Use seller-specific or template default pricing config
+            pricingConfig,  // Use seller-specific or template default pricing config
+            buildAiUsageContext(req, templateId, sellerId, aiRunContext)
           );
-          
+
           return {
             asin,
             status: 'success',
@@ -1577,15 +4424,15 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
           };
         }
       });
-      
+
       const batchResults = await Promise.all(batchPromises);
       console.log(`  ✅ Batch ${batchNum}/${batches.length}: Completed`);
       return batchResults;
     });
-    
+
     // Wait for all batches to complete (use allSettled for resilience)
     const allBatchResults = await Promise.allSettled(batchPromises);
-    
+
     // Flatten and collect all results
     allBatchResults.forEach((batchResult, batchIndex) => {
       if (batchResult.status === 'fulfilled') {
@@ -1603,13 +4450,13 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
         });
       }
     });
-    
+
     const processingTime = ((Date.now() - startTime) / 1000).toFixed(1);
     const successful = results.filter(r => r.status === 'success').length;
     const failed = results.filter(r => r.status === 'error').length;
     const duplicates = results.filter(r => r.status === 'duplicate').length;
     const blocked = results.filter(r => r.status === 'blocked').length;
-    
+
     console.log(`\n========== BULK AUTOFILL COMPLETE ==========`);
     console.log(`✅ Successful: ${successful}`);
     console.log(`❌ Failed: ${failed}`);
@@ -1618,7 +4465,7 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
     console.log(`⏱️  Total Time: ${processingTime}s`);
     console.log(`⚡ Avg per ASIN: ${(parseFloat(processingTime) / cleanedAsins.length).toFixed(2)}s`);
     console.log(`==========================================\n`);
-    
+
     res.json({
       success: true,
       total: cleanedAsins.length,
@@ -1629,32 +4476,64 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
       results,
       processingTime: `${processingTime}s`
     });
-    
+
   } catch (error) {
     console.error('Bulk ASIN autofill error:', error);
-    res.status(500).json({ 
-      error: error.message || 'Failed to process bulk ASIN autofill' 
+    res.status(500).json({
+      error: error.message || 'Failed to process bulk ASIN autofill'
     });
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-delete:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Permanently delete multiple listings
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [listingIds]
+ *             properties:
+ *               listingIds:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["665abc...", "665def..."]
+ *     responses:
+ *       200:
+ *         description: Delete result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:      { type: string, example: Listings deleted successfully }
+ *                 deletedCount: { type: integer, example: 3 }
+ *       400: { description: listingIds array is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk update existing listings (used by Proof Read → List Directly flow)
 // Bulk delete listings
 router.post('/bulk-delete', requireAuth, async (req, res) => {
   try {
     const { listingIds } = req.body;
-    
+
     if (!listingIds || !Array.isArray(listingIds) || listingIds.length === 0) {
       return res.status(400).json({ error: 'Listing IDs array is required' });
     }
-    
+
     const result = await TemplateListing.deleteMany({
       _id: { $in: listingIds }
     });
-    
-    res.json({ 
+
+    res.json({
       message: 'Listings deleted successfully',
-      deletedCount: result.deletedCount 
+      deletedCount: result.deletedCount
     });
   } catch (error) {
     console.error('Error bulk deleting listings:', error);
@@ -1662,96 +4541,148 @@ router.post('/bulk-delete', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-create:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk create listings from autofill results (max 50)
+ *     description: |
+ *       Creates or reactivates up to 50 listings at once. Per-listing result status:
+ *       - `created` — new listing saved
+ *       - `reactivated` — existing inactive listing updated and reactivated
+ *       - `skipped` — active duplicate (when skipDuplicates=true)
+ *       - `blocked` — SKU conflict with existing active/draft listing
+ *       - `failed` — validation or DB error
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, listings]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               listings:
+ *                 type: array
+ *                 items: { $ref: '#/components/schemas/TemplateListing' }
+ *               options:
+ *                 type: object
+ *                 properties:
+ *                   autoGenerateSKU: { type: boolean, default: true }
+ *                   skipDuplicates:  { type: boolean, default: true }
+ *     responses:
+ *       200:
+ *         description: Bulk create summary with per-listing results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:     { type: boolean }
+ *                 total:       { type: integer }
+ *                 created:     { type: integer }
+ *                 reactivated: { type: integer }
+ *                 failed:      { type: integer }
+ *                 skipped:     { type: integer }
+ *                 results:     { type: array, items: { type: object } }
+ *                 errors:      { type: array, items: { type: object } }
+ *       400: { description: Validation error or too many listings }
+ *       401: { description: Unauthorized }
+ *       404: { description: Seller or Template not found }
+ *       500: { description: Server error }
+ */
 // Bulk create listings from auto-fill results
 router.post('/bulk-create', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, listings, options = {} } = req.body;
-    
+    const { templateId, sellerId, listings, options = {}, reviewStats = {} } = req.body;
+
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     if (!sellerId) {
       return res.status(400).json({ error: 'Seller ID is required' });
     }
-    
+
     // Validate seller exists
     const seller = await Seller.findById(sellerId);
     if (!seller) {
       return res.status(404).json({ error: 'Seller not found' });
     }
-    
+
     if (!listings || !Array.isArray(listings) || listings.length === 0) {
       return res.status(400).json({ error: 'Listings array is required' });
     }
-    
+
     // Validate batch size
     if (listings.length > 50) {
-      return res.status(400).json({ 
-        error: 'Maximum 50 listings allowed per batch' 
+      return res.status(400).json({
+        error: 'Maximum 50 listings allowed per batch'
       });
     }
-    
+
     const {
       autoGenerateSKU = true,
       skipDuplicates = true
     } = options;
-    
+
     // Fetch effective template to get next SKU counter (includes seller overrides)
     const template = await getEffectiveTemplate(templateId, sellerId);
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
-    
+
     const results = [];
     const errors = [];
     let skippedCount = 0;
-    
+
     // Get existing ACTIVE SKUs to avoid duplicates
-    const existingActiveSKUs = await TemplateListing.find({ 
+    const existingActiveSKUs = await TemplateListing.find({
       templateId,
       sellerId,
       status: 'active'
     }).distinct('customLabel');
-    
+
     // Get existing INACTIVE listings for potential reactivation
     const inactiveListings = await TemplateListing.find({
       templateId,
       sellerId,
       status: 'inactive'
     }).select('+_asinReference');
-    
+
     const inactiveMap = new Map(
       inactiveListings.map(l => [l.customLabel, l])
     );
-    
+
     const skuSet = new Set(existingActiveSKUs);
     let skuCounter = Date.now();
-    
+
     console.log(`📊 Pre-check: ${existingActiveSKUs.length} active SKUs, ${inactiveListings.length} inactive listings`);
     console.log(`📋 Inactive SKUs: ${Array.from(inactiveMap.keys()).join(', ')}`);
-    
+
     // Pre-check for SKU conflicts with existing listings (including drafts from SKU imports)
     const potentialSKUs = listings
       .map(l => l.customLabel || (l._asinReference ? generateSKUFromASIN(l._asinReference) : null))
       .filter(sku => sku);
-    
+
     const existingBySKU = await TemplateListing.find({
       templateId,
       sellerId,
       customLabel: { $in: potentialSKUs },
       status: { $in: ['active', 'draft'] }
     }).select('customLabel _asinReference _id').lean();
-    
+
     const existingSKUMap = new Map(
       existingBySKU.map(listing => [listing.customLabel, {
         id: listing._id,
         asin: listing._asinReference
       }])
     );
-    
+
     console.log(`🔍 SKU pre-check: ${existingSKUMap.size} SKU conflicts detected`);
-    
+
     // Process each listing
     for (const listingData of listings) {
       try {
@@ -1769,7 +4700,7 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           });
           continue;
         }
-        
+
         if (listingData.startPrice === undefined || listingData.startPrice === null) {
           errors.push({
             asin: listingData._asinReference,
@@ -1783,7 +4714,7 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           });
           continue;
         }
-        
+
         // Generate SKU if not provided
         let sku = listingData.customLabel;
         if (!sku && autoGenerateSKU) {
@@ -1793,14 +4724,14 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           } else {
             sku = `SKU-${skuCounter++}`;
           }
-          
+
           // Check if generated SKU conflicts with existing (from ASIN or SKU imports)
           const existingSKU = existingSKUMap.get(sku);
           if (existingSKU) {
             errors.push({
               asin: listingData._asinReference,
               sku,
-              error: existingSKU.asin 
+              error: existingSKU.asin
                 ? `Generated SKU ${sku} already exists for ASIN ${existingSKU.asin}`
                 : `Generated SKU ${sku} already exists (imported via SKU import)`,
               details: 'SKU conflict detected'
@@ -1810,21 +4741,21 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
               asin: listingData._asinReference,
               sku,
               blockedReason: 'sku_conflict',
-              error: existingSKU.asin 
+              error: existingSKU.asin
                 ? `SKU already exists for ASIN ${existingSKU.asin}`
                 : `SKU already exists (imported via SKU import)`
             });
             console.log(`🚫 Blocked SKU conflict: ${sku}`);
             continue;
           }
-          
+
           // Ensure uniqueness within current batch
           while (skuSet.has(sku)) {
             // If collision within batch, append timestamp suffix
             sku = `${generateSKUFromASIN(listingData._asinReference)}-${skuCounter++}`;
           }
         }
-        
+
         if (!sku) {
           errors.push({
             asin: listingData._asinReference,
@@ -1838,19 +4769,19 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           });
           continue;
         }
-        
+
         console.log(`🔍 Processing SKU: ${sku}, inInactiveMap: ${inactiveMap.has(sku)}, inActiveSet: ${skuSet.has(sku)}`);
-        
+
         // Check if SKU exists as inactive - reactivate instead of create
         const inactiveListing = inactiveMap.get(sku);
-        
+
         if (inactiveListing) {
           // Found an inactive listing with this SKU - reactivate it
           // Convert customFields object to Map
           const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
             ? new Map(Object.entries(listingData.customFields))
             : new Map();
-          
+
           // Update existing inactive listing
           Object.assign(inactiveListing, {
             ...listingData,
@@ -1861,21 +4792,21 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
             status: 'active',
             updatedAt: Date.now()
           });
-          
+
           await inactiveListing.save();
           skuSet.add(sku);
-          
+
           results.push({
             status: 'reactivated',
             listing: inactiveListing.toObject(),
             asin: listingData._asinReference,
             sku
           });
-          
+
           console.log(`✅ Reactivated: ${sku}`);
           continue;
         }
-        
+
         // Check for duplicate SKU in active listings (within this batch or existing)
         if (skuSet.has(sku)) {
           if (skipDuplicates) {
@@ -1892,20 +4823,20 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
             // Make SKU unique by appending suffix
             const baseSKU = sku;
             let suffix = 1;
-            
+
             do {
               sku = `${baseSKU}-${suffix++}`;
             } while (skuSet.has(sku) || inactiveMap.has(sku));
-            
+
             console.log(`SKU collision detected: ${baseSKU} → ${sku}`);
           }
         }
-        
+
         // Convert customFields object to Map
         const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
           ? new Map(Object.entries(listingData.customFields))
           : new Map();
-        
+
         // Create new listing
         const listing = new TemplateListing({
           ...listingData,
@@ -1916,20 +4847,20 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           status: 'active',
           createdBy: req.user.userId
         });
-        
+
         await listing.save();
         skuSet.add(sku);
-        
+
         results.push({
           status: 'created',
           listing: listing.toObject(),
           asin: listingData._asinReference,
           sku
         });
-        
+
       } catch (error) {
         console.error('Error creating listing:', error);
-        
+
         if (error.code === 11000) {
           // Duplicate key error
           skippedCount++;
@@ -1952,13 +4883,22 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
         }
       }
     }
-    
+
     const created = results.filter(r => r.status === 'created').length;
     const reactivated = results.filter(r => r.status === 'reactivated').length;
     const failed = results.filter(r => r.status === 'failed').length;
-    
+    const savedFromReview = created + updated + reactivated;
+    const savedRunCounts = await recordReviewSaveCounts({
+      listings,
+      results,
+      templateId,
+      sellerId,
+      userId: req.user.userId,
+      dismissedByRunId: Array.isArray(reviewStats.dismissedByRunId) ? reviewStats.dismissedByRunId : []
+    });
+
     console.log(`Bulk create completed: ${created} created, ${reactivated} reactivated, ${failed} failed, ${skippedCount} skipped`);
-    
+
     res.json({
       success: true,
       total: listings.length,
@@ -1966,60 +4906,96 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
       reactivated,
       failed,
       skipped: skippedCount,
+      savedFromReview,
+      savedRunCounts,
       results,
       errors
     });
-    
+
   } catch (error) {
     console.error('Bulk create error:', error);
-    res.status(500).json({ 
-      error: error.message || 'Failed to bulk create listings' 
+    res.status(500).json({
+      error: error.message || 'Failed to bulk create listings'
     });
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-preview:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk ASIN preview — REST (non-streaming)
+ *     description: Synchronous version of `bulk-preview-stream`. Processes up to 100 ASINs and returns all results at once (no SSE). Suitable for small batches or environments where SSE is unavailable.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, asins]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               asins:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["B01N5IB20Q", "B07K1RZWMC"]
+ *               region: { type: string, default: US }
+ *     responses:
+ *       200:
+ *         description: Array of preview items
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items: { type: object }
+ *       400: { description: Validation error or too many ASINs }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk preview: Process ASINs and return preview data (no save to database)
 router.post('/bulk-preview', requireAuth, async (req, res) => {
   try {
     const { templateId, sellerId, asins, region = 'US' } = req.body;
-    
+
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     if (!sellerId) {
       return res.status(400).json({ error: 'Seller ID is required' });
     }
-    
+
     if (!asins || !Array.isArray(asins) || asins.length === 0) {
       return res.status(400).json({ error: 'ASINs array is required' });
     }
-    
+
     // Validate batch size
     if (asins.length > 100) {
-      return res.status(400).json({ 
-        error: 'Maximum 100 ASINs allowed per batch' 
+      return res.status(400).json({
+        error: 'Maximum 100 ASINs allowed per batch'
       });
     }
-    
+
     // Validate seller exists
     const seller = await Seller.findById(sellerId);
     if (!seller) {
       return res.status(404).json({ error: 'Seller not found' });
     }
-    
+
     // Fetch effective template (includes seller overrides)
     const template = await getEffectiveTemplate(templateId, sellerId);
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
-    
+
     if (!template.asinAutomation?.enabled) {
-      return res.status(400).json({ 
-        error: 'ASIN automation is not enabled for this template' 
+      return res.status(400).json({
+        error: 'ASIN automation is not enabled for this template'
       });
     }
-    
+
     // Get seller-specific pricing config if available
     let pricingConfig = template.pricingConfig;
     if (sellerId) {
@@ -2031,7 +5007,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         pricingConfig = sellerConfig.pricingConfig;
       }
     }
-    
+
     console.log(`💰 Pricing config enabled: ${pricingConfig?.enabled}, multiplier: ${pricingConfig?.multiplier}`);
     if (pricingConfig?.enabled) {
       console.log(`   Desired profit: ${pricingConfig.desiredProfit} INR`);
@@ -2043,40 +5019,40 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
       }
     }
     console.log(`📋 Field configs: ${template.asinAutomation.fieldConfigs.length} total`);
-    
+
     // Log field config breakdown
     const coreConfigs = template.asinAutomation.fieldConfigs.filter(c => c.fieldType === 'core');
     const customConfigs = template.asinAutomation.fieldConfigs.filter(c => c.fieldType === 'custom');
     const aiConfigs = template.asinAutomation.fieldConfigs.filter(c => c.source === 'ai');
     const directConfigs = template.asinAutomation.fieldConfigs.filter(c => c.source === 'direct');
-    
+
     console.log(`   Core: ${coreConfigs.length}, Custom: ${customConfigs.length}`);
     console.log(`   AI: ${aiConfigs.length}, Direct: ${directConfigs.length}`);
     console.log(`   Custom field names: ${customConfigs.map(c => c.ebayField).join(', ')}`);
-    
+
     const previewItems = [];
     const errors = [];
-    
+
     // Get existing ACTIVE SKUs to detect duplicates (ONCE per request, not per ASIN)
-    const existingActiveSKUs = await TemplateListing.find({ 
+    const existingActiveSKUs = await TemplateListing.find({
       templateId,
       sellerId,
       status: 'active'
     }).lean().distinct('customLabel');
-    
+
     const skuSet = new Set(existingActiveSKUs);
-    
+
     // Check for existing ASINs across ALL templates for this seller
     const existingAsinListings = await TemplateListing.find({
       sellerId,
       _asinReference: { $in: asins },
       status: 'active'
     }).select('_asinReference templateId').lean();
-    
+
     // Create maps for both current template and cross-template ASIN duplicates
     const asinInCurrentTemplate = new Set();
     const asinInOtherTemplates = new Map(); // ASIN -> templateId
-    
+
     existingAsinListings.forEach(listing => {
       if (listing.templateId.toString() === templateId.toString()) {
         asinInCurrentTemplate.add(listing._asinReference);
@@ -2084,15 +5060,23 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         asinInOtherTemplates.set(listing._asinReference, listing.templateId);
       }
     });
-    
+
+    // Pre-fetch template names for cross-template ASINs (for user-friendly warnings)
+    const otherTemplateIds3 = [...new Set([...asinInOtherTemplates.values()].map(id => id.toString()))];
+    const otherTemplateNameMap3 = new Map();
+    if (otherTemplateIds3.length > 0) {
+      const otherTpls3 = await ListingTemplate.find({ _id: { $in: otherTemplateIds3 } }).select('name').lean();
+      otherTpls3.forEach(t => otherTemplateNameMap3.set(t._id.toString(), t.name));
+    }
+
     console.log(`🔍 ASIN Check: ${asinInCurrentTemplate.size} in current template, ${asinInOtherTemplates.size} in other templates`);
-    
+
     // Pre-generate all SKUs and check for SKU collisions
     const generatedSKUs = asins.map(asin => ({
       asin,
       sku: generateSKUFromASIN(asin)
     }));
-    
+
     // Check if any generated SKUs already exist (from both ASIN imports and SKU imports)
     const existingBySKU = await TemplateListing.find({
       templateId,
@@ -2100,50 +5084,33 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
       customLabel: { $in: generatedSKUs.map(item => item.sku) },
       status: { $in: ['active', 'draft'] }
     }).select('customLabel _asinReference _id').lean();
-    
+
     const existingSKUMap = new Map(
       existingBySKU.map(listing => [listing.customLabel, {
         id: listing._id,
         asin: listing._asinReference
       }])
     );
-    
+
     console.log(`🔍 SKU Check: ${existingSKUMap.size} SKU conflicts detected`);
-    
+
     console.log(`🚀 Processing ${asins.length} ASINs in parallel...`);
-    
+
+    const aiRunContext = createAiRunContext('bulk-preview');
+
     // Process ALL ASINs in parallel using Promise.allSettled
     const asinPromises = asins.map(async (asin) => {
       try {
         console.log(`📦 Processing ASIN for preview: ${asin}`);
-        
-        // Check if ASIN exists in OTHER templates for this seller (blocking error)
-        if (asinInOtherTemplates.has(asin)) {
-          const otherTemplateId = asinInOtherTemplates.get(asin);
-          const errorItem = {
-            id: `preview-${asin}`,
-            asin,
-            sku: generateSKUFromASIN(asin),
-            sourceData: null,
-            generatedListing: null,
-            pricingCalculation: null,
-            warnings: [],
-            errors: [`ASIN already exists for this seller in template ${otherTemplateId}. Each ASIN can only be used once per seller.`],
-            status: 'blocked',
-            blockedReason: 'cross_template_duplicate',
-            existingTemplateId: otherTemplateId.toString()
-          };
-          
-          return {
-            success: false,
-            item: errorItem,
-            error: `ASIN exists in another template`
-          };
-        }
-        
+
+        // If ASIN exists in another template, note warning but continue with generation
+        const crossTemplateWarning3 = asinInOtherTemplates.has(asin)
+          ? `This ASIN also exists in template "${otherTemplateNameMap3.get(asinInOtherTemplates.get(asin)?.toString()) || 'another template'}"`
+          : null;
+
         // Generate SKU early for collision check
         const sku = generateSKUFromASIN(asin);
-        
+
         // Check if generated SKU already exists (from ASIN imports or SKU imports)
         const existingSKU = existingSKUMap.get(sku);
         if (existingSKU) {
@@ -2155,7 +5122,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             generatedListing: null,
             pricingCalculation: null,
             warnings: [],
-            errors: [existingSKU.asin 
+            errors: [existingSKU.asin
               ? `SKU ${sku} already exists for ASIN ${existingSKU.asin} in this template`
               : `SKU ${sku} already exists in this template (imported via SKU import)`
             ],
@@ -2163,27 +5130,27 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             blockedReason: 'sku_conflict',
             existingListingId: existingSKU.id.toString()
           };
-          
+
           return {
             success: false,
             item: errorItem,
             error: `SKU conflict`
           };
         }
-        
+
         // Fetch Amazon data
         const amazonData = await fetchAmazonData(asin, region);
-        
+
         // Apply field configurations
-        const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
-        
+        const { coreFields, customFields, pricingCalculation } =
+          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig, buildAiUsageContext(req, templateId, sellerId, aiRunContext));
+
         // Apply template core field defaults as base layer (autofilled fields override these)
         const mergedCoreFields = {
           ...(template.coreFieldDefaults || {}),
           ...coreFields
         };
-        
+
         // Apply custom column default values for missing fields
         if (template?.customColumns && template.customColumns.length > 0) {
           template.customColumns.forEach(col => {
@@ -2193,21 +5160,22 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             }
           });
         }
-        
+
         console.log(`✅ Generated fields for ${asin}:`);
         console.log(`   Core fields: ${Object.keys(mergedCoreFields).join(', ')}`);
         console.log(`   Custom fields: ${Object.keys(customFields).join(', ')}`);
-        
+
         // SKU already generated earlier for collision check
-        
+
         // Check for warnings
         const warnings = [];
+        if (crossTemplateWarning3) warnings.push(crossTemplateWarning3);
         const validationErrors = [];
-        
+
         if (!mergedCoreFields.title) {
           validationErrors.push('Missing required field: title');
         }
-        
+
         if (mergedCoreFields.startPrice === undefined || mergedCoreFields.startPrice === null || mergedCoreFields.startPrice === '') {
           if (pricingConfig?.enabled) {
             if (pricingCalculation?.error) {
@@ -2222,21 +5190,21 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         } else {
           console.log(`✅ [ASIN: ${asin}] startPrice validated: $${mergedCoreFields.startPrice}`);
         }
-        
+
         if (skuSet.has(sku)) {
           warnings.push('Duplicate SKU - will be skipped or replace existing');
         }
-        
+
         // Check if ASIN already exists in CURRENT template (warning only)
         if (asinInCurrentTemplate.has(asin)) {
           warnings.push('ASIN already exists in this template - will be skipped during save');
         }
-        
+
         // Check for missing important fields
         if (!mergedCoreFields.description) {
           warnings.push('Missing description');
         }
-        
+
         previewItems.push({
           id: `preview-${asin}`,
           asin,
@@ -2249,28 +5217,30 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             images: amazonData.images,
             color: amazonData.color,
             compatibility: amazonData.compatibility,
+            productInfo: amazonData.productInfo || null,
             rawData: amazonData.rawData
           },
           generatedListing: {
             ...mergedCoreFields,
             customLabel: sku,
             customFields,
-            _asinReference: asin
+            _asinReference: asin,
+            _aiRunId: aiRunContext.aiRunId
           },
           pricingCalculation,
           warnings,
           errors: validationErrors,
           status: validationErrors.length > 0 ? 'error' : (warnings.length > 0 ? 'warning' : 'success')
         });
-        
+
         return {
           success: true,
           item: previewItems[previewItems.length - 1]
         };
-        
+
       } catch (error) {
         console.error(`❌ Error processing ASIN ${asin}:`, error);
-        
+
         const errorItem = {
           id: `preview-${asin}`,
           asin,
@@ -2282,7 +5252,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
           errors: [error.message],
           status: 'error'
         };
-        
+
         return {
           success: false,
           item: errorItem,
@@ -2290,14 +5260,14 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         };
       }
     });
-    
+
     // Wait for all ASINs to complete (parallel processing)
     const results = await Promise.allSettled(asinPromises);
-    
+
     // Collect all items from results
     const finalItems = [];
     const finalErrors = [];
-    
+
     results.forEach((result, index) => {
       if (result.status === 'fulfilled') {
         finalItems.push(result.value.item);
@@ -2327,9 +5297,9 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         });
       }
     });
-    
+
     console.log(`✅ Parallel processing complete: ${finalItems.length} items processed`);
-    
+
     res.json({
       success: true,
       items: finalItems,
@@ -2341,131 +5311,156 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         warnings: finalItems.filter(i => i.status === 'warning').length
       }
     });
-    
+
   } catch (error) {
     console.error('Bulk preview error:', error);
-    res.status(500).json({ 
-      error: error.message || 'Failed to generate preview' 
+    res.status(500).json({
+      error: error.message || 'Failed to generate preview'
     });
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-save:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Bulk save reviewed/edited preview listings to the database
+ *     description: Persists an array of reviewed listing objects. Applies the same deduplication and reactivation logic as `bulk-create`.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, listings]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               listings:
+ *                 type: array
+ *                 items: { $ref: '#/components/schemas/TemplateListing' }
+ *               options: { type: object }
+ *     responses:
+ *       200:
+ *         description: Bulk save summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:     { type: boolean }
+ *                 total:       { type: integer }
+ *                 created:     { type: integer }
+ *                 reactivated: { type: integer }
+ *                 failed:      { type: integer }
+ *                 skipped:     { type: integer }
+ *                 results:     { type: array, items: { type: object } }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk save: Save reviewed/edited listings to database
 router.post('/bulk-save', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, listings, options = {} } = req.body;
-    
+    const { templateId, sellerId, listings, options = {}, reviewStats = {} } = req.body;
+
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     if (!sellerId) {
       return res.status(400).json({ error: 'Seller ID is required' });
     }
-    
+
     if (!listings || !Array.isArray(listings) || listings.length === 0) {
       return res.status(400).json({ error: 'Listings array is required' });
     }
-    
+
     // Validate seller exists
     const seller = await Seller.findById(sellerId);
     if (!seller) {
       return res.status(404).json({ error: 'Seller not found' });
     }
-    
+
     const {
       skipDuplicates = true
     } = options;
-    
+
     const results = [];
     const errors = [];
     let skippedCount = 0;
-    
+
     // Get existing ACTIVE SKUs
-    const existingActiveSKUs = await TemplateListing.find({ 
+    const existingActiveSKUs = await TemplateListing.find({
       templateId,
       sellerId,
       status: 'active'
     }).distinct('customLabel');
-    
+
     // Get existing INACTIVE listings for potential reactivation
     const inactiveListings = await TemplateListing.find({
       templateId,
       sellerId,
       status: 'inactive'
     }).select('+_asinReference');
-    
+
     const inactiveMap = new Map(
       inactiveListings.map(l => [l.customLabel, l])
     );
-    
+
     const skuSet = new Set(existingActiveSKUs);
-    
+
     console.log(`📊 Bulk save: ${existingActiveSKUs.length} active SKUs, ${inactiveListings.length} inactive listings`);
-    
+
     // Check for cross-template ASIN duplicates
     const asinsToSave = listings
       .map(l => l._asinReference)
       .filter(asin => asin && asin.trim());
-    
+
     const crossTemplateAsins = await TemplateListing.find({
       sellerId,
       templateId: { $ne: templateId }, // Different template
       _asinReference: { $in: asinsToSave },
       status: 'active'
     }).select('_asinReference templateId').lean();
-    
+
     const crossTemplateAsinMap = new Map(
       crossTemplateAsins.map(l => [l._asinReference, l.templateId])
     );
-    
+
     console.log(`🚫 Found ${crossTemplateAsinMap.size} ASINs already in other templates`);
-    
+
     // Pre-check all SKUs for collisions (including those from SKU imports)
     const skusToSave = listings
       .map(l => l.customLabel)
       .filter(sku => sku && sku.trim());
-    
+
     const existingBySKU = await TemplateListing.find({
       templateId,
       sellerId,
       customLabel: { $in: skusToSave },
       status: { $in: ['active', 'draft'] }
     }).select('customLabel _asinReference _id').lean();
-    
+
     const existingSKUMap = new Map(
       existingBySKU.map(listing => [listing.customLabel, {
         id: listing._id,
         asin: listing._asinReference
       }])
     );
-    
+
     console.log(`🔍 SKU pre-check: ${existingSKUMap.size} SKU conflicts detected`);
-    
+
     // Process each listing
     for (const listingData of listings) {
       try {
-        // Check for cross-template ASIN duplicate FIRST
-        if (listingData._asinReference && crossTemplateAsinMap.has(listingData._asinReference)) {
-          const existingTemplateId = crossTemplateAsinMap.get(listingData._asinReference);
-          errors.push({
-            asin: listingData._asinReference,
-            error: `ASIN already exists in template ${existingTemplateId} for this seller`
-          });
-          results.push({
-            status: 'blocked',
-            asin: listingData._asinReference,
-            error: `ASIN already exists in another template for this seller`,
-            existingTemplateId: existingTemplateId.toString()
-          });
-          console.log(`🚫 Blocked duplicate ASIN ${listingData._asinReference} (exists in template ${existingTemplateId})`);
-          continue;
-        }
-        
+        // Cross-template ASIN duplicates are allowed; user was notified via warning during preview
+
         // Check if this is a duplicate update request
         if (listingData._isDuplicateUpdate && listingData._existingListingId) {
           const existingListing = await TemplateListing.findById(listingData._existingListingId).select('+_asinReference');
-          
+
           if (!existingListing) {
             errors.push({
               asin: listingData._asinReference,
@@ -2478,7 +5473,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             });
             continue;
           }
-          
+
           // Convert customFields
           const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
             ? new Map(Object.entries(listingData.customFields))
@@ -2498,8 +5493,13 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             duplicateCount: (existingListing.duplicateCount || 0) + 1,
             lastDuplicateAttempt: Date.now(),
             scheduleTime: '',
-            updatedAt: Date.now()
+            updatedAt: Date.now(),
+            aiRunId: listingData.aiRunId || listingData._aiRunId
           };
+          // Persist fresh Amazon source price if supplied (Option B ran) so next duplication uses Option A
+          if (listingData._amazonSourcePrice) {
+            updateData._amazonSourcePrice = listingData._amazonSourcePrice;
+          }
           const overwritableFields = ['title', 'description', 'startPrice', 'quantity', 'itemPhotoUrl', 'conditionId', 'format', 'duration', 'location'];
           for (const field of overwritableFields) {
             if (listingData[field] !== undefined && listingData[field] !== null && listingData[field] !== '') {
@@ -2524,7 +5524,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           console.log(`✅ Updated duplicate ASIN ${listingData._asinReference} (count: ${existingListing.duplicateCount}, newSKU: ${newSKU})`);
           continue;
         }
-        
+
         // Validate required fields
         if (!listingData.title) {
           errors.push({
@@ -2538,7 +5538,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           });
           continue;
         }
-        
+
         if (listingData.startPrice === undefined || listingData.startPrice === null) {
           errors.push({
             asin: listingData._asinReference,
@@ -2551,7 +5551,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           });
           continue;
         }
-        
+
         // Compute count-based SKU fresh at save time
         let sku = listingData.customLabel;
         if (listingData._asinReference) {
@@ -2573,14 +5573,14 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
         }
 
         console.log(`🔍 Saving SKU: ${sku}`);
-        
+
         // Check if SKU already exists (from ASIN imports or SKU imports)
         const existingSKU = existingSKUMap.get(sku);
         if (existingSKU && existingSKU.id) {
           errors.push({
             asin: listingData._asinReference,
             sku,
-            error: existingSKU.asin 
+            error: existingSKU.asin
               ? `SKU ${sku} already exists for ASIN ${existingSKU.asin}`
               : `SKU ${sku} already exists (imported via SKU import)`
           });
@@ -2590,22 +5590,22 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             sku,
             blockedReason: 'sku_conflict',
             existingListingId: existingSKU.id.toString(),
-            error: existingSKU.asin 
+            error: existingSKU.asin
               ? `SKU already exists for ASIN ${existingSKU.asin}`
               : `SKU already exists (imported via SKU import)`
           });
           console.log(`🚫 Blocked SKU conflict: ${sku}`);
           continue;
         }
-        
+
         // Check if SKU exists as inactive - reactivate
         const inactiveListing = inactiveMap.get(sku);
-        
+
         if (inactiveListing) {
           const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
             ? new Map(Object.entries(listingData.customFields))
             : new Map();
-          
+
           Object.assign(inactiveListing, {
             ...listingData,
             customLabel: sku,
@@ -2613,23 +5613,24 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             templateId,
             sellerId,
             status: 'active',
-            updatedAt: Date.now()
+            updatedAt: Date.now(),
+            aiRunId: listingData.aiRunId || listingData._aiRunId
           });
-          
+
           await inactiveListing.save();
           skuSet.add(sku);
-          
+
           results.push({
             status: 'reactivated',
             listing: inactiveListing.toObject(),
             asin: listingData._asinReference,
             sku
           });
-          
+
           console.log(`✅ Reactivated: ${sku}`);
           continue;
         }
-        
+
         // Check for duplicate SKU
         if (skuSet.has(sku)) {
           if (skipDuplicates) {
@@ -2656,12 +5657,12 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             continue;
           }
         }
-        
+
         // Convert customFields object to Map
         const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
           ? new Map(Object.entries(listingData.customFields))
           : new Map();
-        
+
         // Create new listing
         const listing = new TemplateListing({
           ...listingData,
@@ -2670,9 +5671,10 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           templateId,
           sellerId,
           status: 'active',
-          createdBy: req.user.userId
+          createdBy: req.user.userId,
+          aiRunId: listingData.aiRunId || listingData._aiRunId
         });
-        
+
         await listing.save();
         skuSet.add(sku);
 
@@ -2718,9 +5720,18 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
     const updated = results.filter(r => r.status === 'updated').length;
     const reactivated = results.filter(r => r.status === 'reactivated').length;
     const failed = results.filter(r => r.status === 'failed').length;
-    
+    const savedFromReview = created + updated + reactivated;
+    const savedRunCounts = await recordReviewSaveCounts({
+      listings,
+      results,
+      templateId,
+      sellerId,
+      userId: req.user.userId,
+      dismissedByRunId: Array.isArray(reviewStats.dismissedByRunId) ? reviewStats.dismissedByRunId : []
+    });
+
     console.log(`✅ Bulk save completed: ${created} created, ${updated} updated, ${reactivated} reactivated, ${failed} failed, ${skippedCount} skipped`);
-    
+
     res.json({
       success: true,
       total: listings.length,
@@ -2732,66 +5743,105 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
       results,
       errors: errors.length > 0 ? errors : undefined
     });
-    
+
   } catch (error) {
     console.error('Bulk save error:', error);
-    res.status(500).json({ 
-      error: error.message || 'Failed to bulk save listings' 
+    res.status(500).json({
+      error: error.message || 'Failed to bulk save listings'
     });
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-import-asins:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Quick ASIN import (no Amazon data fetch)
+ *     description: Creates draft `TemplateListing` stubs for each ASIN without scraping Amazon. Useful for pre-loading a batch before running autofill later.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, asins]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               asins:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["B01N5IB20Q", "B07K1RZWMC"]
+ *     responses:
+ *       200:
+ *         description: Import result summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:  { type: boolean }
+ *                 total:    { type: integer }
+ *                 imported: { type: integer }
+ *                 skipped:  { type: integer }
+ *                 results:  { type: array, items: { type: object } }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       404: { description: Template or Seller not found }
+ *       500: { description: Server error }
+ */
 // Bulk import ASINs (quick import without fetching Amazon data)
 router.post('/bulk-import-asins', requireAuth, async (req, res) => {
   try {
     const { templateId, sellerId, asins } = req.body;
-    
+
     // Validate required fields
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     if (!sellerId) {
       return res.status(400).json({ error: 'Seller ID is required' });
     }
-    
+
     if (!asins || !Array.isArray(asins) || asins.length === 0) {
       return res.status(400).json({ error: 'ASINs array is required and must not be empty' });
     }
-    
+
     console.log('📦 Bulk import request:', { templateId, sellerId, asinCount: asins.length });
-    
+
     // Validate template (with seller overrides) and seller exist
     const [template, seller] = await Promise.all([
       getEffectiveTemplate(templateId, sellerId),
       Seller.findById(sellerId)
     ]);
-    
+
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
-    
+
     if (!seller) {
       return res.status(404).json({ error: 'Seller not found' });
     }
-    
+
     // Get existing SKUs for this seller to avoid duplicates
-    const existingSKUs = await TemplateListing.find({ 
+    const existingSKUs = await TemplateListing.find({
       templateId,
       sellerId,
       status: { $in: ['active', 'draft'] }
     }).distinct('customLabel');
-    
+
     const skuSet = new Set(existingSKUs);
     let skuCounter = Date.now();
-    
+
     // Process ASINs and generate SKUs
     const listingsToCreate = [];
     const skippedASINs = [];
-    
+
     for (const asin of asins) {
       const cleanASIN = asin.trim().toUpperCase();
-      
+
       // Basic ASIN validation (should start with B0 and be 10 chars)
       if (!cleanASIN || cleanASIN.length !== 10 || !cleanASIN.startsWith('B0')) {
         skippedASINs.push({
@@ -2800,25 +5850,25 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
         });
         continue;
       }
-      
+
       // Generate SKU using GRW25 + last 5 chars
       let sku = generateSKUFromASIN(cleanASIN);
-      
+
       // Check for duplicates and make unique
       if (skuSet.has(sku)) {
         // If collision, append timestamp suffix
         const baseSKU = sku;
         let suffix = 1;
-        
+
         do {
           sku = `${baseSKU}-${suffix++}`;
         } while (skuSet.has(sku));
-        
+
         console.log(`SKU collision detected: ${baseSKU} → ${sku}`);
       }
-      
+
       skuSet.add(sku);
-      
+
       // Create minimal listing object
       listingsToCreate.push({
         templateId,
@@ -2837,9 +5887,9 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
         createdBy: req.user.userId
       });
     }
-    
+
     console.log(`📊 Prepared ${listingsToCreate.length} listings, ${skippedASINs.length} skipped (validation)`);
-    
+
     // Check for existing listings with same ASINs in active/draft status
     const existingByASIN = await TemplateListing.find({
       templateId,
@@ -2847,11 +5897,11 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
       _asinReference: { $in: listingsToCreate.map(l => l._asinReference) },
       status: { $in: ['active', 'draft'] }
     }).select('customLabel _asinReference');
-    
+
     const existingASINs = new Set(existingByASIN.map(l => l._asinReference));
-    
+
     console.log(`🔍 Found ${existingASINs.size} existing active/draft ASINs in database`);
-    
+
     // Check for inactive listings that can be reactivated
     const inactiveListings = await TemplateListing.find({
       templateId,
@@ -2859,15 +5909,15 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
       _asinReference: { $in: listingsToCreate.map(l => l._asinReference) },
       status: 'inactive'
     }).select('customLabel _asinReference');
-    
+
     const inactiveASINMap = new Map(inactiveListings.map(l => [l._asinReference, l]));
-    
+
     console.log(`🔄 Found ${inactiveASINMap.size} inactive ASINs that can be reactivated`);
-    
+
     // Separate listings into: reactivate, skip (already active), or create new
     const listingsToReactivate = [];
     const newListings = [];
-    
+
     for (const listing of listingsToCreate) {
       if (existingASINs.has(listing._asinReference)) {
         // Already exists as active/draft - skip
@@ -2888,9 +5938,9 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
         newListings.push(listing);
       }
     }
-    
+
     console.log(`✅ ${newListings.length} new listings to insert, ${listingsToReactivate.length} to reactivate`);
-    
+
     // Reactivate inactive listings
     let reactivatedCount = 0;
     if (listingsToReactivate.length > 0) {
@@ -2911,25 +5961,25 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
           }
         }
       }));
-      
+
       const reactivateResult = await TemplateListing.bulkWrite(reactivateOps);
       reactivatedCount = reactivateResult.modifiedCount || 0;
       console.log(`🔄 Reactivated ${reactivatedCount} inactive listings`);
     }
-    
+
     // Bulk insert new listings
     let importedCount = 0;
     let insertErrors = [];
-    
+
     if (newListings.length > 0) {
       try {
         const result = await TemplateListing.insertMany(newListings, {
           ordered: false, // Continue on error
           rawResult: true
         });
-        
+
         importedCount = result.insertedCount || newListings.length;
-        
+
         // Handle any write errors
         if (result.writeErrors && result.writeErrors.length > 0) {
           result.writeErrors.forEach(err => {
@@ -2953,7 +6003,7 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
         // Handle bulk insert errors
         if (error.code === 11000 && error.writeErrors) {
           importedCount = error.insertedDocs ? error.insertedDocs.length : 0;
-          
+
           error.writeErrors.forEach(err => {
             const listing = newListings[err.index];
             skippedASINs.push({
@@ -2967,9 +6017,9 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
         }
       }
     }
-    
+
     console.log(`🎉 Import complete: ${importedCount} new, ${reactivatedCount} reactivated, ${skippedASINs.length} skipped`);
-    
+
     res.json({
       total: asins.length,
       imported: importedCount,
@@ -2978,57 +6028,96 @@ router.post('/bulk-import-asins', requireAuth, async (req, res) => {
       skippedDetails: skippedASINs,
       errors: insertErrors.length > 0 ? insertErrors : undefined
     });
-    
+
   } catch (error) {
     console.error('❌ Bulk import error:', error);
-    res.status(500).json({ 
-      error: error.message || 'Failed to bulk import ASINs' 
+    res.status(500).json({
+      error: error.message || 'Failed to bulk import ASINs'
     });
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-import-skus:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Quick SKU import (no Amazon data fetch)
+ *     description: Creates draft `TemplateListing` stubs for each SKU string without scraping Amazon. Useful for importing eBay SKU lists that need data filled later.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, skus]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               skus:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["GRW25B20Q", "GRW25K1RZ"]
+ *     responses:
+ *       200:
+ *         description: Import result summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:  { type: boolean }
+ *                 total:    { type: integer }
+ *                 imported: { type: integer }
+ *                 skipped:  { type: integer }
+ *                 results:  { type: array, items: { type: object } }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       404: { description: Template or Seller not found }
+ *       500: { description: Server error }
+ */
 // Bulk import SKUs (quick import with SKUs directly)
 router.post('/bulk-import-skus', requireAuth, async (req, res) => {
   try {
     const { templateId, sellerId, skus } = req.body;
-    
+
     // Validate required fields
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     if (!sellerId) {
       return res.status(400).json({ error: 'Seller ID is required' });
     }
-    
+
     if (!skus || !Array.isArray(skus) || skus.length === 0) {
       return res.status(400).json({ error: 'SKUs array is required and must not be empty' });
     }
-    
+
     console.log('📦 Bulk SKU import request:', { templateId, sellerId, skuCount: skus.length });
-    
+
     // Validate template (with seller overrides) and seller exist
     const [template, seller] = await Promise.all([
       getEffectiveTemplate(templateId, sellerId),
       Seller.findById(sellerId)
     ]);
-    
+
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
-    
+
     if (!seller) {
       return res.status(404).json({ error: 'Seller not found' });
     }
-    
+
     // Process SKUs
     const listingsToCreate = [];
     const skippedSKUs = [];
     const processedSKUs = new Set();
-    
+
     for (const sku of skus) {
       const cleanSKU = sku.trim();
-      
+
       // Basic SKU validation (not empty, reasonable length)
       if (!cleanSKU || cleanSKU.length === 0) {
         skippedSKUs.push({
@@ -3037,7 +6126,7 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
         });
         continue;
       }
-      
+
       if (cleanSKU.length > 100) {
         skippedSKUs.push({
           sku: cleanSKU,
@@ -3045,7 +6134,7 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
         });
         continue;
       }
-      
+
       // Check for duplicates in current batch
       if (processedSKUs.has(cleanSKU)) {
         skippedSKUs.push({
@@ -3054,9 +6143,9 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
         });
         continue;
       }
-      
+
       processedSKUs.add(cleanSKU);
-      
+
       // Create minimal listing object
       listingsToCreate.push({
         templateId,
@@ -3073,9 +6162,9 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
         createdBy: req.user.userId
       });
     }
-    
+
     console.log(`📊 Prepared ${listingsToCreate.length} listings, ${skippedSKUs.length} skipped (validation)`);
-    
+
     // Check for existing SKUs across ALL templates for this seller (cross-template validation)
     const crossTemplateSkus = await TemplateListing.find({
       sellerId,
@@ -3083,13 +6172,13 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
       customLabel: { $in: listingsToCreate.map(l => l.customLabel) },
       status: { $in: ['active', 'draft'] }
     }).select('customLabel templateId _asinReference');
-    
+
     const crossTemplateSKUMap = new Map(
       crossTemplateSkus.map(l => [l.customLabel, { templateId: l.templateId, asin: l._asinReference }])
     );
-    
+
     console.log(`🚫 Found ${crossTemplateSKUMap.size} SKUs in other templates`);
-    
+
     // Filter out SKUs that exist in other templates
     const skusNotInOtherTemplates = listingsToCreate.filter(listing => {
       if (crossTemplateSKUMap.has(listing.customLabel)) {
@@ -3104,7 +6193,7 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
       }
       return true;
     });
-    
+
     // Check for existing listings with same SKUs in active/draft status (current template)
     const existingBySKU = await TemplateListing.find({
       templateId,
@@ -3112,11 +6201,11 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
       customLabel: { $in: skusNotInOtherTemplates.map(l => l.customLabel) },
       status: { $in: ['active', 'draft'] }
     }).select('customLabel _asinReference');
-    
+
     const existingSKUs = new Set(existingBySKU.map(l => l.customLabel));
-    
+
     console.log(`🔍 Found ${existingSKUs.size} existing active/draft SKUs in database`);
-    
+
     // Check for inactive listings that can be reactivated
     const inactiveListings = await TemplateListing.find({
       templateId,
@@ -3124,15 +6213,15 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
       customLabel: { $in: skusNotInOtherTemplates.map(l => l.customLabel) },
       status: 'inactive'
     }).select('customLabel _asinReference');
-    
+
     const inactiveSKUMap = new Map(inactiveListings.map(l => [l.customLabel, l]));
-    
+
     console.log(`🔄 Found ${inactiveSKUMap.size} inactive SKUs that can be reactivated`);
-    
+
     // Separate listings into: reactivate, skip (already active), or create new
     const listingsToReactivate = [];
     const newListings = [];
-    
+
     for (const listing of skusNotInOtherTemplates) {
       if (existingSKUs.has(listing.customLabel)) {
         // Already exists as active/draft - skip
@@ -3152,9 +6241,9 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
         newListings.push(listing);
       }
     }
-    
+
     console.log(`✅ ${newListings.length} new listings to insert, ${listingsToReactivate.length} to reactivate`);
-    
+
     // Reactivate inactive listings
     let reactivatedCount = 0;
     if (listingsToReactivate.length > 0) {
@@ -3175,25 +6264,25 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
           }
         }
       }));
-      
+
       const reactivateResult = await TemplateListing.bulkWrite(reactivateOps);
       reactivatedCount = reactivateResult.modifiedCount || 0;
       console.log(`🔄 Reactivated ${reactivatedCount} inactive listings`);
     }
-    
+
     // Bulk insert new listings
     let importedCount = 0;
     let insertErrors = [];
-    
+
     if (newListings.length > 0) {
       try {
         const result = await TemplateListing.insertMany(newListings, {
           ordered: false, // Continue on error
           rawResult: true
         });
-        
+
         importedCount = result.insertedCount || newListings.length;
-        
+
         // Handle any write errors
         if (result.writeErrors && result.writeErrors.length > 0) {
           result.writeErrors.forEach(err => {
@@ -3215,7 +6304,7 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
         // Handle bulk insert errors
         if (error.code === 11000 && error.writeErrors) {
           importedCount = error.insertedDocs ? error.insertedDocs.length : 0;
-          
+
           error.writeErrors.forEach(err => {
             const listing = newListings[err.index];
             skippedSKUs.push({
@@ -3228,9 +6317,9 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
         }
       }
     }
-    
+
     console.log(`🎉 SKU Import complete: ${importedCount} new, ${reactivatedCount} reactivated, ${skippedSKUs.length} skipped`);
-    
+
     res.json({
       total: skus.length,
       imported: importedCount,
@@ -3239,51 +6328,94 @@ router.post('/bulk-import-skus', requireAuth, async (req, res) => {
       skippedDetails: skippedSKUs,
       errors: insertErrors.length > 0 ? insertErrors : undefined
     });
-    
+
   } catch (error) {
     console.error('❌ Bulk SKU import error:', error);
-    res.status(500).json({ 
-      error: error.message || 'Failed to bulk import SKUs' 
+    res.status(500).json({
+      error: error.message || 'Failed to bulk import SKUs'
     });
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-import:
+ *   post:
+ *     tags: [Template Listings – Bulk Ops]
+ *     summary: Raw listing import (CSV parse result array)
+ *     description: Inserts an array of pre-built listing objects directly using `insertMany`. Intended for the CSV import flow. Duplicate key errors return HTTP 207 with partial results.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, listings]
+ *             properties:
+ *               templateId: { type: string }
+ *               listings:
+ *                 type: array
+ *                 items: { $ref: '#/components/schemas/TemplateListing' }
+ *     responses:
+ *       200:
+ *         description: All listings imported successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:       { type: string, example: Listings imported successfully }
+ *                 importedCount: { type: integer, example: 25 }
+ *       207:
+ *         description: Import completed with some duplicates skipped
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:       { type: string }
+ *                 importedCount: { type: integer }
+ *                 errors:        { type: array, items: { type: object } }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk import from CSV
 router.post('/bulk-import', requireAuth, async (req, res) => {
   try {
     const { templateId, listings } = req.body;
-    
+
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     if (!listings || !Array.isArray(listings) || listings.length === 0) {
       return res.status(400).json({ error: 'Listings array is required' });
     }
-    
+
     // Add metadata to each listing
     const listingsToInsert = listings.map(listing => ({
       ...listing,
       templateId,
       createdBy: req.user.userId,
-      customFields: listing.customFields 
+      customFields: listing.customFields
         ? new Map(Object.entries(listing.customFields))
         : new Map()
     }));
-    
-    const result = await TemplateListing.insertMany(listingsToInsert, { 
+
+    const result = await TemplateListing.insertMany(listingsToInsert, {
       ordered: false // Continue on error
     });
-    
-    res.json({ 
+
+    res.json({
       message: 'Listings imported successfully',
-      importedCount: result.length 
+      importedCount: result.length
     });
   } catch (error) {
     if (error.code === 11000) {
       // Some duplicates were found
       const insertedCount = error.insertedDocs ? error.insertedDocs.length : 0;
-      return res.status(207).json({ 
+      return res.status(207).json({
         message: 'Import completed with some duplicates skipped',
         importedCount: insertedCount,
         errors: error.writeErrors || []
@@ -3294,12 +6426,54 @@ router.post('/bulk-import', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/export-csv/{templateId}:
+ *   get:
+ *     tags: [Template Listings – CSV]
+ *     summary: Export active listings as eBay-format CSV
+ *     description: |
+ *       Generates and downloads an eBay bulk-upload CSV file.
+ *
+ *       **Default behaviour** (no `listingIds`): exports all `active` listings that have not
+ *       yet been downloaded (i.e. `downloadBatchId` is null or `pendingRedownload` is true).
+ *
+ *       When `listingIds` is provided the status/batch filter is bypassed and only the
+ *       explicitly listed IDs are exported.
+ *
+ *       On success the matched listings are marked with a `downloadBatchId`, `downloadBatchNumber`,
+ *       and `downloadedAt` timestamp. A fire-and-forget seller-snapshot upsert also runs.
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: listingIds
+ *         schema: { type: string }
+ *         description: Comma-separated listing IDs to export (bypasses status filter)
+ *     responses:
+ *       200:
+ *         description: CSV file download
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       400: { description: No active listings to download }
+ *       401: { description: Unauthorized }
+ *       404: { description: Template not found }
+ *       500: { description: Server error }
+ */
 // Export listings as eBay CSV
 router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params;
     const { sellerId, listingIds } = req.query;
-    
+
     // When specific listingIds are provided, filter only by those IDs —
     // status, downloadBatchId, and sellerId filters are skipped since the
     // user has explicitly chosen which listings to export.
@@ -3318,45 +6492,45 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
         filter.sellerId = sellerId;
       }
     }
-    
+
     // Fetch effective template (includes seller overrides), seller, and filtered listings
     const [template, seller, listings] = await Promise.all([
       getEffectiveTemplate(templateId, sellerId),
       sellerId ? Seller.findById(sellerId).populate('user', 'username email') : null,
       TemplateListing.find(filter).select('+_asinReference').sort({ createdAt: -1 })
     ]);
-    
+
     console.log('📊 Export CSV - Seller info:', seller?.user?.username || seller?.user?.email || 'No seller');
     console.log('📊 Export CSV - Listings count:', listings.length);
     console.log('📥 Exporting active listings only (excluded inactive/draft)');
-    
+
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
-    
+
     if (listings.length === 0) {
       return res.status(400).json({ error: 'No active listings to download' });
     }
-    
+
     // Generate batch ID and get next batch number
     const crypto = await import('crypto');
     const batchId = crypto.randomUUID();
-    
+
     // Get next batch number for this template + seller combination
     const latestBatch = await TemplateListing.findOne({
       templateId,
       sellerId: sellerId || { $exists: true },
       downloadBatchNumber: { $ne: null }
     }).sort({ downloadBatchNumber: -1 });
-    
+
     const batchNumber = (latestBatch?.downloadBatchNumber || 0) + 1;
-    
+
     console.log('🔢 Batch number:', batchNumber);
     console.log('🆔 Batch ID:', batchId);
-    
+
     // Get custom Action field from template
     const actionField = template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
-    
+
     // Mark listings as downloaded (also clears pendingRedownload flag)
     const updateResult = await TemplateListing.updateMany(
       filter,
@@ -3368,10 +6542,10 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
         pendingRedownload: false
       }
     );
-    
+
     console.log('✅ Updated listings:', updateResult.modifiedCount);
     console.log('📝 Using Action field:', actionField);
-    
+
     // Build core headers (38 columns)
     const coreHeaders = [
       actionField,
@@ -3413,35 +6587,35 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
       'Return profile name',
       'Payment profile name'
     ];
-    
+
     // Add custom column headers
     const customHeaders = template.customColumns
       .sort((a, b) => a.order - b.order)
       .map(col => col.name);
-    
+
     const allHeaders = [...coreHeaders, ...customHeaders];
     const columnCount = allHeaders.length;
-    
+
     // Generate #INFO lines (must match column count exactly)
     const emptyRow = new Array(columnCount).fill('');
-    
+
     // INFO Line 1: Created timestamp + required field indicator
-    const infoLine1 = ['#INFO', `Created=${Date.now()}`, '', '', '', '', 
-                       ' Indicates missing required fields', '', '', '', '',
-                       ' Indicates missing field that will be required soon',
-                       ...new Array(columnCount - 12).fill('')];
-    
+    const infoLine1 = ['#INFO', `Created=${Date.now()}`, '', '', '', '',
+      ' Indicates missing required fields', '', '', '', '',
+      ' Indicates missing field that will be required soon',
+      ...new Array(columnCount - 12).fill('')];
+
     // INFO Line 2: Version + recommended field indicator  
-    const infoLine2 = ['#INFO', 'Version=1.0', '', 
-                       'Template=fx_category_template_EBAY_US', '', '',
-                       ' Indicates missing recommended field', '', '', '', '',
-                       ' Indicates field does not apply to this item/category',
-                       ...new Array(columnCount - 12).fill('')];
-    
+    const infoLine2 = ['#INFO', 'Version=1.0', '',
+      'Template=fx_category_template_EBAY_US', '', '',
+      ' Indicates missing recommended field', '', '', '', '',
+      ' Indicates field does not apply to this item/category',
+      ...new Array(columnCount - 12).fill('')];
+
     // INFO Line 3: All empty commas
     const infoLine3 = new Array(columnCount).fill('')
     infoLine3[0] = '#INFO';
-    
+
     // Map listings to CSV rows
     const dataRows = listings.map(listing => {
       // Add leading slash to category name if not present
@@ -3449,7 +6623,7 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
       if (categoryName && !categoryName.startsWith('/')) {
         categoryName = '/' + categoryName;
       }
-      
+
       const coreValues = [
         listing.action || 'Add',
         listing.customLabel || '',
@@ -3490,20 +6664,20 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
         listing.returnProfileName || '',
         listing.paymentProfileName || ''
       ];
-      
+
       // Get custom field values in order
       const customValues = template.customColumns
         .sort((a, b) => a.order - b.order)
         .map(col => listing.customFields.get(col.name) || '');
-      
+
       return [...coreValues, ...customValues];
     });
-    
+
     // Combine all rows
     const allRows = [infoLine1, infoLine2, infoLine3, allHeaders, ...dataRows];
-    
+
     // Convert to CSV string with proper escaping
-    const csvContent = allRows.map(row => 
+    const csvContent = allRows.map(row =>
       row.map(cell => {
         const value = String(cell || '');
         // Escape quotes and wrap in quotes if contains comma/quote/newline
@@ -3513,15 +6687,15 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
         return value;
       }).join(',')
     ).join('\n');
-    
+
     // Send as downloadable file with template, seller, batch number and date
     const dateStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
     const sellerName = seller?.user?.username || seller?.user?.email || 'seller';
     const templateName = template.name.replace(/\s+/g, '_');
     const filename = `${templateName}_${sellerName}_batch_${batchNumber}_${dateStr}.csv`;
-    
+
     console.log('📁 Generated filename:', filename);
-    
+
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(csvContent);
@@ -3594,13 +6768,52 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     } catch (snapshotErr) {
       console.error('Snapshot upsert failed (non-fatal):', snapshotErr.message);
     }
-    
+
   } catch (error) {
     console.error('Error exporting CSV:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/export-csv-direct/{templateId}:
+ *   post:
+ *     tags: [Template Listings – CSV]
+ *     summary: Export CSV from inline data (“List Directly” flow)
+ *     description: |
+ *       Generates an eBay CSV using the listing array supplied in the request body rather than
+ *       reading from the database. Edits made in the review modal are captured without needing
+ *       a prior save. Does NOT update `downloadBatchId` on DB records.
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [listings]
+ *             properties:
+ *               sellerId: { type: string }
+ *               listings:
+ *                 type: array
+ *                 items: { $ref: '#/components/schemas/TemplateListing' }
+ *     responses:
+ *       200:
+ *         description: CSV file download
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       400: { description: listings array is required or template not found }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Export CSV using inline listing data (no DB read for field values — used by Proof Read → List Directly)
 // Edits made in the review modal are carried into the CSV without being persisted to the database.
 router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
@@ -3836,33 +7049,65 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/download-history/{templateId}:
+ *   get:
+ *     tags: [Template Listings – CSV]
+ *     summary: Get download batch history for a template
+ *     description: Returns all distinct download batches for a template (and optional seller), ordered by batch number. Each batch includes the count of exported listings.
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Array of batch history objects
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   batchId:      { type: string }
+ *                   batchNumber:  { type: integer }
+ *                   downloadedAt: { type: string, format: date-time }
+ *                   listingCount: { type: integer }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Get download history for a template/seller
 router.get('/download-history/:templateId', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params;
     const { sellerId } = req.query;
-    
+
     console.log('📜 Download history request - Template:', templateId, 'Seller:', sellerId);
-    
+
     // Convert string IDs to ObjectIds for aggregation
     const mongoose = await import('mongoose');
     const filter = {
       templateId: new mongoose.default.Types.ObjectId(templateId),
       downloadBatchId: { $ne: null }
     };
-    
+
     if (sellerId) {
       filter.sellerId = new mongoose.default.Types.ObjectId(sellerId);
     }
-    
+
     console.log('🔍 Filter:', JSON.stringify(filter));
-    
+
     // First, let's check ALL listings for this template/seller
     const allListings = await TemplateListing.find({
       templateId,
       sellerId: sellerId || { $exists: true }
     }).select('downloadBatchId downloadBatchNumber downloadedAt customLabel');
-    
+
     console.log('📋 Total listings found:', allListings.length);
     console.log('📊 All listings batch info:', allListings.map(l => ({
       sku: l.customLabel,
@@ -3870,7 +7115,7 @@ router.get('/download-history/:templateId', requireAuth, async (req, res) => {
       batchNumber: l.downloadBatchNumber,
       downloadedAt: l.downloadedAt
     })));
-    
+
     // Get unique batches with their metadata
     const batches = await TemplateListing.aggregate([
       { $match: filter },
@@ -3884,9 +7129,9 @@ router.get('/download-history/:templateId', requireAuth, async (req, res) => {
       },
       { $sort: { batchNumber: 1 } }
     ]);
-    
+
     console.log('📊 Aggregation result:', batches);
-    
+
     // Format response
     const history = batches.map(batch => ({
       batchId: batch._id,
@@ -3894,9 +7139,9 @@ router.get('/download-history/:templateId', requireAuth, async (req, res) => {
       downloadedAt: batch.downloadedAt,
       listingCount: batch.listingCount
     }));
-    
+
     console.log('✅ Sending history:', history);
-    
+
     res.json(history);
   } catch (error) {
     console.error('Error fetching download history:', error);
@@ -3904,42 +7149,73 @@ router.get('/download-history/:templateId', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/re-download-batch/{templateId}/{batchId}:
+ *   get:
+ *     tags: [Template Listings – CSV]
+ *     summary: Re-download a previously exported batch as CSV
+ *     description: Regenerates the eBay CSV for a specific `downloadBatchId`. Uses the `downloadedActionField` stored at original download time so the Action column is preserved exactly.
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: CSV file download for the specified batch
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       401: { description: Unauthorized }
+ *       404: { description: Template not found or batch not found }
+ *       500: { description: Server error }
+ */
 // Re-download a specific batch
 router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, res) => {
   try {
     const { templateId, batchId } = req.params;
     const { sellerId } = req.query;
-    
+
     // Build filter for specific batch
-    const filter = { 
+    const filter = {
       templateId,
       downloadBatchId: batchId
     };
     if (sellerId) {
       filter.sellerId = sellerId;
     }
-    
+
     // Fetch effective template (includes seller overrides), seller, and batch listings
     const [template, seller, listings] = await Promise.all([
       getEffectiveTemplate(templateId, sellerId),
       sellerId ? Seller.findById(sellerId).populate('user', 'username email') : null,
       TemplateListing.find(filter).sort({ createdAt: -1 })
     ]);
-    
+
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
-    
+
     if (listings.length === 0) {
       return res.status(404).json({ error: 'Batch not found' });
     }
-    
+
     const batchNumber = listings[0].downloadBatchNumber;
-    
+
     // Use the action field that was saved at download time; fall back to current template value
     const actionField = listings[0].downloadedActionField || template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
     console.log('📝 Using Action field:', actionField);
-    
+
     // Build core headers (38 columns)
     const coreHeaders = [
       actionField,
@@ -3981,35 +7257,35 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
       'Return profile name',
       'Payment profile name'
     ];
-    
+
     // Add custom column headers
     const customHeaders = template.customColumns
       .sort((a, b) => a.order - b.order)
       .map(col => col.name);
-    
+
     const allHeaders = [...coreHeaders, ...customHeaders];
     const columnCount = allHeaders.length;
-    
+
     // Generate #INFO lines (must match column count exactly)
     const emptyRow = new Array(columnCount).fill('');
-    
+
     // INFO Line 1: Created timestamp + required field indicator
-    const infoLine1 = ['#INFO', `Created=${Date.now()}`, '', '', '', '', 
-                       ' Indicates missing required fields', '', '', '', '',
-                       ' Indicates missing field that will be required soon',
-                       ...new Array(columnCount - 12).fill('')];
-    
+    const infoLine1 = ['#INFO', `Created=${Date.now()}`, '', '', '', '',
+      ' Indicates missing required fields', '', '', '', '',
+      ' Indicates missing field that will be required soon',
+      ...new Array(columnCount - 12).fill('')];
+
     // INFO Line 2: Version + recommended field indicator  
-    const infoLine2 = ['#INFO', 'Version=1.0', '', 
-                       'Template=fx_category_template_EBAY_US', '', '',
-                       ' Indicates missing recommended field', '', '', '', '',
-                       ' Indicates field does not apply to this item/category',
-                       ...new Array(columnCount - 12).fill('')];
-    
+    const infoLine2 = ['#INFO', 'Version=1.0', '',
+      'Template=fx_category_template_EBAY_US', '', '',
+      ' Indicates missing recommended field', '', '', '', '',
+      ' Indicates field does not apply to this item/category',
+      ...new Array(columnCount - 12).fill('')];
+
     // INFO Line 3: All empty commas
     const infoLine3 = new Array(columnCount).fill('')
     infoLine3[0] = '#INFO';
-    
+
     // Map listings to CSV rows
     const dataRows = listings.map(listing => {
       // Add leading slash to category name if not present
@@ -4017,7 +7293,7 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
       if (categoryName && !categoryName.startsWith('/')) {
         categoryName = '/' + categoryName;
       }
-      
+
       const coreValues = [
         listing.action || 'Add',
         listing.customLabel || '',
@@ -4058,20 +7334,20 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
         listing.returnProfileName || '',
         listing.paymentProfileName || ''
       ];
-      
+
       // Get custom field values in order
       const customValues = template.customColumns
         .sort((a, b) => a.order - b.order)
         .map(col => listing.customFields.get(col.name) || '');
-      
+
       return [...coreValues, ...customValues];
     });
-    
+
     // Combine all rows
     const allRows = [infoLine1, infoLine2, infoLine3, allHeaders, ...dataRows];
-    
+
     // Convert to CSV string with proper escaping
-    const csvContent = allRows.map(row => 
+    const csvContent = allRows.map(row =>
       row.map(cell => {
         const value = String(cell || '');
         if (value.includes(',') || value.includes('"') || value.includes('\n')) {
@@ -4080,7 +7356,7 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
         return value;
       }).join(',')
     ).join('\n');
-    
+
     // Send as downloadable file with template, seller, batch number and date
     const dateStr = new Date().toISOString().split('T')[0];
     const sellerName = seller?.user?.username || seller?.user?.email || 'seller';
@@ -4089,30 +7365,75 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(csvContent);
-    
+
   } catch (error) {
     console.error('Error re-downloading batch:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/search-inactive-skus:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Search for inactive listings by SKU array
+ *     description: Looks up a list of SKUs and partitions them into `found` (inactive), `alreadyActive`, and `notFound` categories. Used before bulk-reactivate to preview what will happen.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, skus]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               skus:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["GRW25B20Q", "GRW25K1RZ"]
+ *     responses:
+ *       200:
+ *         description: Partitioned SKU lookup results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 found:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/TemplateListing' }
+ *                   description: Inactive listings that can be reactivated
+ *                 notFound:
+ *                   type: array
+ *                   items: { type: string }
+ *                   description: SKUs not found in the database
+ *                 alreadyActive:
+ *                   type: array
+ *                   items: { type: string }
+ *                   description: SKUs that are already active
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Search for inactive listings by SKU
 router.post('/search-inactive-skus', requireAuth, async (req, res) => {
   try {
     const { templateId, sellerId, skus } = req.body;
-    
+
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     if (!sellerId) {
       return res.status(400).json({ error: 'Seller ID is required' });
     }
-    
+
     if (!skus || !Array.isArray(skus) || skus.length === 0) {
       return res.status(400).json({ error: 'SKUs array is required' });
     }
-    
+
     // Find inactive listings
     const inactiveListings = await TemplateListing.find({
       templateId,
@@ -4120,7 +7441,7 @@ router.post('/search-inactive-skus', requireAuth, async (req, res) => {
       customLabel: { $in: skus },
       status: 'inactive'
     }).select('+_asinReference');
-    
+
     // Find already active listings
     const activeListings = await TemplateListing.find({
       templateId,
@@ -4128,13 +7449,13 @@ router.post('/search-inactive-skus', requireAuth, async (req, res) => {
       customLabel: { $in: skus },
       status: 'active'
     }).select('customLabel');
-    
+
     const foundSKUs = new Set(inactiveListings.map(l => l.customLabel));
     const activeSKUs = activeListings.map(l => l.customLabel);
     const notFoundSKUs = skus.filter(sku => !foundSKUs.has(sku) && !activeSKUs.includes(sku));
-    
+
     console.log(`🔍 Search inactive SKUs: ${inactiveListings.length} found, ${activeSKUs.length} already active, ${notFoundSKUs.length} not found`);
-    
+
     res.json({
       found: inactiveListings,
       notFound: notFoundSKUs,
@@ -4146,15 +7467,54 @@ router.post('/search-inactive-skus', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-reactivate:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Reactivate inactive listings by ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [listingIds]
+ *             properties:
+ *               listingIds:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["665abc...", "665def..."]
+ *     responses:
+ *       200:
+ *         description: Reactivation summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:     { type: boolean }
+ *                 reactivated: { type: integer, example: 5 }
+ *                 details:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       customLabel: { type: string }
+ *                       title:       { type: string }
+ *       400: { description: listingIds array is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk reactivate inactive listings
 router.post('/bulk-reactivate', requireAuth, async (req, res) => {
   try {
     const { listingIds } = req.body;
-    
+
     if (!listingIds || !Array.isArray(listingIds) || listingIds.length === 0) {
       return res.status(400).json({ error: 'listingIds array is required' });
     }
-    
+
     // Update status to active
     const result = await TemplateListing.updateMany(
       {
@@ -4168,15 +7528,15 @@ router.post('/bulk-reactivate', requireAuth, async (req, res) => {
         }
       }
     );
-    
+
     // Get updated listings for response
     const reactivatedListings = await TemplateListing.find({
       _id: { $in: listingIds },
       status: 'active'
     }).select('customLabel title _asinReference');
-    
+
     console.log(`✅ Reactivated ${result.modifiedCount} listings`);
-    
+
     res.json({
       success: true,
       reactivated: result.modifiedCount,
@@ -4188,23 +7548,69 @@ router.post('/bulk-reactivate', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /template-listings/bulk-deactivate:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Deactivate active listings by SKU array
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [templateId, sellerId, skus]
+ *             properties:
+ *               templateId: { type: string }
+ *               sellerId:   { type: string }
+ *               skus:
+ *                 type: array
+ *                 items: { type: string }
+ *                 example: ["GRW25B20Q", "GRW25K1RZ"]
+ *     responses:
+ *       200:
+ *         description: Deactivation summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 summary:
+ *                   type: object
+ *                   properties:
+ *                     total:           { type: integer }
+ *                     deactivated:     { type: integer }
+ *                     notFound:        { type: integer }
+ *                     alreadyInactive: { type: integer }
+ *                 details:
+ *                   type: object
+ *                   properties:
+ *                     deactivated:     { type: array, items: { type: object } }
+ *                     notFound:        { type: array, items: { type: string } }
+ *                     alreadyInactive: { type: array, items: { type: string } }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
+ */
 // Bulk deactivate active listings
 router.post('/bulk-deactivate', requireAuth, async (req, res) => {
   try {
     const { templateId, sellerId, skus } = req.body;
-    
+
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
     }
-    
+
     if (!sellerId) {
       return res.status(400).json({ error: 'Seller ID is required' });
     }
-    
+
     if (!skus || !Array.isArray(skus) || skus.length === 0) {
       return res.status(400).json({ error: 'SKUs array is required' });
     }
-    
+
     // Find active listings
     const activeListings = await TemplateListing.find({
       templateId,
@@ -4212,7 +7618,7 @@ router.post('/bulk-deactivate', requireAuth, async (req, res) => {
       customLabel: { $in: skus },
       status: 'active'
     }).select('customLabel title _asinReference');
-    
+
     // Find already inactive
     const inactiveListings = await TemplateListing.find({
       templateId,
@@ -4220,13 +7626,13 @@ router.post('/bulk-deactivate', requireAuth, async (req, res) => {
       customLabel: { $in: skus },
       status: 'inactive'
     }).select('customLabel');
-    
+
     const foundSKUs = new Set(activeListings.map(l => l.customLabel));
     const alreadyInactiveSKUs = inactiveListings.map(l => l.customLabel);
-    const notFoundSKUs = skus.filter(sku => 
+    const notFoundSKUs = skus.filter(sku =>
       !foundSKUs.has(sku) && !alreadyInactiveSKUs.includes(sku)
     );
-    
+
     // Deactivate
     const result = await TemplateListing.updateMany(
       {
@@ -4242,9 +7648,9 @@ router.post('/bulk-deactivate', requireAuth, async (req, res) => {
         }
       }
     );
-    
+
     console.log(`⏸️ Deactivated ${result.modifiedCount} listings`);
-    
+
     res.json({
       success: true,
       summary: {
@@ -4265,23 +7671,874 @@ router.post('/bulk-deactivate', requireAuth, async (req, res) => {
   }
 });
 
+const IST_OFFSET_MINUTES = 330;
+
+const parseIstDateBoundary = (dateValue, isEndOfDay = false) => {
+  const match = String(dateValue || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return new Date(dateValue);
+
+  const [, year, month, day] = match.map(Number);
+  const utcTime = Date.UTC(
+    year,
+    month - 1,
+    day,
+    isEndOfDay ? 23 : 0,
+    isEndOfDay ? 59 : 0,
+    isEndOfDay ? 59 : 0,
+    isEndOfDay ? 999 : 0
+  );
+  return new Date(utcTime - IST_OFFSET_MINUTES * 60 * 1000);
+};
+
+const parseIstDateTime = (dateTimeValue) => {
+  const match = String(dateTimeValue || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return new Date(dateTimeValue);
+
+  const [, year, month, day, hour, minute, second = '0'] = match;
+  const utcTime = Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+    0
+  );
+  return new Date(utcTime - IST_OFFSET_MINUTES * 60 * 1000);
+};
+
+router.get('/api/openai-usage-summary', requireAuth, async (req, res) => {
+  try {
+    const {
+      startDate,
+      endDate,
+      startDateTime,
+      endDateTime,
+      userId,
+      sellerId,
+      templateId,
+      ipAddress,
+      limit = 500
+    } = req.query;
+
+    const match = { service: 'OpenAI' };
+    const optionMatch = { service: 'OpenAI' };
+    let listingRunDateRange = null;
+
+    if (startDateTime || endDateTime) {
+      match.timestamp = {};
+      optionMatch.timestamp = optionMatch.timestamp || {};
+      listingRunDateRange = {};
+      if (startDateTime) {
+        const start = parseIstDateTime(startDateTime);
+        match.timestamp.$gte = start;
+        optionMatch.timestamp.$gte = start;
+        listingRunDateRange.$gte = start;
+      }
+      if (endDateTime) {
+        const end = parseIstDateTime(endDateTime);
+        match.timestamp.$lte = end;
+        optionMatch.timestamp.$lte = end;
+        listingRunDateRange.$lte = end;
+      }
+    } else if (startDate || endDate) {
+      match.timestamp = {};
+      listingRunDateRange = {};
+      if (startDate) {
+        const start = parseIstDateBoundary(startDate);
+        match.timestamp.$gte = start;
+        optionMatch.timestamp = optionMatch.timestamp || {};
+        optionMatch.timestamp.$gte = start;
+        listingRunDateRange.$gte = start;
+      }
+      if (endDate) {
+        const end = parseIstDateBoundary(endDate, true);
+        match.timestamp.$lte = end;
+        optionMatch.timestamp = optionMatch.timestamp || {};
+        optionMatch.timestamp.$lte = end;
+        listingRunDateRange.$lte = end;
+      }
+    }
+
+    if (userId && userId !== 'all' && mongoose.Types.ObjectId.isValid(userId)) {
+      match.userId = new mongoose.Types.ObjectId(userId);
+    }
+    if (sellerId && sellerId !== 'all' && mongoose.Types.ObjectId.isValid(sellerId)) {
+      match.sellerId = new mongoose.Types.ObjectId(sellerId);
+    }
+    if (templateId && templateId !== 'all' && mongoose.Types.ObjectId.isValid(templateId)) {
+      match.templateId = new mongoose.Types.ObjectId(templateId);
+    }
+    if (ipAddress && ipAddress !== 'all') {
+      match.ipAddress = ipAddress;
+    }
+
+    const maxRows = Math.min(parseInt(limit, 10) || 500, 2000);
+
+    const [rows, fieldBreakdown, fieldAsinBreakdown, asinCallBreakdown, ipBreakdown, totalsAgg, filterOptionsAgg] = await Promise.all([
+      ApiUsage.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: {
+              userId: '$userId',
+              sellerId: '$sellerId',
+              templateId: '$templateId',
+              ipAddress: '$ipAddress',
+              ipSource: '$ipSource',
+              aiRunId: '$aiRunId'
+            },
+            aiCalls: { $sum: 1 },
+            successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
+            failedCalls: { $sum: { $cond: ['$success', 0, 1] } },
+            successfulAsins: {
+              $addToSet: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  '$asin',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            successfulAsinRuns: {
+              $push: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  {
+                    asin: '$asin',
+                    fieldName: '$fieldName',
+                    timestamp: '$timestamp'
+                  },
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+            avgResponseTime: { $avg: '$responseTime' },
+            userAgents: {
+              $addToSet: {
+                $cond: [
+                  { $and: [{ $ne: ['$userAgent', null] }, { $ne: ['$userAgent', ''] }] },
+                  '$userAgent',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            firstUsedAt: { $min: '$timestamp' },
+            aiRunStartedAt: { $min: { $ifNull: ['$aiRunStartedAt', '$timestamp'] } },
+            lastUsedAt: { $max: '$timestamp' }
+          }
+        },
+        { $sort: { lastUsedAt: -1, totalTokens: -1, aiCalls: -1 } },
+        { $limit: maxRows },
+        {
+          $lookup: {
+            from: 'users',
+            localField: '_id.userId',
+            foreignField: '_id',
+            as: 'user'
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: '_id.sellerId',
+            foreignField: '_id',
+            as: 'seller'
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'seller.user',
+            foreignField: '_id',
+            as: 'sellerUser'
+          }
+        },
+        {
+          $lookup: {
+            from: 'listingtemplates',
+            localField: '_id.templateId',
+            foreignField: '_id',
+            as: 'template'
+          }
+        },
+        {
+          $lookup: {
+            from: 'ailistingruns',
+            localField: '_id.aiRunId',
+            foreignField: 'aiRunId',
+            as: 'listingRun'
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            userId: '$_id.userId',
+            sellerId: '$_id.sellerId',
+            templateId: '$_id.templateId',
+            aiRunId: { $ifNull: ['$_id.aiRunId', 'legacy-usage'] },
+            aiRunStartedAt: 1,
+            ipAddress: { $ifNull: ['$_id.ipAddress', 'Unknown IP'] },
+            ipSource: { $ifNull: ['$_id.ipSource', 'unknown'] },
+            username: { $ifNull: [{ $arrayElemAt: ['$user.username', 0] }, 'Unknown user'] },
+            userEmail: { $arrayElemAt: ['$user.email', 0] },
+            userRole: { $arrayElemAt: ['$user.role', 0] },
+            sellerName: { $ifNull: [{ $arrayElemAt: ['$sellerUser.username', 0] }, 'Unknown seller'] },
+            sellerEmail: { $arrayElemAt: ['$sellerUser.email', 0] },
+            templateName: { $ifNull: [{ $arrayElemAt: ['$template.name', 0] }, 'Unknown template'] },
+            aiCalls: 1,
+            successfulCalls: 1,
+            failedCalls: 1,
+            savedFromReviewCount: {
+              $ifNull: [{ $arrayElemAt: ['$listingRun.savedFromReviewCount', 0] }, 0]
+            },
+            updateableDuplicateCount: {
+              $ifNull: [{ $arrayElemAt: ['$listingRun.updateableDuplicateCount', 0] }, 0]
+            },
+            dismissedFromReviewCount: {
+              $ifNull: [{ $arrayElemAt: ['$listingRun.dismissedFromReviewCount', 0] }, 0]
+            },
+            dismissedNewAsinCount: {
+              $ifNull: [{ $arrayElemAt: ['$listingRun.dismissedNewAsinCount', 0] }, 0]
+            },
+            dismissedUpdateableDuplicateCount: {
+              $ifNull: [{ $arrayElemAt: ['$listingRun.dismissedUpdateableDuplicateCount', 0] }, 0]
+            },
+            reviewSaveAttempts: {
+              $ifNull: [{ $arrayElemAt: ['$listingRun.reviewSaveAttempts', 0] }, 0]
+            },
+            lastSavedFromReviewAt: { $arrayElemAt: ['$listingRun.lastSavedFromReviewAt', 0] },
+            successfulAsinCount: { $size: '$successfulAsins' },
+            successfulAsinRunCount: { $size: '$successfulAsinRuns' },
+            successfulAsinRuns: 1,
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1,
+            avgResponseTime: { $round: ['$avgResponseTime', 1] },
+            userAgents: 1,
+            firstUsedAt: 1,
+            lastUsedAt: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        { $match: match },
+        {
+          $addFields: {
+            normalizedFieldName: {
+              $cond: [
+                { $or: [{ $eq: ['$fieldName', null] }, { $eq: ['$fieldName', ''] }] },
+                'Unknown field',
+                '$fieldName'
+              ]
+            }
+          }
+        },
+        {
+          $group: {
+            _id: '$normalizedFieldName',
+            aiCalls: { $sum: 1 },
+            successfulAsins: {
+              $addToSet: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  '$asin',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } }
+          }
+        },
+        { $sort: { totalTokens: -1 } },
+        {
+          $project: {
+            _id: 0,
+            fieldName: { $ifNull: ['$_id', 'unknown'] },
+            aiCalls: 1,
+            successfulAsinCount: { $size: '$successfulAsins' },
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        { $match: match },
+        {
+          $addFields: {
+            normalizedFieldName: {
+              $cond: [
+                { $or: [{ $eq: ['$fieldName', null] }, { $eq: ['$fieldName', ''] }] },
+                'Unknown field',
+                '$fieldName'
+              ]
+            },
+            normalizedAsin: {
+              $cond: [
+                { $or: [{ $eq: ['$asin', null] }, { $eq: ['$asin', ''] }] },
+                'Unknown ASIN',
+                '$asin'
+              ]
+            }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              fieldName: '$normalizedFieldName',
+              asin: '$normalizedAsin'
+            },
+            aiCalls: { $sum: 1 },
+            successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
+            failedCalls: { $sum: { $cond: ['$success', 0, 1] } },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+            firstUsedAt: { $min: '$timestamp' },
+            lastUsedAt: { $max: '$timestamp' }
+          }
+        },
+        { $match: { aiCalls: { $gt: 1 } } },
+        { $sort: { aiCalls: -1, totalTokens: -1 } },
+        { $limit: 500 },
+        {
+          $project: {
+            _id: 0,
+            fieldName: '$_id.fieldName',
+            asin: '$_id.asin',
+            aiCalls: 1,
+            successfulCalls: 1,
+            failedCalls: 1,
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1,
+            firstUsedAt: 1,
+            lastUsedAt: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: {
+              sellerId: '$sellerId',
+              templateId: '$templateId',
+              asin: '$asin'
+            },
+            aiCalls: { $sum: 1 },
+            successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
+            failedCalls: { $sum: { $cond: ['$success', 0, 1] } },
+            fields: {
+              $addToSet: {
+                $cond: [
+                  { $and: [{ $ne: ['$fieldName', null] }, { $ne: ['$fieldName', ''] }] },
+                  '$fieldName',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+            firstUsedAt: { $min: '$timestamp' },
+            lastUsedAt: { $max: '$timestamp' }
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: '_id.sellerId',
+            foreignField: '_id',
+            as: 'seller'
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'seller.user',
+            foreignField: '_id',
+            as: 'sellerUser'
+          }
+        },
+        {
+          $lookup: {
+            from: 'listingtemplates',
+            localField: '_id.templateId',
+            foreignField: '_id',
+            as: 'template'
+          }
+        },
+        { $sort: { aiCalls: -1, totalTokens: -1 } },
+        { $limit: 1000 },
+        {
+          $project: {
+            _id: 0,
+            sellerId: '$_id.sellerId',
+            templateId: '$_id.templateId',
+            asin: { $ifNull: ['$_id.asin', 'Unknown ASIN'] },
+            sellerName: { $ifNull: [{ $arrayElemAt: ['$sellerUser.username', 0] }, 'Unknown seller'] },
+            templateName: { $ifNull: [{ $arrayElemAt: ['$template.name', 0] }, 'Unknown template'] },
+            aiCalls: 1,
+            successfulCalls: 1,
+            failedCalls: 1,
+            fields: 1,
+            fieldCount: { $size: '$fields' },
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1,
+            firstUsedAt: 1,
+            lastUsedAt: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        {
+          $match: {
+            ...match,
+            ipAddress: match.ipAddress || { $nin: [null, ''] },
+            ipSource: { $nin: [null, ''] }
+          }
+        },
+        {
+          $group: {
+            _id: '$ipAddress',
+            users: {
+              $addToSet: {
+                $cond: [{ $ne: ['$userId', null] }, '$userId', '$$REMOVE']
+              }
+            },
+            sellers: {
+              $addToSet: {
+                $cond: [{ $ne: ['$sellerId', null] }, '$sellerId', '$$REMOVE']
+              }
+            },
+            templates: {
+              $addToSet: {
+                $cond: [{ $ne: ['$templateId', null] }, '$templateId', '$$REMOVE']
+              }
+            },
+            aiCalls: { $sum: 1 },
+            successfulAsins: {
+              $addToSet: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  '$asin',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+            firstUsedAt: { $min: '$timestamp' },
+            lastUsedAt: { $max: '$timestamp' },
+            ipSources: {
+              $addToSet: {
+                $cond: [
+                  { $and: [{ $ne: ['$ipSource', null] }, { $ne: ['$ipSource', ''] }] },
+                  '$ipSource',
+                  '$$REMOVE'
+                ]
+              }
+            }
+          }
+        },
+        { $sort: { lastUsedAt: -1, totalTokens: -1, aiCalls: -1 } },
+        {
+          $project: {
+            _id: 0,
+            ipAddress: { $ifNull: ['$_id', 'Unknown IP'] },
+            userCount: { $size: '$users' },
+            sellerCount: { $size: '$sellers' },
+            templateCount: { $size: '$templates' },
+            successfulAsinCount: { $size: '$successfulAsins' },
+            aiCalls: 1,
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1,
+            firstUsedAt: 1,
+            lastUsedAt: 1,
+            ipSources: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: null,
+            aiCalls: { $sum: 1 },
+            successfulCalls: { $sum: { $cond: ['$success', 1, 0] } },
+            failedCalls: { $sum: { $cond: ['$success', 0, 1] } },
+            uniqueIps: {
+              $addToSet: {
+                $cond: [
+                  { $and: [{ $ne: ['$ipAddress', null] }, { $ne: ['$ipAddress', ''] }, { $ne: ['$ipSource', null] }, { $ne: ['$ipSource', ''] }] },
+                  '$ipAddress',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            successfulAsins: {
+              $addToSet: {
+                $cond: [
+                  { $and: ['$success', { $ne: ['$asin', null] }, { $ne: ['$asin', ''] }] },
+                  '$asin',
+                  '$$REMOVE'
+                ]
+              }
+            },
+            totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            aiCalls: 1,
+            successfulCalls: 1,
+            failedCalls: 1,
+            uniqueIpCount: { $size: '$uniqueIps' },
+            successfulAsinCount: { $size: '$successfulAsins' },
+            totalTokens: 1,
+            promptTokens: 1,
+            completionTokens: 1
+          }
+        }
+      ]),
+      ApiUsage.aggregate([
+        { $match: optionMatch },
+        {
+          $facet: {
+            users: [
+              { $match: { userId: { $ne: null } } },
+              { $group: { _id: '$userId', count: { $sum: 1 }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
+              {
+                $project: {
+                  _id: 0,
+                  id: { $toString: '$_id' },
+                  label: { $ifNull: [{ $arrayElemAt: ['$user.username', 0] }, 'Unknown user'] },
+                  secondary: { $ifNull: [{ $arrayElemAt: ['$user.email', 0] }, { $arrayElemAt: ['$user.role', 0] }] },
+                  count: 1,
+                  lastUsedAt: 1
+                }
+              }
+            ],
+            sellers: [
+              { $match: { sellerId: { $ne: null } } },
+              { $group: { _id: '$sellerId', count: { $sum: 1 }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              { $lookup: { from: 'sellers', localField: '_id', foreignField: '_id', as: 'seller' } },
+              { $lookup: { from: 'users', localField: 'seller.user', foreignField: '_id', as: 'sellerUser' } },
+              {
+                $project: {
+                  _id: 0,
+                  id: { $toString: '$_id' },
+                  label: { $ifNull: [{ $arrayElemAt: ['$sellerUser.username', 0] }, 'Unknown seller'] },
+                  secondary: { $arrayElemAt: ['$sellerUser.email', 0] },
+                  count: 1,
+                  lastUsedAt: 1
+                }
+              }
+            ],
+            templates: [
+              { $match: { templateId: { $ne: null } } },
+              { $group: { _id: '$templateId', count: { $sum: 1 }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              { $lookup: { from: 'listingtemplates', localField: '_id', foreignField: '_id', as: 'template' } },
+              {
+                $project: {
+                  _id: 0,
+                  id: { $toString: '$_id' },
+                  label: { $ifNull: [{ $arrayElemAt: ['$template.name', 0] }, 'Unknown template'] },
+                  count: 1,
+                  lastUsedAt: 1
+                }
+              }
+            ],
+            ips: [
+              { $match: { ipAddress: { $nin: [null, ''] }, ipSource: { $nin: [null, ''] } } },
+              { $group: { _id: '$ipAddress', count: { $sum: 1 }, userIds: { $addToSet: '$userId' }, lastUsedAt: { $max: '$timestamp' } } },
+              { $sort: { count: -1 } },
+              { $limit: 500 },
+              {
+                $project: {
+                  _id: 0,
+                  id: '$_id',
+                  label: '$_id',
+                  count: 1,
+                  userCount: { $size: '$userIds' },
+                  lastUsedAt: 1
+                }
+              }
+            ]
+          }
+        }
+      ])
+    ]);
+
+    const filterOptions = filterOptionsAgg[0] || { users: [], sellers: [], templates: [], ips: [] };
+    const rowsWithUsage = rows;
+    let zeroCallRunRows = [];
+
+    if (!ipAddress || ipAddress === 'all') {
+      const runIdsWithUsage = rowsWithUsage
+        .map(row => row.aiRunId)
+        .filter(runId => runId && runId !== 'legacy-usage');
+      const listingRunMatch = {};
+
+      if (runIdsWithUsage.length > 0) {
+        listingRunMatch.aiRunId = { $nin: runIdsWithUsage };
+      }
+      if (listingRunDateRange) {
+        listingRunMatch.lastSavedFromReviewAt = listingRunDateRange;
+      }
+      if (userId && userId !== 'all' && mongoose.Types.ObjectId.isValid(userId)) {
+        listingRunMatch.userId = new mongoose.Types.ObjectId(userId);
+      }
+      if (sellerId && sellerId !== 'all' && mongoose.Types.ObjectId.isValid(sellerId)) {
+        listingRunMatch.sellerId = new mongoose.Types.ObjectId(sellerId);
+      }
+      if (templateId && templateId !== 'all' && mongoose.Types.ObjectId.isValid(templateId)) {
+        listingRunMatch.templateId = new mongoose.Types.ObjectId(templateId);
+      }
+
+      zeroCallRunRows = await AiListingRun.aggregate([
+        { $match: listingRunMatch },
+        { $sort: { lastSavedFromReviewAt: -1, updatedAt: -1 } },
+        { $limit: maxRows },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'userId',
+            foreignField: '_id',
+            as: 'user'
+          }
+        },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: 'sellerId',
+            foreignField: '_id',
+            as: 'seller'
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'seller.user',
+            foreignField: '_id',
+            as: 'sellerUser'
+          }
+        },
+        {
+          $lookup: {
+            from: 'listingtemplates',
+            localField: 'templateId',
+            foreignField: '_id',
+            as: 'template'
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            userId: 1,
+            sellerId: 1,
+            templateId: 1,
+            aiRunId: 1,
+            aiRunStartedAt: { $ifNull: ['$createdAt', '$lastSavedFromReviewAt'] },
+            ipAddress: 'No OpenAI calls',
+            ipSource: 'duplicate-skip',
+            username: { $ifNull: [{ $arrayElemAt: ['$user.username', 0] }, 'Unknown user'] },
+            userEmail: { $arrayElemAt: ['$user.email', 0] },
+            userRole: { $arrayElemAt: ['$user.role', 0] },
+            sellerName: { $ifNull: [{ $arrayElemAt: ['$sellerUser.username', 0] }, 'Unknown seller'] },
+            sellerEmail: { $arrayElemAt: ['$sellerUser.email', 0] },
+            templateName: { $ifNull: [{ $arrayElemAt: ['$template.name', 0] }, 'Unknown template'] },
+            aiCalls: { $literal: 0 },
+            successfulCalls: { $literal: 0 },
+            failedCalls: { $literal: 0 },
+            savedFromReviewCount: { $ifNull: ['$savedFromReviewCount', 0] },
+            updateableDuplicateCount: { $ifNull: ['$updateableDuplicateCount', 0] },
+            dismissedFromReviewCount: { $ifNull: ['$dismissedFromReviewCount', 0] },
+            dismissedNewAsinCount: { $ifNull: ['$dismissedNewAsinCount', 0] },
+            dismissedUpdateableDuplicateCount: { $ifNull: ['$dismissedUpdateableDuplicateCount', 0] },
+            reviewSaveAttempts: { $ifNull: ['$reviewSaveAttempts', 0] },
+            lastSavedFromReviewAt: 1,
+            successfulAsinCount: { $literal: 0 },
+            successfulAsinRunCount: { $literal: 0 },
+            successfulAsinRuns: { $literal: [] },
+            totalTokens: { $literal: 0 },
+            promptTokens: { $literal: 0 },
+            completionTokens: { $literal: 0 },
+            avgResponseTime: { $literal: null },
+            userAgents: { $literal: [] },
+            firstUsedAt: '$lastSavedFromReviewAt',
+            lastUsedAt: '$lastSavedFromReviewAt'
+          }
+        }
+      ]);
+    }
+
+    const combinedRows = [...rowsWithUsage, ...zeroCallRunRows]
+      .sort((a, b) => new Date(b.lastUsedAt || b.lastSavedFromReviewAt || 0) - new Date(a.lastUsedAt || a.lastSavedFromReviewAt || 0))
+      .slice(0, maxRows);
+
+    const expectedAiFieldCountByPair = new Map();
+    const pairInputs = [
+      ...combinedRows.map((row) => ({ sellerId: row.sellerId, templateId: row.templateId })),
+      ...asinCallBreakdown.map((row) => ({ sellerId: row.sellerId, templateId: row.templateId }))
+    ];
+
+    await Promise.all(pairInputs.map(async ({ sellerId: pairSellerId, templateId: pairTemplateId }) => {
+      if (!pairSellerId || !pairTemplateId) return;
+      const key = `${pairSellerId}-${pairTemplateId}`;
+      if (expectedAiFieldCountByPair.has(key)) return;
+      expectedAiFieldCountByPair.set(key, 0);
+      try {
+        const effectiveTemplate = await getEffectiveTemplate(pairTemplateId, pairSellerId);
+        const expectedAiFields = (effectiveTemplate.asinAutomation?.fieldConfigs || [])
+          .filter((config) => config.enabled && config.source === 'ai')
+          .map((config) => config.ebayField);
+        expectedAiFieldCountByPair.set(key, expectedAiFields.length);
+      } catch (err) {
+        console.warn('[OpenAI Usage Summary] Failed to resolve expected AI fields:', err.message);
+      }
+    }));
+
+    const savedCounts = await TemplateListing.aggregate([
+      { $match: { aiRunId: { $ne: null } } },
+      {
+        $group: {
+          _id: '$aiRunId',
+          savedCount: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const savedCountsMap = new Map();
+    savedCounts.forEach(item => {
+      if (item._id) {
+        savedCountsMap.set(item._id, item.savedCount);
+      }
+    });
+
+    const rowsWithExpected = combinedRows.map((row) => {
+      const expectedAiFieldCount = expectedAiFieldCountByPair.get(`${row.sellerId}-${row.templateId}`) || 0;
+      const savedCount = Math.max(
+        Number(savedCountsMap.get(row.aiRunId) || 0),
+        Number(row.savedFromReviewCount || 0)
+      );
+      return {
+        ...row,
+        expectedAiFieldCount,
+        expectedAiCalls: expectedAiFieldCount * (row.successfulAsinCount || 0),
+        overExpectedCalls: Math.max(0, (row.aiCalls || 0) - (expectedAiFieldCount * (row.successfulAsinCount || 0))),
+        savedCount
+      };
+    });
+
+    const asinCallBreakdownWithExpected = asinCallBreakdown.map((row) => {
+      const expectedAiFieldCount = expectedAiFieldCountByPair.get(`${row.sellerId}-${row.templateId}`) || 0;
+      return {
+        ...row,
+        expectedAiFieldCount,
+        overExpectedCalls: Math.max(0, (row.aiCalls || 0) - expectedAiFieldCount)
+      };
+    }).filter((row) => row.overExpectedCalls > 0);
+    const totals = totalsAgg[0] || {
+      aiCalls: 0,
+      successfulCalls: 0,
+      failedCalls: 0,
+      uniqueIpCount: 0,
+      successfulAsinCount: 0,
+      totalTokens: 0,
+      promptTokens: 0,
+      completionTokens: 0
+    };
+    totals.savedFromReviewCount = rowsWithExpected.reduce(
+      (sum, row) => sum + Number(row.savedFromReviewCount || 0),
+      0
+    );
+
+    res.json({
+      success: true,
+      rows: rowsWithExpected,
+      fieldBreakdown,
+      fieldAsinBreakdown,
+      asinCallBreakdown: asinCallBreakdownWithExpected,
+      ipBreakdown,
+      filterOptions,
+      totals
+    });
+  } catch (error) {
+    console.error('[OpenAI Usage Summary] Error:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch OpenAI usage summary' });
+  }
+});
+
 /**
- * GET /api/seller/:sellerId/template-listings/api-usage-stats
- * Get API usage statistics (ScraperAPI, PAAPI, Gemini)
+ * @swagger
+ * /template-listings/api/seller/{sellerId}/template-listings/api-usage-stats:
+ *   get:
+ *     tags: [Template Listings – Admin]
+ *     summary: API usage statistics (ScraperAPI / PAAPI / Gemini)
+ *     description: Returns monthly usage totals per service. Optionally filter by service name, year, and month.
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: service
+ *         schema: { type: string }
+ *         description: scraperapi | paapi | gemini
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer, example: 2024 }
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, example: 6 }
+ *     responses:
+ *       200:
+ *         description: Usage statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 stats:   { type: object }
+ *                 message: { type: string }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.get('/api/seller/:sellerId/template-listings/api-usage-stats', requireAuth, async (req, res) => {
   try {
     const { sellerId } = req.params;
     const { service, year, month } = req.query;
-    
+
     // Build query
     const query = {};
     if (service) query.service = service;
     if (year) query.year = parseInt(year);
     if (month) query.month = parseInt(month);
-    
+
     const stats = await getUsageStats(query);
-    
+
     res.json({
       success: true,
       stats,
@@ -4297,27 +8554,61 @@ router.get('/api/seller/:sellerId/template-listings/api-usage-stats', requireAut
 });
 
 /**
- * GET /api/seller/:sellerId/template-listings/api-usage-field-stats
- * Get field extraction statistics for a specific service
+ * @swagger
+ * /template-listings/api/seller/{sellerId}/template-listings/api-usage-field-stats:
+ *   get:
+ *     tags: [Template Listings – Admin]
+ *     summary: Field extraction statistics for a service
+ *     description: Returns per-field extraction success/failure counts for the given service and period.
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: service
+ *         required: true
+ *         schema: { type: string }
+ *         description: scraperapi | paapi | gemini
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Field extraction statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 stats:   { type: object }
+ *                 message: { type: string }
+ *       400: { description: service parameter is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.get('/api/seller/:sellerId/template-listings/api-usage-field-stats', requireAuth, async (req, res) => {
   try {
     const { sellerId } = req.params;
     const { service, year, month } = req.query;
-    
+
     if (!service) {
       return res.status(400).json({
         success: false,
         message: 'Service parameter is required'
       });
     }
-    
+
     const query = { service };
     if (year) query.year = parseInt(year);
     if (month) query.month = parseInt(month);
-    
+
     const stats = await getFieldExtractionStats(query);
-    
+
     res.json({
       success: true,
       stats,
@@ -4333,23 +8624,53 @@ router.get('/api/seller/:sellerId/template-listings/api-usage-field-stats', requ
 });
 
 /**
- * GET /api/seller/:sellerId/template-listings/api-usage-errors
- * Get recent API errors for debugging
+ * @swagger
+ * /template-listings/api/seller/{sellerId}/template-listings/api-usage-errors:
+ *   get:
+ *     tags: [Template Listings – Admin]
+ *     summary: Recent API errors for a service
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: service
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *     responses:
+ *       200:
+ *         description: Recent error records
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 errors:  { type: array, items: { type: object } }
+ *                 count:   { type: integer }
+ *                 message: { type: string }
+ *       400: { description: service parameter is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.get('/api/seller/:sellerId/template-listings/api-usage-errors', requireAuth, async (req, res) => {
   try {
     const { sellerId } = req.params;
     const { service, limit = 50 } = req.query;
-    
+
     if (!service) {
       return res.status(400).json({
         success: false,
         message: 'Service parameter is required'
       });
     }
-    
+
     const errors = await getRecentErrors(service, parseInt(limit));
-    
+
     res.json({
       success: true,
       errors,
@@ -4366,23 +8687,60 @@ router.get('/api/seller/:sellerId/template-listings/api-usage-errors', requireAu
 });
 
 /**
- * GET /api/seller/:sellerId/template-listings/api-quota-status
- * Check quota status for a service
+ * @swagger
+ * /template-listings/api/seller/{sellerId}/template-listings/api-quota-status:
+ *   get:
+ *     tags: [Template Listings – Admin]
+ *     summary: Quota status for a service
+ *     description: Checks current period usage against the specified quota and returns a status of `ok`, `warning`, or `exceeded`.
+ *     parameters:
+ *       - in: path
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: service
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: quota
+ *         schema: { type: integer, default: 5000 }
+ *         description: Monthly quota limit to check against
+ *     responses:
+ *       200:
+ *         description: Quota status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:     { type: boolean }
+ *                 quotaStatus:
+ *                   type: object
+ *                   properties:
+ *                     status:      { type: string, enum: [ok, warning, exceeded] }
+ *                     percentUsed: { type: number }
+ *                     used:        { type: integer }
+ *                     limit:       { type: integer }
+ *                 message: { type: string }
+ *       400: { description: service parameter is required }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.get('/api/seller/:sellerId/template-listings/api-quota-status', requireAuth, async (req, res) => {
   try {
     const { sellerId } = req.params;
     const { service, quota = 5000 } = req.query;
-    
+
     if (!service) {
       return res.status(400).json({
         success: false,
         message: 'Service parameter is required'
       });
     }
-    
+
     const status = await checkQuotaStatus(service, parseInt(quota));
-    
+
     res.json({
       success: true,
       quotaStatus: status,
@@ -4398,13 +8756,35 @@ router.get('/api/seller/:sellerId/template-listings/api-quota-status', requireAu
 });
 
 /**
- * GET /template-listings/cache-stats
- * Get ASIN cache statistics
+ * @swagger
+ * /template-listings/cache-stats:
+ *   get:
+ *     tags: [Template Listings – Admin]
+ *     summary: ASIN cache statistics
+ *     description: Returns NodeCache stats for the in-memory ASIN cache (hit rate, key count, enabled state).
+ *     responses:
+ *       200:
+ *         description: Cache statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 cache:
+ *                   type: object
+ *                   properties:
+ *                     enabled: { type: boolean }
+ *                     keys:    { type: integer, example: 42 }
+ *                     hitRate: { type: number, example: 78.5 }
+ *                 message: { type: string }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.get('/cache-stats', requireAuth, async (req, res) => {
   try {
     const stats = getAsinCacheStats();
-    
+
     res.json({
       success: true,
       cache: stats,
@@ -4420,13 +8800,29 @@ router.get('/cache-stats', requireAuth, async (req, res) => {
 });
 
 /**
- * POST /template-listings/cache-clear
- * Clear ASIN cache
+ * @swagger
+ * /template-listings/cache-clear:
+ *   post:
+ *     tags: [Template Listings – Admin]
+ *     summary: Clear the ASIN cache
+ *     description: Flushes the entire in-memory NodeCache for ASINs. Useful after updating ASIN data or troubleshooting stale results.
+ *     responses:
+ *       200:
+ *         description: Cache cleared
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string, example: ASIN cache cleared successfully }
+ *       401: { description: Unauthorized }
+ *       500: { description: Server error }
  */
 router.post('/cache-clear', requireAuth, async (req, res) => {
   try {
     clearAsinCache();
-    
+
     res.json({
       success: true,
       message: 'ASIN cache cleared successfully'
@@ -4448,7 +8844,7 @@ router.post('/cache-invalidate/:asin', requireAuth, async (req, res) => {
   try {
     const { asin } = req.params;
     const invalidated = invalidateAsinCache(asin);
-    
+
     res.json({
       success: true,
       invalidated,
@@ -4464,4 +8860,3 @@ router.post('/cache-invalidate/:asin', requireAuth, async (req, res) => {
 });
 
 export default router;
-

@@ -1,6 +1,8 @@
 import express from 'express';
 import ResolutionOption from '../models/ResolutionOption.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { resolutionOptionSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -18,6 +20,27 @@ async function ensureDefaultOptions() {
     );
 }
 
+/**
+ * @swagger
+ * /resolution-options:
+ *   get:
+ *     tags: [Resolution Options]
+ *     summary: List all resolution options
+ *     description: Seeds default options (Replace, Reorder) if absent, then returns all sorted by name.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Array of resolution options
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/ResolutionOption'
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, async (req, res) => {
     try {
         await ensureDefaultOptions();
@@ -29,14 +52,41 @@ router.get('/', requireAuth, async (req, res) => {
     }
 });
 
-router.post('/', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+/**
+ * @swagger
+ * /resolution-options:
+ *   post:
+ *     tags: [Resolution Options]
+ *     summary: Create a new resolution option
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Created option
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ResolutionOption'
+ *       400:
+ *         description: Missing name or duplicate
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/', requireAuth, requirePageAccess('Disputes'), validate(resolutionOptionSchema), async (req, res) => {
     try {
         const { name } = req.body;
-        if (!name || !name.trim()) {
-            return res.status(400).json({ error: 'Resolution option name is required' });
-        }
 
-        const option = new ResolutionOption({ name: name.trim() });
+        const option = new ResolutionOption({ name });
         await option.save();
         res.status(201).json(option);
     } catch (error) {
@@ -48,16 +98,51 @@ router.post('/', requireAuth, requirePageAccess('Disputes'), async (req, res) =>
     }
 });
 
-router.patch('/:id', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+/**
+ * @swagger
+ * /resolution-options/{id}:
+ *   patch:
+ *     tags: [Resolution Options]
+ *     summary: Rename a resolution option
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Updated option
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ResolutionOption'
+ *       400:
+ *         description: Missing name or duplicate
+ *       404:
+ *         description: Option not found
+ *       500:
+ *         description: Internal server error
+ */
+router.patch('/:id', requireAuth, requirePageAccess('Disputes'), validate(resolutionOptionSchema), async (req, res) => {
     try {
         const { name } = req.body;
-        if (!name || !name.trim()) {
-            return res.status(400).json({ error: 'Resolution option name is required' });
-        }
 
         const option = await ResolutionOption.findByIdAndUpdate(
             req.params.id,
-            { name: name.trim() },
+            { name },
             { new: true, runValidators: true }
         );
 
@@ -75,6 +160,28 @@ router.patch('/:id', requireAuth, requirePageAccess('Disputes'), async (req, res
     }
 });
 
+/**
+ * @swagger
+ * /resolution-options/{id}:
+ *   delete:
+ *     tags: [Resolution Options]
+ *     summary: Delete a resolution option
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Deleted successfully
+ *       404:
+ *         description: Option not found
+ *       500:
+ *         description: Internal server error
+ */
 router.delete('/:id', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
     try {
         const option = await ResolutionOption.findByIdAndDelete(req.params.id);

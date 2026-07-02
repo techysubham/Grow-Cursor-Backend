@@ -3,6 +3,7 @@ const router = express.Router();
 import { requireAuth } from '../middleware/auth.js';
 import TemplateOverride from '../models/TemplateOverride.js';
 import ListingTemplate from '../models/ListingTemplate.js';
+import SellerPricingConfig from '../models/SellerPricingConfig.js';
 import { 
   getEffectiveTemplate, 
   mergeTemplate, 
@@ -15,15 +16,47 @@ import {
  * Get count of sellers who have overridden a template
  * GET /api/template-overrides/:templateId/count
  */
+/**
+ * @swagger
+ * /template-overrides/{templateId}/count:
+ *   get:
+ *     tags: [Template Overrides]
+ *     summary: Count sellers who have customised a template
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Count of sellers with any override or pricing config
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 count:      { type: integer }
+ *                 templateId: { type: string }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/:templateId/count', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params;
-    
-    const count = await TemplateOverride.countDocuments({
-      baseTemplateId: templateId
-    });
-    
-    res.json({ count, templateId });
+
+    const [overrides, pricingConfigs] = await Promise.all([
+      TemplateOverride.find({ baseTemplateId: templateId }).select('sellerId').lean(),
+      SellerPricingConfig.find({ templateId }).select('sellerId').lean()
+    ]);
+
+    const sellerSet = new Set([
+      ...overrides.map(o => o.sellerId.toString()),
+      ...pricingConfigs.map(p => p.sellerId.toString())
+    ]);
+
+    res.json({ count: sellerSet.size, templateId });
   } catch (error) {
     console.error('Error counting overrides:', error);
     res.status(500).json({ error: error.message });
@@ -33,6 +66,31 @@ router.get('/:templateId/count', requireAuth, async (req, res) => {
 /**
  * Get effective template for seller (base + overrides merged)
  * GET /api/template-overrides/:templateId/effective?sellerId=xxx
+ */
+/**
+ * @swagger
+ * /template-overrides/{templateId}/effective:
+ *   get:
+ *     tags: [Template Overrides]
+ *     summary: Get the merged (base + seller override) template
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Effective template with seller overrides applied
+ *       400:
+ *         description: sellerId is required
+ *       500:
+ *         description: Internal server error
  */
 router.get('/:templateId/effective', requireAuth, async (req, res) => {
   try {
@@ -54,6 +112,93 @@ router.get('/:templateId/effective', requireAuth, async (req, res) => {
 /**
  * Get seller's override for a template (if exists)
  * GET /api/template-overrides/:templateId/override?sellerId=xxx
+ */
+/**
+ * @swagger
+ * /template-overrides/{templateId}/override:
+ *   get:
+ *     tags: [Template Overrides]
+ *     summary: Get a seller's override document for a template
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Override document or null if none exists
+ *         content:
+ *           application/json:
+ *             schema:
+ *               oneOf:
+ *                 - $ref: '#/components/schemas/TemplateOverride'
+ *                 - nullable: true
+ *       400:
+ *         description: sellerId is required
+ *       500:
+ *         description: Internal server error
+ *   put:
+ *     tags: [Template Overrides]
+ *     summary: Create or replace a seller's full override
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sellerId, overrides]
+ *             properties:
+ *               sellerId:  { type: string }
+ *               overrides: { type: object, description: Override data for each section }
+ *     responses:
+ *       200:
+ *         description: Saved override document
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/TemplateOverride'
+ *       400:
+ *         description: Missing sellerId or overrides
+ *       404:
+ *         description: Base template not found
+ *       500:
+ *         description: Internal server error
+ *   delete:
+ *     tags: [Template Overrides]
+ *     summary: Delete a seller's full override (revert to base template)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Override deleted
+ *       400:
+ *         description: sellerId is required
+ *       404:
+ *         description: Override not found
+ *       500:
+ *         description: Internal server error
  */
 router.get('/:templateId/override', requireAuth, async (req, res) => {
   try {
@@ -79,6 +224,37 @@ router.get('/:templateId/override', requireAuth, async (req, res) => {
 /**
  * Check if seller has override for template
  * GET /api/template-overrides/:templateId/has-override?sellerId=xxx
+ */
+/**
+ * @swagger
+ * /template-overrides/{templateId}/has-override:
+ *   get:
+ *     tags: [Template Overrides]
+ *     summary: Check whether a seller has any override for a template
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Boolean flag
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 hasOverride: { type: boolean }
+ *       400:
+ *         description: sellerId is required
+ *       500:
+ *         description: Internal server error
  */
 router.get('/:templateId/has-override', requireAuth, async (req, res) => {
   try {
@@ -159,6 +335,78 @@ router.put('/:templateId/override', requireAuth, async (req, res) => {
 /**
  * Partially update specific override section
  * PATCH /api/template-overrides/:templateId/override/:section
+ */
+/**
+ * @swagger
+ * /template-overrides/{templateId}/override/{section}:
+ *   patch:
+ *     tags: [Template Overrides]
+ *     summary: Update a single section of a seller's override
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: section
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [customColumns, asinAutomation, pricingConfig, coreFieldDefaults, customActionField]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sellerId, data]
+ *             properties:
+ *               sellerId: { type: string }
+ *               data:     { type: object }
+ *     responses:
+ *       200:
+ *         description: Updated override document
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/TemplateOverride'
+ *       400:
+ *         description: Missing sellerId/data or invalid section
+ *       404:
+ *         description: Base template not found
+ *       500:
+ *         description: Internal server error
+ *   delete:
+ *     tags: [Template Overrides]
+ *     summary: Reset a single override section back to base template
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: templateId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: section
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [customColumns, asinAutomation, pricingConfig, coreFieldDefaults, customActionField]
+ *       - in: query
+ *         name: sellerId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated override or deletion message if all sections cleared
+ *       400:
+ *         description: Missing sellerId or invalid section
+ *       404:
+ *         description: Override not found
+ *       500:
+ *         description: Internal server error
  */
 router.patch('/:templateId/override/:section', requireAuth, async (req, res) => {
   try {

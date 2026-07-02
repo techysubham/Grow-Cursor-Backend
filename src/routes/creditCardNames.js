@@ -1,9 +1,31 @@
 import express from 'express';
 import CreditCardName from '../models/CreditCardName.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { creditCardNameSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
+/**
+ * @swagger
+ * /credit-card-names:
+ *   get:
+ *     tags: [Credit Card Names]
+ *     summary: List all credit card names
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Sorted array of credit card names
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/CreditCardName'
+ *       500:
+ *         description: Internal server error
+ */
 // Get all credit card names
 router.get('/', requireAuth, async (req, res) => {
     try {
@@ -15,15 +37,42 @@ router.get('/', requireAuth, async (req, res) => {
     }
 });
 
+/**
+ * @swagger
+ * /credit-card-names:
+ *   post:
+ *     tags: [Credit Card Names]
+ *     summary: Create a new credit card name
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Created credit card name
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/CreditCardName'
+ *       400:
+ *         description: Missing name or duplicate
+ *       500:
+ *         description: Internal server error
+ */
 // Create a new credit card name
-router.post('/', requireAuth, requirePageAccess('CreditCardNames'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('CreditCardNames'), validate(creditCardNameSchema), async (req, res) => {
     try {
         const { name } = req.body;
-        if (!name || !name.trim()) {
-            return res.status(400).json({ error: 'Card name is required' });
-        }
 
-        const card = new CreditCardName({ name: name.trim() });
+        const card = new CreditCardName({ name });
         await card.save();
         res.status(201).json(card);
     } catch (error) {
@@ -35,6 +84,28 @@ router.post('/', requireAuth, requirePageAccess('CreditCardNames'), async (req, 
     }
 });
 
+/**
+ * @swagger
+ * /credit-card-names/{id}:
+ *   delete:
+ *     tags: [Credit Card Names]
+ *     summary: Delete a credit card name
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Deleted successfully
+ *       404:
+ *         description: Credit card name not found
+ *       500:
+ *         description: Internal server error
+ */
 // Delete a credit card name
 router.delete('/:id', requireAuth, requirePageAccess('CreditCardNames'), async (req, res) => {
     try {

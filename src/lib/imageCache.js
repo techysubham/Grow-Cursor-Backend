@@ -19,6 +19,7 @@ class ImageCache {
     this.ttl = 3600000; // 1 hour in milliseconds (60 * 60 * 1000)
     this.hits = 0;
     this.misses = 0;
+    this.cleanupTimer = null;
   }
 
   /**
@@ -88,7 +89,11 @@ class ImageCache {
    * Runs every 10 minutes
    */
   startAutoCleanup() {
-    setInterval(() => {
+    if (this.cleanupTimer) {
+      return;
+    }
+
+    this.cleanupTimer = setInterval(() => {
       const now = Date.now();
       let expiredCount = 0;
       

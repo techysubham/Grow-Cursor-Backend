@@ -2,45 +2,60 @@ import express from 'express';
 import { validate } from '../utils/validate.js';
 import { createIdeaSchema, addIdeaCommentSchema } from '../schemas/index.js';
 import Idea from '../models/Idea.js';
+import { parsePagination, paginateQuery } from '../utils/paginate.js';
+import { requireAuth } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Get all ideas/tickets with pagination and filters
-// PUBLIC ROUTE - No authentication required
+/**
+ * @swagger
+ * tags:
+ *   name: Ideas
+ *   description: Internal idea and ticket tracking
+ */
+
+router.use(requireAuth);
+
+/**
+ * @swagger
+ * /ideas:
+ *   get:
+ *     tags: [Ideas]
+ *     summary: List all ideas with pagination and filters
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: status, schema: { type: string, enum: [open, in_progress, completed, rejected] } }
+ *       - { in: query, name: priority, schema: { type: string, enum: [low, medium, high] } }
+ *       - { in: query, name: type, schema: { type: string } }
+ *       - { in: query, name: sortBy, schema: { type: string, default: createdAt } }
+ *       - { in: query, name: sortOrder, schema: { type: string, enum: [asc, desc], default: desc } }
+ *       - { in: query, name: page, schema: { type: integer, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 20 } }
+ *     responses:
+ *       200: { description: Paginated list of ideas }
+ *       401: { description: Unauthorized }
+ */
 router.get('/', async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 50, 
-      status, 
-      priority, 
-      type,
-      sortBy = 'createdAt',
-      sortOrder = 'desc'
-    } = req.query;
+    const { status, priority, type, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
 
     const query = {};
     if (status) query.status = status;
     if (priority) query.priority = priority;
     if (type) query.type = type;
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const sortOptions = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+    const { page, limit, skip } = parsePagination(req.query, { defaultLimit: 50 });
+    const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
 
-    const ideas = await Idea.find(query)
-      .sort(sortOptions)
-      .limit(parseInt(limit))
-      .skip(skip)
-      .lean();
-
-    const total = await Idea.countDocuments(query);
+    const { data: ideas, pagination } = await paginateQuery(Idea, query, { page, limit, skip, sort });
 
     res.json({
       ideas,
-      total,
-      page: parseInt(page),
-      totalPages: Math.ceil(total / parseInt(limit)),
-      limit: parseInt(limit)
+      total: pagination.total,
+      page: pagination.page,
+      totalPages: pagination.totalPages,
+      limit: pagination.limit
     });
   } catch (err) {
     console.error('Error fetching ideas:', err);
@@ -50,6 +65,21 @@ router.get('/', async (req, res) => {
 
 // Get single idea by ID
 // PUBLIC ROUTE
+/**
+ * @swagger
+ * /ideas/{id}:
+ *   get:
+ *     tags: [Ideas]
+ *     summary: Get a single idea by ID
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Idea object }
+ *       404: { description: Idea not found }
+ *       401: { description: Unauthorized }
+ */
 router.get('/:id', async (req, res) => {
   try {
     const idea = await Idea.findById(req.params.id).lean();
@@ -64,6 +94,32 @@ router.get('/:id', async (req, res) => {
 
 // Create new idea/ticket
 // PUBLIC ROUTE - Anyone can submit
+/**
+ * @swagger
+ * /ideas:
+ *   post:
+ *     tags: [Ideas]
+ *     summary: Create a new idea or ticket
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [title]
+ *             properties:
+ *               title: { type: string }
+ *               description: { type: string }
+ *               type: { type: string }
+ *               priority: { type: string, enum: [low, medium, high] }
+ *               submittedBy: { type: string }
+ *     responses:
+ *       201: { description: Created idea }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ */
 router.post('/', validate(createIdeaSchema), async (req, res) => {
   try {
     const { title, description, type, priority, createdBy, completeByDate } = req.body;
@@ -87,6 +143,34 @@ router.post('/', validate(createIdeaSchema), async (req, res) => {
 
 // Update idea (status, priority, assignee, etc.)
 // PUBLIC ROUTE - But you might want to restrict this later
+/**
+ * @swagger
+ * /ideas/{id}:
+ *   patch:
+ *     tags: [Ideas]
+ *     summary: Update idea fields
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               status: { type: string, enum: [open, in_progress, completed, rejected] }
+ *               priority: { type: string, enum: [low, medium, high] }
+ *               assignedTo: { type: string }
+ *               pickedUpBy: { type: string, nullable: true }
+ *               completeByDate: { type: string, format: date }
+ *               notes: { type: string }
+ *               resolvedBy: { type: string }
+ *     responses:
+ *       200: { description: Updated idea }
+ *       404: { description: Idea not found }
+ *       401: { description: Unauthorized }
+ */
 router.patch('/:id', async (req, res) => {
   try {
     const { status, priority, assignedTo, pickedUpBy, resolvedBy, completeByDate, notes } = req.body;
@@ -128,6 +212,31 @@ router.patch('/:id', async (req, res) => {
 
 // Add comment to an idea
 // PUBLIC ROUTE
+/**
+ * @swagger
+ * /ideas/{id}/comments:
+ *   post:
+ *     tags: [Ideas]
+ *     summary: Add a comment to an idea
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [text, commentedBy]
+ *             properties:
+ *               text: { type: string }
+ *               commentedBy: { type: string }
+ *     responses:
+ *       200: { description: Updated idea with new comment }
+ *       404: { description: Idea not found }
+ *       401: { description: Unauthorized }
+ */
 router.post('/:id/comments', validate(addIdeaCommentSchema), async (req, res) => {
   try {
     const { text, commentedBy } = req.body;
@@ -156,6 +265,21 @@ router.post('/:id/comments', validate(addIdeaCommentSchema), async (req, res) =>
 
 // Delete idea
 // PUBLIC ROUTE - But you might want to restrict this to admins only
+/**
+ * @swagger
+ * /ideas/{id}:
+ *   delete:
+ *     tags: [Ideas]
+ *     summary: Delete an idea
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Deletion confirmation }
+ *       404: { description: Idea not found }
+ *       401: { description: Unauthorized }
+ */
 router.delete('/:id', async (req, res) => {
   try {
     const idea = await Idea.findByIdAndDelete(req.params.id);
@@ -170,6 +294,18 @@ router.delete('/:id', async (req, res) => {
 
 // Get statistics
 // PUBLIC ROUTE
+/**
+ * @swagger
+ * /ideas/stats/summary:
+ *   get:
+ *     tags: [Ideas]
+ *     summary: Get idea board summary statistics
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200: { description: Counts by status and priority }
+ *       401: { description: Unauthorized }
+ */
 router.get('/stats/summary', async (req, res) => {
   try {
     const [total, open, inProgress, completed, byPriority] = await Promise.all([

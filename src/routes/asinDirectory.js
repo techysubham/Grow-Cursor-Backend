@@ -3,7 +3,15 @@ import mongoose from 'mongoose';
 import AsinDirectory from '../models/AsinDirectory.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import { requireAuth, requireAuthSSE } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import {
+  bulkAddAsinsSchema,
+  csvImportAsinsSchema,
+  updateAsinSchema,
+  bulkDeleteAsinsSchema,
+} from '../schemas/index.js';
 import { fetchAmazonData } from '../utils/asinAutofill.js';
+import { parsePagination } from '../utils/paginate.js';
 
 // Scrape a batch of ASINs in parallel (max 5 at a time) and return enrichment map
 // onAsinDone(completedSoFar, total) is called as each individual ASIN settles (optional)
@@ -35,10 +43,74 @@ async function scrapeAsinsBatched(asinList, region = 'US', batchSize = 5, onAsin
 const router = express.Router();
 
 // Get all ASINs with pagination and search
+/**
+ * @swagger
+ * /asin-directory:
+ *   get:
+ *     tags: [ASIN Directory]
+ *     summary: List ASINs with pagination, search, and filtering
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 25 }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Search ASIN code or title
+ *       - in: query
+ *         name: sortBy
+ *         schema: { type: string, default: -addedAt }
+ *       - in: query
+ *         name: listProductId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: rangeId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: region
+ *         schema: { type: string, example: US }
+ *       - in: query
+ *         name: addedByUserId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: priceMin
+ *         schema: { type: number }
+ *       - in: query
+ *         name: priceMax
+ *         schema: { type: number }
+ *       - in: query
+ *         name: showMoved
+ *         schema: { type: boolean }
+ *         description: Include ASINs already moved to a list (default false)
+ *       - in: query
+ *         name: movedAfter
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: movedBefore
+ *         schema: { type: string, format: date }
+ *     responses:
+ *       200:
+ *         description: Paginated ASIN list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 asins:      { type: array, items: { $ref: '#/components/schemas/AsinDirectoryEntry' } }
+ *                 total:      { type: integer }
+ *                 page:       { type: integer }
+ *                 totalPages: { type: integer }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 25;
+    const { page, limit, skip } = parsePagination(req.query, { defaultLimit: 25, maxLimit: 500 });
     const search = req.query.search || '';
     const sortBy = req.query.sortBy || '-addedAt'; // Default: newest first
     const listProductId = req.query.listProductId || '';
@@ -46,8 +118,6 @@ router.get('/', requireAuth, async (req, res) => {
     const priceMin = req.query.priceMin !== undefined && req.query.priceMin !== '' ? parseFloat(req.query.priceMin) : null;
     const priceMax = req.query.priceMax !== undefined && req.query.priceMax !== '' ? parseFloat(req.query.priceMax) : null;
     const addedByUserId = req.query.addedByUserId || '';
-
-    const skip = (page - 1) * limit;
 
     // Build query
     let query = {};
@@ -130,6 +200,34 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Get multiple ASINs by exact ASIN list (used by Proof Read flow)
+/**
+ * @swagger
+ * /asin-directory/by-asins:
+ *   get:
+ *     tags: [ASIN Directory]
+ *     summary: Fetch ASIN documents by comma-separated ASIN codes
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: asins
+ *         required: true
+ *         schema: { type: string }
+ *         description: Comma-separated list of ASIN codes
+ *     responses:
+ *       200:
+ *         description: Array of matching ASIN documents
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/AsinDirectoryEntry'
+ *       400:
+ *         description: asins query param required
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/by-asins', requireAuth, async (req, res) => {
   try {
     const { asins } = req.query; // comma-separated ASIN strings
@@ -144,6 +242,40 @@ router.get('/by-asins', requireAuth, async (req, res) => {
 });
 
 // Get statistics
+/**
+ * @swagger
+ * /asin-directory/stats:
+ *   get:
+ *     tags: [ASIN Directory]
+ *     summary: Get ASIN directory statistics (total, unassigned, by period)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: addedByUserId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Statistics object
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 total:      { type: integer }
+ *                 unassigned: { type: integer }
+ *                 assigned:   { type: integer }
+ *                 recentlyAdded:
+ *                   type: object
+ *                   properties:
+ *                     today:     { type: integer }
+ *                     thisWeek:  { type: integer }
+ *                     thisMonth: { type: integer }
+ *       400:
+ *         description: Invalid addedByUserId
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/stats', requireAuth, async (req, res) => {
   try {
     const addedByUserId = req.query.addedByUserId || '';
@@ -185,6 +317,31 @@ router.get('/stats', requireAuth, async (req, res) => {
 });
 
 // Bulk add ASINs manually — streaming SSE version (GET, token via query param)
+/**
+ * @swagger
+ * /asin-directory/bulk-manual-stream:
+ *   get:
+ *     tags: [ASIN Directory]
+ *     summary: Bulk-add ASINs with real-time SSE progress (auth via query token)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: asins
+ *         required: true
+ *         schema: { type: string }
+ *         description: Comma-separated ASIN codes
+ *       - in: query
+ *         name: region
+ *         schema: { type: string, default: US }
+ *     responses:
+ *       200:
+ *         description: Server-sent event stream — events are `progress` and `complete`
+ *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
+ */
 router.get('/bulk-manual-stream', requireAuthSSE, async (req, res) => {
   const asinsParam = req.query.asins || '';
   const region = req.query.region || 'US';
@@ -267,13 +424,43 @@ router.get('/bulk-manual-stream', requireAuthSSE, async (req, res) => {
 });
 
 // Bulk add ASINs manually
-router.post('/bulk-manual', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /asin-directory/bulk-manual:
+ *   post:
+ *     tags: [ASIN Directory]
+ *     summary: Bulk-add ASINs with Amazon enrichment (synchronous)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [asins]
+ *             properties:
+ *               asins:  { type: array, items: { type: string }, description: List of ASIN codes }
+ *               region: { type: string, default: US }
+ *     responses:
+ *       200:
+ *         description: Bulk add results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 added:      { type: integer }
+ *                 duplicates: { type: integer }
+ *                 errors:     { type: array, items: { type: object } }
+ *       400:
+ *         description: ASINs array is required
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/bulk-manual', requireAuth, validate(bulkAddAsinsSchema), async (req, res) => {
   try {
     const { asins, region = 'US' } = req.body;
-
-    if (!asins || !Array.isArray(asins)) {
-      return res.status(400).json({ error: 'ASINs array is required' });
-    }
 
     const results = {
       added: 0,
@@ -351,13 +538,43 @@ router.post('/bulk-manual', requireAuth, async (req, res) => {
 });
 
 // Bulk add from CSV
-router.post('/bulk-csv', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /asin-directory/bulk-csv:
+ *   post:
+ *     tags: [ASIN Directory]
+ *     summary: Import ASINs from raw CSV text
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [csvData]
+ *             properties:
+ *               csvData: { type: string, description: Raw CSV content with optional ASIN column header }
+ *               region:  { type: string, default: US }
+ *     responses:
+ *       200:
+ *         description: Import results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 added:      { type: integer }
+ *                 duplicates: { type: integer }
+ *                 errors:     { type: array, items: { type: object } }
+ *       400:
+ *         description: CSV data is required
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/bulk-csv', requireAuth, validate(csvImportAsinsSchema), async (req, res) => {
   try {
     const { csvData, region = 'US' } = req.body;
-
-    if (!csvData) {
-      return res.status(400).json({ error: 'CSV data is required' });
-    }
 
     const results = {
       added: 0,
@@ -458,6 +675,28 @@ router.post('/bulk-csv', requireAuth, async (req, res) => {
 });
 
 // Export ASINs to CSV
+/**
+ * @swagger
+ * /asin-directory/export-csv:
+ *   get:
+ *     tags: [ASIN Directory]
+ *     summary: Export ASIN list as a downloadable CSV file
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: CSV file download
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/export-csv', requireAuth, async (req, res) => {
   try {
     const search = req.query.search || '';
@@ -486,7 +725,60 @@ router.get('/export-csv', requireAuth, async (req, res) => {
 });
 
 // Manually update price and/or description for a single ASIN
-router.patch('/:id', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /asin-directory/{id}:
+ *   patch:
+ *     tags: [ASIN Directory]
+ *     summary: Manually update an ASIN's price or description
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               price:       { type: string }
+ *               description: { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated ASIN document
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AsinDirectoryEntry'
+ *       400:
+ *         description: At least one field required
+ *       404:
+ *         description: ASIN not found
+ *       500:
+ *         description: Internal server error
+ *   delete:
+ *     tags: [ASIN Directory]
+ *     summary: Delete a single ASIN from the directory
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deletion confirmed
+ *       404:
+ *         description: ASIN not found
+ *       500:
+ *         description: Internal server error
+ */
+router.patch('/:id', requireAuth, validate(updateAsinSchema), async (req, res) => {
   try {
     const { id } = req.params;
     const { price, description } = req.body;
@@ -536,13 +828,41 @@ router.delete('/:id', requireAuth, async (req, res) => {
 });
 
 // Bulk delete ASINs
-router.post('/bulk-delete', requireAuth, async (req, res) => {
+/**
+ * @swagger
+ * /asin-directory/bulk-delete:
+ *   post:
+ *     tags: [ASIN Directory]
+ *     summary: Bulk-delete ASINs by their MongoDB IDs
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [ids]
+ *             properties:
+ *               ids: { type: array, items: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Deletion results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:      { type: string }
+ *                 deletedCount: { type: integer }
+ *       400:
+ *         description: IDs array is required
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/bulk-delete', requireAuth, validate(bulkDeleteAsinsSchema), async (req, res) => {
   try {
     const { ids } = req.body;
-
-    if (!ids || !Array.isArray(ids)) {
-      return res.status(400).json({ error: 'IDs array is required' });
-    }
 
     const result = await AsinDirectory.deleteMany({ _id: { $in: ids } });
 
