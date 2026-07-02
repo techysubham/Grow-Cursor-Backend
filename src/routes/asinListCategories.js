@@ -4,6 +4,8 @@ import AsinListRange from '../models/AsinListRange.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import AsinDirectory from '../models/AsinDirectory.js';
 import { requireAuth } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { createAsinListCategorySchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -66,14 +68,11 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Create a new category
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, validate(createAsinListCategorySchema), async (req, res) => {
   try {
     const { name } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Category name is required' });
-    }
 
-    const category = await AsinListCategory.create({ name: name.trim() });
+    const category = await AsinListCategory.create({ name });
     res.status(201).json(category);
   } catch (error) {
     if (error.code === 11000) {

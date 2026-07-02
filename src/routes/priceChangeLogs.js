@@ -2,6 +2,8 @@ import express from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import PriceChangeLog from '../models/PriceChangeLog.js';
 import { parsePagination } from '../utils/paginate.js';
+import { validate } from '../utils/validate.js';
+import { priceChangeLogsQuerySchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -67,7 +69,7 @@ const router = express.Router();
  *       500:
  *         description: Internal server error
  */
-router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess('PriceChangeHistory'), validate(priceChangeLogsQuerySchema, 'query'), async (req, res) => {
   try {
     const {
       legacyItemId,

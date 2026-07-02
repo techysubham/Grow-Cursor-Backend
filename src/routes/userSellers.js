@@ -2,6 +2,13 @@ import express from 'express';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import UserDailyQuantity from '../models/UserDailyQuantity.js';
+import { validate } from '../utils/validate.js';
+import {
+    createUserSellerAssignmentSchema,
+    idParamsSchema,
+    updatePerformanceRemarksSchema,
+    updateUserSellerTargetSchema
+} from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -89,7 +96,7 @@ router.get('/assignments', requireAuth, requirePageAccess('UserSellerAssignments
  *         description: Internal server error
  */
 // Assign seller to user
-router.post('/assignments', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
+router.post('/assignments', requireAuth, requirePageAccess('UserSellerAssignments'), validate(createUserSellerAssignmentSchema), async (req, res) => {
     try {
         const { userId, sellerId, dailyTarget } = req.body;
 
@@ -162,31 +169,38 @@ router.post('/assignments', requireAuth, requirePageAccess('UserSellerAssignment
  *         description: Internal server error
  */
 // Update assignment daily target
-router.patch('/assignments/:id/target', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { dailyTarget } = req.body;
+router.patch(
+    '/assignments/:id/target',
+    requireAuth,
+    requirePageAccess('UserSellerAssignments'),
+    validate(idParamsSchema, 'params'),
+    validate(updateUserSellerTargetSchema),
+    async (req, res) => {
+        try {
+            const { id } = req.params;
+            const { dailyTarget } = req.body;
 
-        if (dailyTarget === undefined || isNaN(dailyTarget)) {
-            return res.status(400).json({ error: 'Valid daily target is required' });
+            if (dailyTarget === undefined || isNaN(dailyTarget)) {
+                return res.status(400).json({ error: 'Valid daily target is required' });
+            }
+
+            const assignment = await UserSellerAssignment.findByIdAndUpdate(
+                id,
+                { dailyTarget: Number(dailyTarget) },
+                { new: true }
+            );
+
+            if (!assignment) {
+                return res.status(404).json({ error: 'Assignment not found' });
+            }
+
+            res.json({ message: 'Target updated successfully', assignment });
+        } catch (err) {
+            console.error('Error updating assignment target:', err);
+            res.status(500).json({ error: 'Server error updating assignment target' });
         }
-
-        const assignment = await UserSellerAssignment.findByIdAndUpdate(
-            id,
-            { dailyTarget: Number(dailyTarget) },
-            { new: true }
-        );
-
-        if (!assignment) {
-            return res.status(404).json({ error: 'Assignment not found' });
-        }
-
-        res.json({ message: 'Target updated successfully', assignment });
-    } catch (err) {
-        console.error('Error updating assignment target:', err);
-        res.status(500).json({ error: 'Server error updating assignment target' });
     }
-});
+);
 
 /**
  * @swagger
@@ -211,7 +225,7 @@ router.patch('/assignments/:id/target', requireAuth, requirePageAccess('UserSell
  *         description: Internal server error
  */
 // Unassign seller
-router.delete('/assignments/:id', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
+router.delete('/assignments/:id', requireAuth, requirePageAccess('UserSellerAssignments'), validate(idParamsSchema, 'params'), async (req, res) => {
     try {
         const { id } = req.params;
         const deleted = await UserSellerAssignment.findByIdAndDelete(id);
@@ -327,31 +341,38 @@ router.get('/performance', requireAuth, async (req, res) => {
  *         description: Internal server error
  */
 // Update remarks
-router.patch('/performance/:id/remarks', requireAuth, requirePageAccess('UserSellerAssignments'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { remarks } = req.body;
+router.patch(
+    '/performance/:id/remarks',
+    requireAuth,
+    requirePageAccess('UserSellerAssignments'),
+    validate(idParamsSchema, 'params'),
+    validate(updatePerformanceRemarksSchema),
+    async (req, res) => {
+        try {
+            const { id } = req.params;
+            const { remarks } = req.body;
 
-        const validRemarks = ['Good', 'Average', 'Need for improvement', ''];
-        if (!validRemarks.includes(remarks)) {
-            return res.status(400).json({ error: 'Invalid remark value' });
+            const validRemarks = ['Good', 'Average', 'Need for improvement', ''];
+            if (!validRemarks.includes(remarks)) {
+                return res.status(400).json({ error: 'Invalid remark value' });
+            }
+
+            const record = await UserDailyQuantity.findByIdAndUpdate(
+                id,
+                { remarks },
+                { new: true }
+            );
+
+            if (!record) {
+                return res.status(404).json({ error: 'Performance record not found' });
+            }
+
+            res.json({ message: 'Remarks updated successfully', record });
+        } catch (err) {
+            console.error('Error updating remarks:', err);
+            res.status(500).json({ error: 'Server error updating remarks' });
         }
-
-        const record = await UserDailyQuantity.findByIdAndUpdate(
-            id,
-            { remarks },
-            { new: true }
-        );
-
-        if (!record) {
-            return res.status(404).json({ error: 'Performance record not found' });
-        }
-
-        res.json({ message: 'Remarks updated successfully', record });
-    } catch (err) {
-        console.error('Error updating remarks:', err);
-        res.status(500).json({ error: 'Server error updating remarks' });
     }
-});
+);
 
 export default router;

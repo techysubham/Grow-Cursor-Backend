@@ -1,6 +1,8 @@
 import express from 'express';
 import CreditCardName from '../models/CreditCardName.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { creditCardNameSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -66,14 +68,11 @@ router.get('/', requireAuth, async (req, res) => {
  *         description: Internal server error
  */
 // Create a new credit card name
-router.post('/', requireAuth, requirePageAccess('CreditCardNames'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('CreditCardNames'), validate(creditCardNameSchema), async (req, res) => {
     try {
         const { name } = req.body;
-        if (!name || !name.trim()) {
-            return res.status(400).json({ error: 'Card name is required' });
-        }
 
-        const card = new CreditCardName({ name: name.trim() });
+        const card = new CreditCardName({ name });
         await card.save();
         res.status(201).json(card);
     } catch (error) {

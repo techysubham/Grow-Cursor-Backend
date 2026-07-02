@@ -1,6 +1,8 @@
 import express from 'express';
 import ResolutionOption from '../models/ResolutionOption.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { resolutionOptionSchema } from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -80,14 +82,11 @@ router.get('/', requireAuth, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-router.post('/', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('Disputes'), validate(resolutionOptionSchema), async (req, res) => {
     try {
         const { name } = req.body;
-        if (!name || !name.trim()) {
-            return res.status(400).json({ error: 'Resolution option name is required' });
-        }
 
-        const option = new ResolutionOption({ name: name.trim() });
+        const option = new ResolutionOption({ name });
         await option.save();
         res.status(201).json(option);
     } catch (error) {
@@ -137,16 +136,13 @@ router.post('/', requireAuth, requirePageAccess('Disputes'), async (req, res) =>
  *       500:
  *         description: Internal server error
  */
-router.patch('/:id', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+router.patch('/:id', requireAuth, requirePageAccess('Disputes'), validate(resolutionOptionSchema), async (req, res) => {
     try {
         const { name } = req.body;
-        if (!name || !name.trim()) {
-            return res.status(400).json({ error: 'Resolution option name is required' });
-        }
 
         const option = await ResolutionOption.findByIdAndUpdate(
             req.params.id,
-            { name: name.trim() },
+            { name },
             { new: true, runValidators: true }
         );
 

@@ -2,6 +2,13 @@ import express from 'express';
 import AsinListProduct from '../models/AsinListProduct.js';
 import AsinDirectory from '../models/AsinDirectory.js';
 import { requireAuth } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import {
+  createAsinListProductSchema,
+  renameAsinListProductSchema,
+  moveAsinsSchema,
+  copyProductsToRangeSchema,
+} from '../schemas/index.js';
 
 const router = express.Router();
 
@@ -88,20 +95,11 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // Create a new product under a range
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, validate(createAsinListProductSchema), async (req, res) => {
   try {
     const { name, rangeId, categoryId } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Product name is required' });
-    }
-    if (!rangeId) {
-      return res.status(400).json({ error: 'rangeId is required' });
-    }
-    if (!categoryId) {
-      return res.status(400).json({ error: 'categoryId is required' });
-    }
 
-    const product = await AsinListProduct.create({ name: name.trim(), rangeId, categoryId });
+    const product = await AsinListProduct.create({ name, rangeId, categoryId });
     res.status(201).json(product);
   } catch (error) {
     if (error.code === 11000) {
@@ -149,16 +147,9 @@ router.post('/', requireAuth, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-router.post('/move', requireAuth, async (req, res) => {
+router.post('/move', requireAuth, validate(moveAsinsSchema), async (req, res) => {
   try {
     const { asinIds, productId } = req.body;
-
-    if (!asinIds || !Array.isArray(asinIds) || asinIds.length === 0) {
-      return res.status(400).json({ error: 'asinIds array is required' });
-    }
-    if (!productId) {
-      return res.status(400).json({ error: 'productId is required' });
-    }
 
     // Verify product exists
     const product = await AsinListProduct.findById(productId).lean();
@@ -244,16 +235,13 @@ router.post('/move', requireAuth, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-router.put('/:id', requireAuth, async (req, res) => {
+router.put('/:id', requireAuth, validate(renameAsinListProductSchema), async (req, res) => {
   try {
     const { id } = req.params;
     const { name } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Product name is required' });
-    }
     const updated = await AsinListProduct.findByIdAndUpdate(
       id,
-      { name: name.trim() },
+      { name },
       { new: true, runValidators: true }
     );
     if (!updated) return res.status(404).json({ error: 'Product not found' });
@@ -309,12 +297,9 @@ router.put('/:id', requireAuth, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-router.post('/copy-to-range', requireAuth, async (req, res) => {
+router.post('/copy-to-range', requireAuth, validate(copyProductsToRangeSchema), async (req, res) => {
   try {
     const { productIds, targetRangeId, targetRangeIds } = req.body;
-    if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
-      return res.status(400).json({ error: 'productIds array is required' });
-    }
 
     // Support both singular (legacy) and plural form
     const rangeIds = targetRangeIds && targetRangeIds.length > 0

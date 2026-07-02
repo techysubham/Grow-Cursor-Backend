@@ -1,6 +1,8 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { validate } from '../utils/validate.js';
+import { sellerUploadLimitSchema, sellerUploadLimitCheckQuerySchema } from '../schemas/index.js';
 import SellerUploadLimit from '../models/SellerUploadLimit.js';
 import Seller from '../models/Seller.js';
 import { checkUploadLimit } from '../lib/ebayFeedUpload.js';
@@ -95,11 +97,8 @@ router.get('/', requireAuth, requirePageAccess('SellerUploadLimits'), async (req
 // ─── GET /seller-upload-limits/check ─────────────────────────────────────────
 // Lightweight check used by FeedUploadPage and SelectSellerPage.
 // Query params: sellerId, country
-router.get('/check', requireAuth, async (req, res) => {
+router.get('/check', requireAuth, validate(sellerUploadLimitCheckQuerySchema, 'query'), async (req, res) => {
     const { sellerId, country } = req.query;
-    if (!sellerId || !country) {
-        return res.status(400).json({ error: 'sellerId and country are required' });
-    }
     if (!mongoose.Types.ObjectId.isValid(sellerId)) {
         return res.status(400).json({ error: 'Invalid sellerId' });
     }
@@ -152,20 +151,11 @@ router.get('/check', requireAuth, async (req, res) => {
  */
 // ─── POST /seller-upload-limits ──────────────────────────────────────────────
 // Creates or updates a daily limit for a seller+country pair (upsert).
-router.post('/', requireAuth, requirePageAccess('SellerUploadLimits'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess('SellerUploadLimits'), validate(sellerUploadLimitSchema), async (req, res) => {
     const { sellerId, country, limit } = req.body;
 
-    if (!sellerId || !country || limit == null) {
-        return res.status(400).json({ error: 'sellerId, country, and limit are required' });
-    }
     if (!mongoose.Types.ObjectId.isValid(sellerId)) {
         return res.status(400).json({ error: 'Invalid sellerId' });
-    }
-    if (!['US', 'UK', 'AU', 'Canada'].includes(country)) {
-        return res.status(400).json({ error: 'country must be one of: US, UK, AU, Canada' });
-    }
-    if (typeof limit !== 'number' || limit < 1) {
-        return res.status(400).json({ error: 'limit must be a positive number' });
     }
 
     const sellerExists = await Seller.exists({ _id: sellerId });
